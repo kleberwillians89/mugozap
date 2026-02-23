@@ -1,0 +1,15 @@
+
+# Secrets
+.env
+**/.env
+**/.env.*
+!.env.example
+
+# Local DB / cache
+**/*.db
+**/__pycache__/
+**/*.pyc
+
+# Node
+mugo-zap/web/node_modules/
+

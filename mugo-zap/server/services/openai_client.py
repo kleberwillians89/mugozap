@@ -1,114 +1,51 @@
-from typing import Any, Dict, Optional
+# mugo-zap/server/services/openai_client.py
+import os
+from pathlib import Path
+from typing import Dict, Any
 
-from services.state import (
-    get_flow,
-    set_flow_state,
-    merge_flow_data,
-    clear_flow,
-    set_notes,
-    set_stage,
-)
+from dotenv import load_dotenv
 
-MENU_A = [
-    {"id": "mugo_automation", "title": "Automatizar processos"},
-    {"id": "mugo_site", "title": "Criar site / landing"},
-    {"id": "mugo_more", "title": "Mais opções"},
-]
+# carrega .env da raiz do repo (mugozap/.env)
+ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
+load_dotenv(ENV_PATH)
 
-MENU_B = [
-    {"id": "mugo_social", "title": "Social Media"},
-    {"id": "mugo_video", "title": "Vídeos / Avatar IA"},
-    {"id": "mugo_consult", "title": "Consultoria completa"},
-]
 
-CTA_BTNS = [
-    {"id": "cta_human", "title": "Falar com especialista"},
-    {"id": "cta_proposal", "title": "Receber proposta"},
-]
+def generate_reply(
+    wa_id: str,
+    user_message: str,
+    first_message_sent: bool,
+    name: str = "",
+    telefone: str = "",
+) -> Dict[str, Any]:
+    """
+    Função mínima e estável só pra NÃO quebrar o deploy.
+    Depois você evolui a IA aqui.
+    """
+    text = (user_message or "").strip().lower()
 
-def handle_mugo_flow(wa_id: str, user_text: str, choice_id: str = "") -> Optional[Dict[str, Any]]:
-    flow = get_flow(wa_id)
-    state = (flow.get("state") or "").strip()
-    data = flow.get("data") or {}
-    text = (user_text or "").strip()
-    cid = (choice_id or "").strip() or text
+    # heurísticas rápidas (mantém seu app.py funcionando)
+    if any(k in text for k in ["orçamento", "orcamento", "preço", "preco", "valor", "prazo", "contrato", "fechar"]):
+        return {
+            "reply": "Perfeito. Vou direcionar você agora para um dos nossos especialistas dar sequência estratégica ao seu projeto.",
+            "intent": "handoff",
+            "question_key": "none",
+            "handoff": True,
+            "handoff_summary": user_message[:180],
+            "next_intent": "handoff",
+            "lead_score": 90,
+            "lead_temperature": "quente",
+            "lead_theme": "indefinido",
+        }
 
-    # Reiniciar menu
-    if text.lower().strip() in ("menu", "inicio", "início"):
-        set_flow_state(wa_id, "mugo_menu_a")
-        return {"type": "buttons", "text": "Como você quer trabalhar com a Mugô hoje?", "buttons": MENU_A}
-
-    # Sem estado: começa
-    if not state:
-        set_flow_state(wa_id, "mugo_menu_a")
-        return {"type": "buttons", "text": "Como você quer trabalhar com a Mugô hoje?", "buttons": MENU_A}
-
-    if state == "mugo_menu_a":
-        if cid == "mugo_more":
-            set_flow_state(wa_id, "mugo_menu_b")
-            return {"type": "buttons", "text": "Perfeito. Escolhe uma opção:", "buttons": MENU_B}
-
-        merge_flow_data(wa_id, {"service_interest": cid})
-        set_flow_state(wa_id, "mugo_brief")
-        return {"type": "text", "text": "Em uma frase, o que você quer resolver agora?"}
-
-    if state == "mugo_menu_b":
-        merge_flow_data(wa_id, {"service_interest": cid})
-        set_flow_state(wa_id, "mugo_brief")
-        return {"type": "text", "text": "Em uma frase, o que você quer resolver agora?"}
-
-    if state == "mugo_brief":
-        if not text:
-            return {"type": "text", "text": "Me diz em uma frase o que você quer resolver agora."}
-
-        merge_flow_data(wa_id, {"briefing_text": text})
-        set_flow_state(wa_id, "mugo_cta")
-        return {"type": "buttons", "text": "Agora você prefere:", "buttons": CTA_BTNS}
-
-    if state == "mugo_cta":
-        if cid not in ("cta_human", "cta_proposal"):
-            return {"type": "buttons", "text": "Escolhe uma opção pra eu te encaminhar certo:", "buttons": CTA_BTNS}
-
-        merge_flow_data(wa_id, {"cta_choice": cid})
-        set_flow_state(wa_id, "mugo_name")
-        return {"type": "text", "text": "Antes de eu encaminhar, qual seu nome?"}
-
-    if state == "mugo_name":
-        if not text:
-            return {"type": "text", "text": "Qual seu nome? (só pra eu encaminhar certinho)"}
-
-        merge_flow_data(wa_id, {"lead_name": text})
-        final = get_flow(wa_id).get("data") or {}
-
-        service = final.get("service_interest") or ""
-        briefing = final.get("briefing_text") or ""
-        cta = final.get("cta_choice") or ""
-        lead_name = final.get("lead_name") or ""
-
-        cta_label = "Falar com especialista" if cta == "cta_human" else "Receber proposta"
-
-        notes = (
-            "NOVO LEAD MUGÔ\n"
-            f"Nome: {lead_name}\n"
-            f"WhatsApp: {wa_id}\n"
-            f"Serviço: {service}\n"
-            f"Objetivo: {briefing}\n"
-            f"CTA: {cta_label}\n"
-        ).strip()
-
-        try:
-            set_notes(wa_id, notes)
-        except Exception:
-            pass
-
-        try:
-            set_stage(wa_id, "Qualificado")
-        except Exception:
-            pass
-
-        # encerra flow e deixa o app.py seguir (handoff/IA/etc) como você quiser
-        clear_flow(wa_id)
-
-        return {"type": "text", "text": f"Perfeito, {lead_name}. Vou te encaminhar para o time agora."}
-
-    return None
+    # resposta padrão curta
+    return {
+        "reply": "Em uma frase: o que você quer destravar agora?",
+        "intent": "geral",
+        "question_key": "none",
+        "handoff": False,
+        "handoff_summary": "",
+        "next_intent": "next",
+        "lead_score": 10,
+        "lead_temperature": "frio",
+        "lead_theme": "indefinido",
+    }

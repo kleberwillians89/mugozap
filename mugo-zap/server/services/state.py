@@ -1,4 +1,3 @@
-# mugo-zap/server/services/state.py
 import os
 import json
 from datetime import datetime, timezone
@@ -9,7 +8,6 @@ import httpx
 SUPABASE_URL = (os.getenv("SUPABASE_URL") or "").strip().rstrip("/")
 SUPABASE_SERVICE_ROLE_KEY = (os.getenv("SUPABASE_SERVICE_ROLE_KEY") or "").strip()
 
-# Tabelas (ajustáveis por env)
 WA_USERS_TABLE = (os.getenv("WA_USERS_TABLE") or "whatsapp_users").strip()
 WA_MESSAGES_TABLE = (os.getenv("WA_MESSAGES_TABLE") or "whatsapp_messages").strip()
 WA_TASKS_TABLE = (os.getenv("WA_TASKS_TABLE") or "whatsapp_tasks").strip()
@@ -21,7 +19,6 @@ WA_TASKS_TABLE = (os.getenv("WA_TASKS_TABLE") or "whatsapp_tasks").strip()
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
-
 def _headers() -> Dict[str, str]:
     if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
         raise RuntimeError("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY")
@@ -30,7 +27,6 @@ def _headers() -> Dict[str, str]:
         "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
         "Content-Type": "application/json",
     }
-
 
 def _safe_json(v: Any, fallback: Any):
     try:
@@ -44,11 +40,9 @@ def _safe_json(v: Any, fallback: Any):
         pass
     return fallback
 
-
 def _get(url: str) -> httpx.Response:
     with httpx.Client(timeout=12) as client:
         return client.get(url, headers=_headers())
-
 
 def _post(url: str, payload: dict, prefer: str = "return=representation") -> httpx.Response:
     with httpx.Client(timeout=12) as client:
@@ -57,7 +51,6 @@ def _post(url: str, payload: dict, prefer: str = "return=representation") -> htt
             headers={**_headers(), "Prefer": prefer},
             data=json.dumps(payload),
         )
-
 
 def _patch(url: str, payload: dict, prefer: str = "return=representation") -> httpx.Response:
     with httpx.Client(timeout=12) as client:
@@ -72,13 +65,6 @@ def _patch(url: str, payload: dict, prefer: str = "return=representation") -> ht
 # USERS / CONTACTS
 # ============================================================
 def upsert_user(wa_id: str, name: str = "", telefone: str = "", **extra) -> Dict[str, Any]:
-    """
-    Cria/atualiza utilizador no Supabase (whatsapp_users).
-    Retorna um dict com (no mínimo):
-      - wa_id
-      - first_message_sent (bool)
-      - handoff_active (bool)
-    """
     wa_id = (wa_id or "").strip()
     if not wa_id:
         return {"wa_id": "", "first_message_sent": False, "handoff_active": False}
@@ -104,19 +90,21 @@ def upsert_user(wa_id: str, name: str = "", telefone: str = "", **extra) -> Dict
         "last_text",
         "last_at",
         "last_message",
-        # LEAD INTELLIGENCE (opcional)
+        # LEAD INTELLIGENCE
         "lead_score",
         "lead_temperature",
         "lead_theme",
         "lead_stage",
         "priority",
+        # ✅ FLOW
+        "flow_state",
+        "flow_data",
     ]:
         if k in extra and extra[k] is not None:
             payload[k] = extra[k]
 
     url = f"{SUPABASE_URL}/rest/v1/{WA_USERS_TABLE}?on_conflict=wa_id"
 
-    # UPSERT merge
     try:
         r = _post(url, payload, prefer="resolution=merge-duplicates,return=representation")
         if r.status_code in (200, 201):
@@ -133,25 +121,6 @@ def upsert_user(wa_id: str, name: str = "", telefone: str = "", **extra) -> Dict
     except Exception as e:
         return {"_error": str(e), **payload}
 
-    # fallback: GET (não alcança por causa do return acima, mas mantive seu padrão)
-    try:
-        g = _get(f"{SUPABASE_URL}/rest/v1/{WA_USERS_TABLE}?wa_id=eq.{wa_id}&select=*")
-        if g.status_code == 200:
-            rows = g.json() or []
-            if rows:
-                row = rows[0] or {}
-                return {
-                    "wa_id": row.get("wa_id") or wa_id,
-                    "first_message_sent": bool(row.get("first_message_sent") or False),
-                    "handoff_active": bool(row.get("handoff_active") or False),
-                    **row,
-                }
-    except Exception:
-        pass
-
-    return {"wa_id": wa_id, "first_message_sent": False, "handoff_active": False}
-
-
 def mark_first_message_sent(wa_id: str):
     wa_id = (wa_id or "").strip()
     if not wa_id:
@@ -159,17 +128,13 @@ def mark_first_message_sent(wa_id: str):
     upsert_user(wa_id, first_message_sent=True)
     return {"ok": True}
 
-
 def set_stage(wa_id: str, stage: str):
     return upsert_user(wa_id, stage=stage)
-
 
 def set_notes(wa_id: str, notes: str):
     return upsert_user(wa_id, notes=notes)
 
-
 def set_tags(wa_id: str, tags: Any):
-    # aceita list/str/dict -> salva como json/string
     t = tags
     if isinstance(tags, (list, dict)):
         t = tags
@@ -184,10 +149,8 @@ def set_tags(wa_id: str, tags: Any):
 def set_handoff_pending(wa_id: str, pending: bool):
     return upsert_user(wa_id, handoff_pending=bool(pending))
 
-
 def set_handoff_topic(wa_id: str, topic: str):
     return upsert_user(wa_id, handoff_topic=(topic or "").strip(), handoff_active=True)
-
 
 def clear_handoff(wa_id: str):
     return upsert_user(wa_id, handoff_active=False, handoff_pending=False, handoff_topic="")
@@ -197,17 +160,12 @@ def clear_handoff(wa_id: str):
 # LEAD INTELLIGENCE
 # ============================================================
 def update_lead_intelligence(wa_id: str, score: int, temperature: str, theme: str) -> Dict[str, Any]:
-    """
-    Atualiza score, temperatura, tema, estágio e prioridade no whatsapp_users.
-    Sem updated_at para evitar PGRST204 em tabelas sem coluna.
-    """
     wa_id = (wa_id or "").strip()
     if not wa_id:
         return {"ok": False, "detail": "missing wa_id"}
 
     score_i = int(score or 0)
 
-    # estágio + prioridade
     if score_i >= 70:
         lead_stage = "quente"
         priority = 3
@@ -224,13 +182,9 @@ def update_lead_intelligence(wa_id: str, score: int, temperature: str, theme: st
         "lead_theme": (theme or "indefinido"),
         "lead_stage": lead_stage,
         "priority": priority,
-        # opcional: jogar tema em tags (se você quiser)
-        # "tags": [theme] if theme and theme != "indefinido" else None,
     }
 
-    # remove keys com None
     payload = {k: v for k, v in payload.items() if v is not None}
-
     url = f"{SUPABASE_URL}/rest/v1/{WA_USERS_TABLE}?wa_id=eq.{wa_id}"
 
     try:
@@ -276,7 +230,6 @@ def log_message(wa_id: str, direction: str, text: str, meta: Optional[dict] = No
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
-
 def get_recent_messages(wa_id: str, limit: int = 60) -> List[Dict[str, Any]]:
     wa_id = (wa_id or "").strip()
     if not wa_id:
@@ -295,15 +248,12 @@ def get_recent_messages(wa_id: str, limit: int = 60) -> List[Dict[str, Any]]:
         pass
     return []
 
-
 def list_conversations(limit: int = 200) -> List[Dict[str, Any]]:
     limit = int(limit or 200)
 
     users: List[Dict[str, Any]] = []
     users_url_candidates = [
-        # NOVO: prioridade/score primeiro (se colunas existirem)
         f"{SUPABASE_URL}/rest/v1/{WA_USERS_TABLE}?select=*&order=priority.desc,lead_score.desc,last_at.desc.nullslast&limit={limit}",
-        # fallbacks antigos
         f"{SUPABASE_URL}/rest/v1/{WA_USERS_TABLE}?select=*&order=last_at.desc.nullslast&limit={limit}",
         f"{SUPABASE_URL}/rest/v1/{WA_USERS_TABLE}?select=*&order=updated_at.desc.nullslast&limit={limit}",
         f"{SUPABASE_URL}/rest/v1/{WA_USERS_TABLE}?select=*&order=created_at.desc.nullslast&limit={limit}",
@@ -358,7 +308,6 @@ def list_conversations(limit: int = 200) -> List[Dict[str, Any]]:
                 "last_message_at": (last.get("created_at") or ""),
                 "last_message_dir": (last.get("direction") or ""),
                 "total_messages": totals_by.get(wa_id, 0),
-                # lead fields default
                 "lead_score": 0,
                 "lead_temperature": "frio",
                 "lead_theme": "indefinido",
@@ -390,7 +339,6 @@ def list_conversations(limit: int = 200) -> List[Dict[str, Any]]:
             "last_message_at": (last.get("created_at") or (u.get("last_at") or "")),
             "last_message_dir": (last.get("direction") or ""),
             "total_messages": totals_by.get(wa_id, 0),
-            # lead fields (se existirem)
             "lead_score": u.get("lead_score") or 0,
             "lead_temperature": u.get("lead_temperature") or "frio",
             "lead_theme": u.get("lead_theme") or "indefinido",
@@ -415,7 +363,6 @@ def create_task(wa_id: str, title: str, due_at_iso: str) -> Dict[str, Any]:
         "due_at": due_at_iso,
         "status": "open",
         "created_at": _now_iso(),
-        # NÃO mandar updated_at
     }
     url = f"{SUPABASE_URL}/rest/v1/{WA_TASKS_TABLE}"
     try:
@@ -426,7 +373,6 @@ def create_task(wa_id: str, title: str, due_at_iso: str) -> Dict[str, Any]:
         return {"_error": r.text, **payload}
     except Exception as e:
         return {"_error": str(e), **payload}
-
 
 def list_tasks(
     status: str = "open",
@@ -450,7 +396,6 @@ def list_tasks(
         pass
     return []
 
-
 def done_task(task_id: str) -> Dict[str, Any]:
     task_id = (task_id or "").strip()
     if not task_id:
@@ -460,7 +405,6 @@ def done_task(task_id: str) -> Dict[str, Any]:
     payload = {
         "status": "done",
         "done_at": _now_iso(),
-        # NÃO mandar updated_at
     }
     try:
         r = _patch(url, payload, prefer="return=representation")
@@ -473,12 +417,7 @@ def done_task(task_id: str) -> Dict[str, Any]:
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
-
 def update_task(task_id: str, **fields) -> Dict[str, Any]:
-    """
-    Atualiza task (drag&drop na agenda).
-    Aceita: due_at, title, status, wa_id
-    """
     task_id = (task_id or "").strip()
     if not task_id:
         return {"ok": False, "detail": "missing id"}
@@ -502,3 +441,43 @@ def update_task(task_id: str, **fields) -> Dict[str, Any]:
         return {"ok": False, "status": r.status_code, "body": r.text}
     except Exception as e:
         return {"ok": False, "error": str(e)}
+
+
+# ============================================================
+# FLOW (Mugô Atendimento Estruturado)
+# ============================================================
+def get_flow(wa_id: str) -> Dict[str, Any]:
+    wa_id = (wa_id or "").strip()
+    if not wa_id:
+        return {"state": None, "data": {}}
+
+    url = f"{SUPABASE_URL}/rest/v1/{WA_USERS_TABLE}?wa_id=eq.{wa_id}&select=flow_state,flow_data"
+    try:
+        r = _get(url)
+        if r.status_code == 200:
+            rows = r.json() or []
+            if rows:
+                row = rows[0] or {}
+                return {
+                    "state": row.get("flow_state"),
+                    "data": _safe_json(row.get("flow_data"), {}),
+                }
+    except Exception:
+        pass
+
+    return {"state": None, "data": {}}
+
+def set_flow_state(wa_id: str, state: Optional[str]):
+    return upsert_user(wa_id, flow_state=state)
+
+def merge_flow_data(wa_id: str, patch: Dict[str, Any]):
+    flow = get_flow(wa_id)
+    data = flow.get("data") or {}
+    if not isinstance(data, dict):
+        data = {}
+    if patch and isinstance(patch, dict):
+        data.update(patch)
+    return upsert_user(wa_id, flow_data=data)
+
+def clear_flow(wa_id: str):
+    return upsert_user(wa_id, flow_state=None, flow_data={})

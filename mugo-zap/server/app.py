@@ -6,7 +6,7 @@ import urllib.parse
 import asyncio
 import traceback
 from pathlib import Path
-from typing import Any, Optional, List
+from typing import Any, Optional, List, Dict, Union
 from datetime import datetime, timezone
 
 import httpx
@@ -71,6 +71,9 @@ from services.state import (
 
 from services.whatsapp import send_message
 from services.openai_client import generate_reply
+
+# ✅ NOVO: fluxo Mugô estruturado
+from services.mugo_flow import handle_mugo_flow
 
 
 # ============================================================
@@ -180,20 +183,39 @@ def _j(obj: Any) -> str:
         return str(obj)
 
 
-def safe_send(to_wa_id: str, text: str, *, meta: Optional[dict] = None, cid: str = "") -> bool:
-    text = (text or "").strip()
-    if not to_wa_id or not text:
+# ✅ PATCH: safe_send agora aceita texto OU payload dict (botões)
+def safe_send(
+    to_wa_id: str,
+    payload: Union[str, Dict[str, Any]],
+    *,
+    meta: Optional[dict] = None,
+    cid: str = ""
+) -> bool:
+    if not to_wa_id:
+        return False
+
+    # texto usado pra log
+    if isinstance(payload, str):
+        log_text = (payload or "").strip()
+        if not log_text:
+            return False
+    elif isinstance(payload, dict):
+        log_text = (payload.get("text") or "").strip()
+        if not log_text:
+            return False
+    else:
         return False
 
     try:
-        send_message(to_wa_id, text)
+        send_message(to_wa_id, payload)
+
         try:
-            log_message(to_wa_id, "out", text, meta=meta or {})
+            log_message(to_wa_id, "out", log_text, meta=meta or {})
         except Exception as e:
             print(f"[{cid}] log_message(out) failed:", repr(e))
 
         if DEBUG_WEBHOOK:
-            print(f"[{cid}] SEND OK -> {to_wa_id}: {text[:140]}")
+            print(f"[{cid}] SEND OK -> {to_wa_id}: {log_text[:140]}")
         return True
     except Exception as e:
         print(f"[{cid}] SEND FAIL -> {to_wa_id}:", repr(e))
@@ -601,6 +623,9 @@ async def receive_webhook(request: Request):
     msg_type: Optional[str] = None
     user_text: Optional[str] = None
 
+    # ✅ NOVO: id do botão/list (para fluxo)
+    choice_id: str = ""
+
     try:
         entry = (data.get("entry") or [])
         if not entry:
@@ -647,12 +672,16 @@ async def receive_webhook(request: Request):
 
         if msg_type == "text":
             user_text = ((msg.get("text") or {}).get("body") or "").strip()
+
         elif msg_type == "interactive":
             inter = msg.get("interactive") or {}
-            user_text = (
-                ((inter.get("button_reply") or {}).get("title") or "").strip()
-                or ((inter.get("list_reply") or {}).get("title") or "").strip()
-            )
+            br = (inter.get("button_reply") or {})
+            lr = (inter.get("list_reply") or {})
+
+            # ✅ PATCH: captura ID e title
+            choice_id = (br.get("id") or lr.get("id") or "").strip()
+            user_text = (br.get("title") or lr.get("title") or "").strip()
+
         else:
             return {"ok": True}
 
@@ -670,6 +699,8 @@ async def receive_webhook(request: Request):
             "voltar", "volta", "robô", "robo", "bot", "continuar aqui",
             "quero continuar", "pode continuar", "segue aqui", "sem humano",
             "não precisa", "nao precisa",
+            # ✅ útil pro funil
+            "menu", "início", "inicio",
         ]
         if any(t in lower for t in back_triggers):
             clear_handoff(wa_id)
@@ -737,6 +768,20 @@ async def receive_webhook(request: Request):
                 last_text=user_text,
             )
             return {"ok": True}
+
+        # ============================================================
+        # ✅ NOVO: FUNIL MUGÔ (ANTES DA IA)
+        # Se estiver em fluxo, responde por botões/texto e NÃO chama IA.
+        # ============================================================
+        try:
+            flow_resp = handle_mugo_flow(wa_id, user_text, choice_id=choice_id)
+            if flow_resp:
+                safe_send(wa_id, flow_resp, meta={"src": "mugo_flow", "cid": cid, "choice_id": choice_id}, cid=cid)
+                emit_event({"type": "message_out", "wa_id": wa_id, "cid": cid})
+                return {"ok": True}
+        except Exception as e:
+            print(f"[{cid}] mugo_flow failed:", repr(e))
+            # se falhar, cai no fluxo normal (IA)
 
         # primeira mensagem (intro)
         if not bool(user.get("first_message_sent")):

@@ -1,8 +1,18 @@
 // web/src/api.js
 import { supabase } from "./lib/supabaseClient";
 
+// mugo-zap/web/src/api.js
+
 const API_BASE =
-  (import.meta.env.VITE_API_BASE || "http://127.0.0.1:8000").replace(/\/$/, "");
+  (import.meta.env.VITE_API_URL ||
+    import.meta.env.VITE_API_BASE ||
+    import.meta.env.VITE_API_URL_BASE ||
+    "https://mugo-zap.onrender.com"
+  ).replace(/\/$/, "");
+
+console.log("API_BASE", API_BASE);
+
+export { API_BASE };
 
 const PANEL_KEY = import.meta.env.VITE_PANEL_KEY || "";
 

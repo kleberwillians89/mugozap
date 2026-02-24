@@ -6,7 +6,7 @@ import urllib.parse
 import asyncio
 import traceback
 from pathlib import Path
-from typing import Any, Optional, List, Dict, Union
+from typing import Any, Optional, List, Dict, Union, Set
 from datetime import datetime, timezone
 
 import httpx
@@ -21,7 +21,6 @@ from fastapi.responses import PlainTextResponse, StreamingResponse, JSONResponse
 # ============================================================
 # Este arquivo está em: mugozap/mugo-zap/server/app.py
 # Seu .env está em:      mugozap/.env
-# Sobe 3 níveis: server -> mugo-zap -> mugozap
 ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
 load_dotenv(ENV_PATH)
 
@@ -110,18 +109,19 @@ async def startup_check():
 # ============================================================
 # CORS
 # ============================================================
-allow_origins = [
+# ✅ FIX: define ANTES do add_middleware pra Pylance e runtime ficarem felizes
+ALLOW_ORIGINS: List[str] = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
     "http://localhost:5174",
     "http://127.0.0.1:5174",
 ]
 if ALLOW_ORIGIN:
-    allow_origins.append(ALLOW_ORIGIN)
+    ALLOW_ORIGINS.append(ALLOW_ORIGIN)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=allow_origins,
+    allow_origins=ALLOW_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -183,6 +183,49 @@ def _j(obj: Any) -> str:
         return str(obj)
 
 
+def parse_iso(dt: str) -> Optional[datetime]:
+    dt = (dt or "").strip()
+    if not dt:
+        return None
+    try:
+        if dt.endswith("Z"):
+            return datetime.fromisoformat(dt.replace("Z", "+00:00"))
+        d = datetime.fromisoformat(dt)
+        if d.tzinfo is None:
+            d = d.replace(tzinfo=timezone.utc)
+        return d
+    except Exception:
+        return None
+
+
+def _safe_tags_to_list(existing_tags: Any) -> List[str]:
+    tags_list: List[str] = []
+    if isinstance(existing_tags, list):
+        return [str(x).strip() for x in existing_tags if str(x).strip()]
+
+    if isinstance(existing_tags, str) and existing_tags.strip():
+        s = existing_tags.strip()
+        try:
+            parsed = json.loads(s)
+            if isinstance(parsed, list):
+                return [str(x).strip() for x in parsed if str(x).strip()]
+        except Exception:
+            return []
+    return []
+
+
+def _lead_signal_bump(lower_text: str) -> int:
+    t = (lower_text or "").lower()
+    bump = 0
+    if any(k in t for k in ["orçamento", "orcamento", "preço", "preco", "valor", "valores", "quanto custa", "proposta"]):
+        bump += 35
+    if any(k in t for k in ["prazo", "cronograma", "quando fica pronto", "essa semana", "urgente", "hoje", "amanhã"]):
+        bump += 20
+    if any(k in t for k in ["fechar", "contrato", "assinar", "começar", "comecar"]):
+        bump += 25
+    return min(100, bump)
+
+
 # ✅ PATCH: safe_send agora aceita texto OU payload dict (botões)
 def safe_send(
     to_wa_id: str,
@@ -200,6 +243,7 @@ def safe_send(
         if not log_text:
             return False
     elif isinstance(payload, dict):
+        # para interactive/buttons, o campo "text" é o body
         log_text = (payload.get("text") or "").strip()
         if not log_text:
             return False
@@ -231,61 +275,10 @@ def safe_send(
         return False
 
 
-def parse_iso(dt: str) -> Optional[datetime]:
-    dt = (dt or "").strip()
-    if not dt:
-        return None
-    try:
-        if dt.endswith("Z"):
-            return datetime.fromisoformat(dt.replace("Z", "+00:00"))
-        d = datetime.fromisoformat(dt)
-        if d.tzinfo is None:
-            d = d.replace(tzinfo=timezone.utc)
-        return d
-    except Exception:
-        return None
-
-
-def _safe_tags_to_list(existing_tags: Any) -> List[str]:
-    """
-    Normaliza tags do usuário em List[str] (aceita list ou JSON em string).
-    """
-    tags_list: List[str] = []
-    if isinstance(existing_tags, list):
-        tags_list = [str(x).strip() for x in existing_tags if str(x).strip()]
-        return tags_list
-
-    if isinstance(existing_tags, str) and existing_tags.strip():
-        s = existing_tags.strip()
-        try:
-            parsed = json.loads(s)
-            if isinstance(parsed, list):
-                tags_list = [str(x).strip() for x in parsed if str(x).strip()]
-        except Exception:
-            # se vier string simples (não-json), ignora para não quebrar
-            tags_list = []
-    return tags_list
-
-
-def _lead_signal_bump(lower_text: str) -> int:
-    """
-    Bump determinístico para atualizar inteligência mesmo em handoff_active.
-    """
-    t = (lower_text or "").lower()
-    bump = 0
-    if any(k in t for k in ["orçamento", "orcamento", "preço", "preco", "valor", "valores", "quanto custa", "proposta"]):
-        bump += 35
-    if any(k in t for k in ["prazo", "cronograma", "quando fica pronto", "ainda essa semana", "urgente", "hoje", "amanhã"]):
-        bump += 20
-    if any(k in t for k in ["fechar", "contrato", "assinar", "começar", "comecar"]):
-        bump += 25
-    return min(100, bump)
-
-
 # ============================================================
 # REALTIME (SSE)
 # ============================================================
-SUBSCRIBERS: set[asyncio.Queue] = set()
+SUBSCRIBERS: Set[asyncio.Queue] = set()
 
 
 def emit_event(event: dict):
@@ -337,7 +330,7 @@ async def sse_events(token: str = Query("", alias="token")):
 # ============================================================
 # Scheduler: alerta de task na hora
 # ============================================================
-TASK_TIMERS: dict[str, asyncio.Task] = {}
+TASK_TIMERS: Dict[str, asyncio.Task] = {}
 
 
 def cancel_timer(task_id: str):
@@ -425,7 +418,6 @@ def api_close_handoff(wa_id: str, user: dict = Depends(get_current_user)):
 
 @app.patch("/api/conversations/{wa_id}")
 async def api_update_contact(wa_id: str, payload: dict, user: dict = Depends(get_current_user)):
-    # aceita variações
     name = payload.get("name") or payload.get("nome")
     telefone = payload.get("telefone") or payload.get("phone")
     stage = payload.get("stage")
@@ -434,7 +426,6 @@ async def api_update_contact(wa_id: str, payload: dict, user: dict = Depends(get
 
     updated = None
 
-    # atualiza name/telefone de verdade
     if name is not None or telefone is not None:
         try:
             updated = upsert_user(wa_id, name=name, telefone=telefone)
@@ -498,10 +489,8 @@ def api_create_task(payload: dict, user: dict = Depends(get_current_user)):
     return {"ok": True, "item": item}
 
 
-# ✅ FIX CRÍTICO: front está chamando PATCH /api/tasks/{id} (drag/drop)
 @app.patch("/api/tasks/{task_id}")
 def api_patch_task(task_id: str, payload: dict, user: dict = Depends(get_current_user)):
-    # aceita variações de chave
     due_at = payload.get("due_at") or payload.get("dueAt") or payload.get("due")
     title = payload.get("title")
     status = payload.get("status")
@@ -549,48 +538,37 @@ def start_handoff_now(
     summary: str = "",
     last_text: str = "",
 ):
-    # 1. Normalização básica do tópico
     topic = (topic or reason or "Atendimento").strip()[:100]
 
-    # 2. Persistência no Banco (Supabase)
     try:
         set_handoff_pending(wa_id, False)
         set_handoff_topic(wa_id, topic)
     except Exception as e:
         print(f"[{cid}] Falha ao atualizar status de handoff: {e}")
 
-    # ✅ Funil: quando vira handoff, vira "em_negociacao"
     try:
         upsert_user(wa_id, lead_stage="em_negociacao", priority=3)
     except Exception as e:
         print(f"[{cid}] Falha ao setar lead_stage em_negociacao:", repr(e))
 
-    # 3. Construção do Resumo (Otimizado para não quebrar URL)
     if not summary:
         try:
             hist = get_recent_messages(wa_id, limit=6) or []
-            entradas = [
-                (m.get("text") or "").strip()
-                for m in hist
-                if m.get("direction") == "in"
-            ]
+            entradas = [(m.get("text") or "").strip() for m in hist if m.get("direction") == "in"]
             summary = " | ".join(entradas[-3:])[:200]
         except Exception:
             summary = (last_text or "")[:150]
 
-    # 4. Gravação de Notas Internas (Sem restrição de tamanho de URL)
     try:
         notes = f"MOTIVO: {reason}\nTEMA: {topic}\nCONTEXTO: {summary}"
         set_notes(wa_id, notes)
     except Exception:
         pass
 
-    # 5. Formatação da URL (O segredo para não cortar)
     link_text = f"Olá! Preciso de atendimento estratégico.\n\nAssunto: {topic}\nID: {wa_id}"
     encoded_text = urllib.parse.quote(link_text)
     link = f"https://wa.me/{HUMAN_NUMBER}?text={encoded_text}"
 
-    # 6. Envios (Mensagens curtas e link clicável)
     safe_send(
         wa_id,
         "Perfeito. Vou direcionar você agora para um dos nossos especialistas dar sequência estratégica ao seu projeto.",
@@ -622,8 +600,6 @@ async def receive_webhook(request: Request):
     wa_id: Optional[str] = None
     msg_type: Optional[str] = None
     user_text: Optional[str] = None
-
-    # ✅ NOVO: id do botão/list (para fluxo)
     choice_id: str = ""
 
     try:
@@ -639,8 +615,6 @@ async def receive_webhook(request: Request):
 
         statuses = value.get("statuses") or []
         if statuses:
-            if DEBUG_WEBHOOK:
-                print(f"[{cid}] statuses received (ignored)")
             return {"ok": True}
 
         messages = value.get("messages") or []
@@ -657,13 +631,11 @@ async def receive_webhook(request: Request):
         name = (profile.get("name") or "").strip()
         telefone = (contacts[0].get("wa_id") or wa_id).strip()
 
-        # garante usuário no Supabase
         user = upsert_user(wa_id, name=name, telefone=telefone)
         ai_state = await get_ai_state(wa_id)
 
         msg_type = (msg.get("type") or "").strip()
 
-        # mídia não suportada
         if msg_type in ("audio", "image", "video", "document", "voice", "sticker"):
             out = "Por enquanto eu não consigo analisar mídia aqui. Pode mandar em texto, em uma frase?"
             safe_send(wa_id, out, meta={"reason": "media_not_supported", "cid": cid}, cid=cid)
@@ -677,8 +649,6 @@ async def receive_webhook(request: Request):
             inter = msg.get("interactive") or {}
             br = (inter.get("button_reply") or {})
             lr = (inter.get("list_reply") or {})
-
-            # ✅ PATCH: captura ID e title
             choice_id = (br.get("id") or lr.get("id") or "").strip()
             user_text = (br.get("title") or lr.get("title") or "").strip()
 
@@ -690,18 +660,11 @@ async def receive_webhook(request: Request):
 
         lower = user_text.lower().strip()
 
-        # log entrada
-        log_message(wa_id, "in", user_text, meta={"src": "whatsapp", "type": msg_type, "cid": cid})
+        log_message(wa_id, "in", user_text, meta={"src": "whatsapp", "type": msg_type, "cid": cid, "choice_id": choice_id})
         emit_event({"type": "message_in", "wa_id": wa_id, "cid": cid})
 
         # voltar pro bot (zera handoff + zera ai_state)
-        back_triggers = [
-            "voltar", "volta", "robô", "robo", "bot", "continuar aqui",
-            "quero continuar", "pode continuar", "segue aqui", "sem humano",
-            "não precisa", "nao precisa",
-            # ✅ útil pro funil
-            "menu", "início", "inicio",
-        ]
+        back_triggers = ["voltar", "volta", "robo", "robô", "bot", "menu", "inicio", "início"]
         if any(t in lower for t in back_triggers):
             clear_handoff(wa_id)
             try:
@@ -710,14 +673,25 @@ async def receive_webhook(request: Request):
                 pass
             await reset_ai_state(wa_id)
 
-            out = "Perfeito. Em uma frase: o que você quer destravar agora?"
-            safe_send(wa_id, out, meta={"event": "back_to_bot", "cid": cid}, cid=cid)
+            # volta com botões
+            safe_send(
+                wa_id,
+                {
+                    "type": "buttons",
+                    "text": "Beleza. Qual é o foco agora?",
+                    "buttons": [
+                        {"id": "FLOW_AUTOMATIZAR", "title": "Automação"},
+                        {"id": "FLOW_SITE", "title": "Site / E-commerce"},
+                        {"id": "FLOW_SOCIAL", "title": "Social / Tráfego"},
+                    ],
+                },
+                meta={"event": "back_to_menu", "cid": cid},
+                cid=cid,
+            )
             emit_event({"type": "message_out", "wa_id": wa_id, "cid": cid})
             return {"ok": True}
 
-        # ============================================================
-        # ✅ PATCH: mesmo com handoff ativo, atualiza inteligência (sem rodar IA)
-        # ============================================================
+        # handoff ativo: bloqueia IA, mas atualiza inteligência se tiver sinal
         if bool(user.get("handoff_active")):
             try:
                 bump = _lead_signal_bump(lower)
@@ -725,25 +699,9 @@ async def receive_webhook(request: Request):
                     prev = int(user.get("lead_score") or 0)
                     new_score = min(100, prev + bump)
                     new_temp = "quente" if new_score >= 70 else ("qualificado" if new_score >= 40 else "frio")
-
                     theme = str(user.get("lead_theme") or "indefinido")
-                    try:
-                        update_lead_intelligence(
-                            wa_id=wa_id,
-                            score=new_score,
-                            temperature=new_temp,
-                            theme=theme,
-                        )
-                    except Exception as e:
-                        print(f"[{cid}] update_lead_intelligence(handoff_active) failed:", repr(e))
-
-                    emit_event({
-                        "type": "lead_update",
-                        "wa_id": wa_id,
-                        "lead_score": new_score,
-                        "lead_temperature": new_temp,
-                        "lead_theme": theme,
-                    })
+                    update_lead_intelligence(wa_id=wa_id, score=new_score, temperature=new_temp, theme=theme)
+                    emit_event({"type": "lead_update", "wa_id": wa_id, "lead_score": new_score, "lead_temperature": new_temp, "lead_theme": theme})
             except Exception:
                 pass
 
@@ -756,9 +714,8 @@ async def receive_webhook(request: Request):
             emit_event({"type": "message_out", "wa_id": wa_id, "cid": cid})
             return {"ok": True}
 
-        # pediu humano explicitamente
-        human_triggers = ["humano", "pessoa", "atendente", "alguém", "falar com alguém", "falar com uma pessoa"]
-        if any(t in lower for t in human_triggers):
+        # pediu humano
+        if any(t in lower for t in ["humano", "pessoa", "atendente", "falar com alguém", "falar com uma pessoa"]):
             start_handoff_now(
                 wa_id=wa_id,
                 cid=cid,
@@ -769,10 +726,7 @@ async def receive_webhook(request: Request):
             )
             return {"ok": True}
 
-        # ============================================================
-        # ✅ NOVO: FUNIL MUGÔ (ANTES DA IA)
-        # Se estiver em fluxo, responde por botões/texto e NÃO chama IA.
-        # ============================================================
+        # ✅ FUNIL MUGÔ: primeiro tenta fluxo
         try:
             flow_resp = handle_mugo_flow(wa_id, user_text, choice_id=choice_id)
             if flow_resp:
@@ -781,12 +735,23 @@ async def receive_webhook(request: Request):
                 return {"ok": True}
         except Exception as e:
             print(f"[{cid}] mugo_flow failed:", repr(e))
-            # se falhar, cai no fluxo normal (IA)
 
-        # primeira mensagem (intro)
+        # primeira mensagem -> manda menu com botões
         if not bool(user.get("first_message_sent")):
-            intro = "Oi. Aqui é da Mugô. Você quer destravar vendas ou organizar operação?"
-            safe_send(wa_id, intro, meta={"event": "intro", "cid": cid}, cid=cid)
+            safe_send(
+                wa_id,
+                {
+                    "type": "buttons",
+                    "text": "Oi. Aqui é da Mugô. O que você quer destravar agora?",
+                    "buttons": [
+                        {"id": "FLOW_AUTOMATIZAR", "title": "Automação"},
+                        {"id": "FLOW_SITE", "title": "Site / E-commerce"},
+                        {"id": "FLOW_SOCIAL", "title": "Social / Tráfego"},
+                    ],
+                },
+                meta={"event": "intro_buttons", "cid": cid},
+                cid=cid,
+            )
             mark_first_message_sent(wa_id)
             emit_event({"type": "message_out", "wa_id": wa_id, "cid": cid})
             return {"ok": True}
@@ -801,17 +766,12 @@ async def receive_webhook(request: Request):
         if curr_user and last_user and curr_user == last_user:
             repeat_hits += 1
 
-        if any(x in lower for x in [
-            "já falei", "ja falei",
-            "já respondi", "ja respondi",
-            "você já perguntou", "voce ja perguntou"
-        ]):
+        if any(x in lower for x in ["já falei", "ja falei", "já respondi", "ja respondi", "você já perguntou", "voce ja perguntou"]):
             repeat_hits += 1
 
         ai_state["repeat_hits"] = repeat_hits
         ai_state["last_user_message"] = user_text
 
-        # LOOP DETECTADO
         if repeat_hits >= 2:
             start_handoff_now(
                 wa_id=wa_id,
@@ -824,7 +784,6 @@ async def receive_webhook(request: Request):
             await upsert_ai_state(wa_id, ai_state)
             return {"ok": True}
 
-        # MUITAS PERGUNTAS DO BOT (janela)
         bot_qcount = int(ai_state.get("bot_question_count") or ai_state.get("question_count") or 0)
         if bot_qcount >= 6:
             start_handoff_now(
@@ -838,22 +797,15 @@ async def receive_webhook(request: Request):
             await upsert_ai_state(wa_id, ai_state)
             return {"ok": True}
 
-        # SCORE DE FECHAMENTO (sinal)
         close_score = int(ai_state.get("close_score") or 0)
-        if any(x in lower for x in [
-            "orçamento", "orcamento",
-            "valor", "preço", "preco",
-            "fechar", "contrato",
-            "começar", "comecar",
-            "prazo"
-        ]):
+        if any(x in lower for x in ["orçamento", "orcamento", "valor", "preço", "preco", "fechar", "contrato", "começar", "comecar", "prazo"]):
             close_score = min(100, close_score + 15)
 
         ai_state["close_score"] = close_score
         await upsert_ai_state(wa_id, ai_state)
 
         # ============================
-        # CHAMADA DA IA
+        # IA
         # ============================
         result = generate_reply(
             wa_id=wa_id,
@@ -869,30 +821,20 @@ async def receive_webhook(request: Request):
         handoff_flag = bool(result.get("handoff"))
         handoff_summary = (result.get("handoff_summary") or "").strip()
 
-        # ============================
-        # SALVA LEAD INTELLIGENCE NO BANCO + TAG AUTOMÁTICA
-        # ============================
         lead_score = int(result.get("lead_score") or 0)
         lead_temperature = str(result.get("lead_temperature") or "frio")
         lead_theme = str(result.get("lead_theme") or "indefinido")
 
         try:
-            update_lead_intelligence(
-                wa_id=wa_id,
-                score=lead_score,
-                temperature=lead_temperature,
-                theme=lead_theme,
-            )
+            update_lead_intelligence(wa_id=wa_id, score=lead_score, temperature=lead_temperature, theme=lead_theme)
         except Exception as e:
             print(f"[{cid}] update_lead_intelligence failed:", repr(e))
 
-        # ✅ recarrega user (evita tags “stale” / sobrescrever sem querer)
         try:
             user = upsert_user(wa_id, name=name, telefone=telefone)
         except Exception:
             pass
 
-        # tag automática por tema (sem sobrescrever tags manuais)
         try:
             tags_list = _safe_tags_to_list(user.get("tags"))
             if lead_theme and lead_theme != "indefinido" and lead_theme not in tags_list:
@@ -902,23 +844,14 @@ async def receive_webhook(request: Request):
         except Exception:
             pass
 
-        emit_event({
-            "type": "lead_update",
-            "wa_id": wa_id,
-            "lead_score": lead_score,
-            "lead_temperature": lead_temperature,
-            "lead_theme": lead_theme,
-        })
+        emit_event({"type": "lead_update", "wa_id": wa_id, "lead_score": lead_score, "lead_temperature": lead_temperature, "lead_theme": lead_theme})
 
-        # ============================
-        # ATUALIZA ESTADO
-        # ============================
         if intent:
             ai_state["intent"] = intent
 
         if question_key and question_key != "none":
             ai_state["bot_question_count"] = int(ai_state.get("bot_question_count") or 0) + 1
-            ai_state["question_count"] = int(ai_state.get("question_count") or 0) + 1  # compat
+            ai_state["question_count"] = int(ai_state.get("question_count") or 0) + 1
             ai_state["last_question_key"] = question_key
 
         if handoff_summary:
@@ -927,9 +860,6 @@ async def receive_webhook(request: Request):
         ai_state["last_bot_message"] = reply_text
         await upsert_ai_state(wa_id, ai_state)
 
-        # ============================
-        # HANDOFF SE IA PEDIR
-        # ============================
         if handoff_flag:
             next_intent = str(result.get("next_intent") or "ai_handoff").strip()
             start_handoff_now(
@@ -942,9 +872,6 @@ async def receive_webhook(request: Request):
             )
             return {"ok": True}
 
-        # ============================
-        # ENVIA RESPOSTA NORMAL
-        # ============================
         safe_send(wa_id, reply_text, meta={"src": "ai", "cid": cid}, cid=cid)
         emit_event({"type": "message_out", "wa_id": wa_id, "cid": cid})
         return {"ok": True}

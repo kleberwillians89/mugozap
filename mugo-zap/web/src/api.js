@@ -1,22 +1,14 @@
 // web/src/api.js
 import { supabase } from "./lib/supabaseClient";
 
-// mugo-zap/web/src/api.js
-
-const API_BASE =
-  (import.meta.env.VITE_API_URL ||
-    import.meta.env.VITE_API_BASE ||
-    import.meta.env.VITE_API_URL_BASE ||
-    "https://mugo-zap.onrender.com"
-  ).replace(/\/$/, "");
-
-console.log("API_BASE", API_BASE);
-
-export { API_BASE };
+export const API_BASE = (
+  import.meta.env.VITE_API_URL ||
+  import.meta.env.VITE_API_BASE ||
+  import.meta.env.VITE_API_URL_BASE ||
+  "https://mugo-zap.onrender.com"
+).replace(/\/$/, "");
 
 const PANEL_KEY = import.meta.env.VITE_PANEL_KEY || "";
-
-console.log("API_BASE", API_BASE);
 
 async function apiFetch(path, opts = {}) {
   const url = `${API_BASE}${path}`;
@@ -106,6 +98,14 @@ export async function doneTask(id) {
   });
 }
 
+export async function updateTask(id, payload) {
+  return apiFetch(`/api/tasks/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload || {}),
+  });
+}
+
 // SSE (EventSource não aceita header)
 export async function sseUrl() {
   try {
@@ -115,12 +115,3 @@ export async function sseUrl() {
   } catch {}
   return "";
 }
-export async function updateTask(id, payload) {
-  return apiFetch(`/api/tasks/${encodeURIComponent(id)}`, {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload || {}),
-  });
-}
-
-export { API_BASE };

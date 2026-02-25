@@ -1,163 +1,156 @@
+import os
+import json
 from typing import Any, Dict, Optional
+import httpx
 
-from services.state import (
-    get_flow,
-    set_flow_state,
-    merge_flow_data,
-    clear_flow,
-    set_notes,
-    set_stage,
-)
+OPENAI_API_KEY = (
+    os.getenv("OPENAI_API_KEY")
+    or os.getenv("OPENAI_KEY")
+    or ""
+).strip()
 
-# TITLES <= 20 chars (senão a Meta rejeita)
-MENU_MAIN = [
-    {"id": "FLOW_AUTOMATIZAR", "title": "⚙️ Automação"},
-    {"id": "FLOW_SITE", "title": "🌐 Site / Loja"},
-    {"id": "FLOW_SOCIAL", "title": "📈 Social/Tráfego"},
-]
+OPENAI_MODEL = (os.getenv("OPENAI_MODEL") or "gpt-4.1-mini").strip()
+OPENAI_TIMEOUT = float(os.getenv("OPENAI_TIMEOUT") or "12")
 
-AUTOMACAO_MENU = [
-    {"id": "AUTO_ATEND", "title": "💬 WhatsApp"},
-    {"id": "AUTO_CRM", "title": "📌 CRM/Funil"},
-    {"id": "AUTO_FIN", "title": "💳 Cobrança"},
-]
 
-SITE_MENU = [
-    {"id": "SITE_INST", "title": "🏢 Institucional"},
-    {"id": "SITE_LP", "title": "🎯 Landing page"},
-    {"id": "SITE_LOJA", "title": "🛒 Loja virtual"},
-]
+def _fallback(user_message: str) -> Dict[str, Any]:
+    msg = (user_message or "").strip()
+    return {
+        "reply": "Perfeito. Me explica em uma frase o que você quer destravar agora.",
+        "intent": "geral",
+        "question_key": "none",
+        "handoff": False,
+        "handoff_summary": msg[:220],
+        "next_intent": "next",
+        "lead_score": 10,
+        "lead_temperature": "frio",
+        "lead_theme": "indefinido",
+    }
 
-SOCIAL_MENU = [
-    {"id": "SOC_CONT", "title": "✍️ Conteúdo"},
-    {"id": "SOC_GEST", "title": "🧠 Gestão"},
-    {"id": "SOC_TRAFEGO", "title": "📣 Tráfego pago"},
-]
 
-CTA_BTNS = [
-    {"id": "CTA_HUMAN", "title": "🤝 Especialista"},
-    {"id": "CTA_PROP", "title": "📩 Proposta"},
-]
+def _score_from_text(t: str) -> int:
+    t = (t or "").lower()
+    score = 0
 
-def _is_menu_reset(text: str) -> bool:
-    t = (text or "").strip().lower()
-    return t in ("menu", "inicio", "início", "voltar", "volta")
+    if any(k in t for k in ["orçamento", "orcamento", "preço", "preco", "valor", "proposta", "quanto custa"]):
+        score += 35
 
-def handle_mugo_flow(wa_id: str, user_text: str, choice_id: str = "") -> Optional[Dict[str, Any]]:
-    flow = get_flow(wa_id) or {}
-    state = (flow.get("state") or "").strip()
-    data = flow.get("data") or {}
+    if any(k in t for k in ["prazo", "urgente", "hoje", "amanhã", "essa semana"]):
+        score += 20
 
-    text = (user_text or "").strip()
-    cid = (choice_id or "").strip() or text
+    if any(k in t for k in ["fechar", "contrato", "assinar", "começar", "comecar"]):
+        score += 25
 
-    # reset/menu
-    if _is_menu_reset(text):
-        set_flow_state(wa_id, "main")
-        return {"type": "buttons", "text": "Qual é o foco agora?", "buttons": MENU_MAIN}
+    return min(100, max(0, score))
 
-    # se não tem state, começa com menu
-    if not state:
-        set_flow_state(wa_id, "main")
-        return {"type": "buttons", "text": "Oi! O que você quer destravar agora?", "buttons": MENU_MAIN}
 
-    # ========= MAIN =========
-    if state == "main":
-        if cid == "FLOW_AUTOMATIZAR":
-            merge_flow_data(wa_id, {"macro": "automacao"})
-            set_flow_state(wa_id, "automacao_menu")
-            return {"type": "buttons", "text": "O que você quer automatizar primeiro?", "buttons": AUTOMACAO_MENU}
+def generate_reply(
+    wa_id: str,
+    user_message: str,
+    first_message_sent: bool,
+    name: str = "",
+    telefone: str = "",
+    flow_context: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
 
-        if cid == "FLOW_SITE":
-            merge_flow_data(wa_id, {"macro": "site"})
-            set_flow_state(wa_id, "site_menu")
-            return {"type": "buttons", "text": "Que tipo de projeto você quer?", "buttons": SITE_MENU}
+    msg = (user_message or "").strip()
+    if not msg:
+        return _fallback(user_message)
 
-        if cid == "FLOW_SOCIAL":
-            merge_flow_data(wa_id, {"macro": "social"})
-            set_flow_state(wa_id, "social_menu")
-            return {"type": "buttons", "text": "O que você precisa no social?", "buttons": SOCIAL_MENU}
+    # se não tiver chave, não quebra deploy
+    if not OPENAI_API_KEY:
+        out = _fallback(user_message)
+        s = _score_from_text(msg)
+        if s >= 60:
+            out["handoff"] = True
+            out["next_intent"] = "ai_handoff"
+            out["lead_score"] = 85
+            out["lead_temperature"] = "quente"
+        return out
 
-        return {"type": "buttons", "text": "Escolhe uma opção pra eu te guiar:", "buttons": MENU_MAIN}
-
-    # ========= SUBMENUS =========
-    if state in ("automacao_menu", "site_menu", "social_menu"):
-        # se clicou em algo válido
-        valid_ids = {b["id"] for b in (AUTOMACAO_MENU + SITE_MENU + SOCIAL_MENU)}
-        if cid in valid_ids:
-            merge_flow_data(wa_id, {"service_interest": cid})
-            set_flow_state(wa_id, "brief")
-            return {"type": "text", "text": "Em 1 frase: o que você quer resolver agora?"}
-
-        # se mandou texto em vez de clicar: ajuda com IA depois, mas mantém menu
-        return {"type": "buttons", "text": "Clica em uma opção aqui pra eu encaminhar certinho:", "buttons": (
-            AUTOMACAO_MENU if state == "automacao_menu" else SITE_MENU if state == "site_menu" else SOCIAL_MENU
-        )}
-
-    # ========= BRIEF =========
-    if state == "brief":
-        if not text:
-            return {"type": "text", "text": "Em 1 frase: o que você quer resolver agora?"}
-
-        merge_flow_data(wa_id, {"briefing_text": text})
-        set_flow_state(wa_id, "cta")
-        return {"type": "buttons", "text": "Agora você prefere:", "buttons": CTA_BTNS}
-
-    # ========= CTA =========
-    if state == "cta":
-        if cid not in ("CTA_HUMAN", "CTA_PROP"):
-            return {"type": "buttons", "text": "Escolhe uma opção pra eu encaminhar:", "buttons": CTA_BTNS}
-
-        merge_flow_data(wa_id, {"cta_choice": cid})
-        set_flow_state(wa_id, "name")
-        return {"type": "text", "text": "Qual seu nome? (pra eu te encaminhar certo)"}
-
-    # ========= NAME / FINAL =========
-    if state == "name":
-        if not text:
-            return {"type": "text", "text": "Me diz seu nome rapidinho 🙂"}
-
-        merge_flow_data(wa_id, {"lead_name": text})
-
-        final = (get_flow(wa_id) or {}).get("data") or {}
-
-        # salva no CRM
-        notes = (
-            "NOVO LEAD MUGÔ\n"
-            f"Nome: {final.get('lead_name','')}\n"
-            f"WhatsApp: {wa_id}\n"
-            f"Macro: {final.get('macro','')}\n"
-            f"Interesse: {final.get('service_interest','')}\n"
-            f"Objetivo: {final.get('briefing_text','')}\n"
-            f"CTA: {final.get('cta_choice','')}\n"
-        ).strip()
-
+    flow_txt = ""
+    if flow_context:
         try:
-            set_notes(wa_id, notes)
+            flow_txt = json.dumps(flow_context, ensure_ascii=False)
         except Exception:
-            pass
+            flow_txt = str(flow_context)
 
-        try:
-            set_stage(wa_id, "Qualificado")
-        except Exception:
-            pass
+    system_prompt = (
+        "Você é um SDR estratégico da Mugô.\n"
+        "Responda de forma clara, direta e estratégica.\n"
+        "Máximo 3 linhas.\n"
+        "Se faltar informação, faça 1 pergunta objetiva.\n"
+        "Nunca responda fora do JSON.\n"
+        "Retorne JSON com as chaves:\n"
+        "reply, intent, question_key, handoff, handoff_summary, next_intent, lead_score, lead_temperature, lead_theme"
+    )
 
-        # encerra flow
-        clear_flow(wa_id)
+    user_prompt = (
+        f"WA_ID: {wa_id}\n"
+        f"Nome: {name}\n"
+        f"Telefone: {telefone}\n"
+        f"Mensagem: {msg}\n"
+        f"Contexto do fluxo: {flow_txt}\n"
+        "Responda em JSON."
+    )
 
-        # entrega pra IA + contexto (e depois teu app.py faz handoff)
-        return {
-            "type": "ai",
-            "flow_context": final,
-            "user_message": (
-                "Lead finalizado via botões.\n"
-                f"Nome: {final.get('lead_name','')}\n"
-                f"Macro: {final.get('macro','')}\n"
-                f"Interesse: {final.get('service_interest','')}\n"
-                f"Objetivo: {final.get('briefing_text','')}\n"
-                f"CTA: {final.get('cta_choice','')}\n"
-                "Responda como SDR e encaminhe para humano."
+    payload = {
+        "model": OPENAI_MODEL,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "temperature": 0.3,
+        "max_tokens": 250,
+    }
+
+    try:
+        with httpx.Client(timeout=OPENAI_TIMEOUT) as client:
+            r = client.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {OPENAI_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
             )
-        }
 
-    return None
+        if r.status_code >= 300:
+            return _fallback(user_message)
+
+        content = r.json()["choices"][0]["message"]["content"].strip()
+
+        try:
+            out = json.loads(content)
+        except Exception:
+            return _fallback(user_message)
+
+        if not isinstance(out, dict) or not out.get("reply"):
+            return _fallback(user_message)
+
+        out.setdefault("intent", "geral")
+        out.setdefault("question_key", "none")
+        out.setdefault("handoff", False)
+        out.setdefault("handoff_summary", msg[:220])
+        out.setdefault("next_intent", "next")
+        out.setdefault("lead_score", _score_from_text(msg))
+        out.setdefault("lead_theme", "indefinido")
+
+        try:
+            score = int(out.get("lead_score") or 0)
+        except Exception:
+            score = _score_from_text(msg)
+
+        if score >= 70:
+            temp = "quente"
+        elif score >= 40:
+            temp = "qualificado"
+        else:
+            temp = "frio"
+
+        out["lead_temperature"] = temp
+
+        return out
+
+    except Exception:
+        return _fallback(user_message)

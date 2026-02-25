@@ -17,10 +17,8 @@ from fastapi.responses import PlainTextResponse, StreamingResponse, JSONResponse
 
 
 # ============================================================
-# ENV (FIX DEFINITIVO)
+# ENV
 # ============================================================
-# Este arquivo está em: mugozap/mugo-zap/server/app.py
-# Seu .env está em:      mugozap/.env
 ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
 load_dotenv(ENV_PATH)
 
@@ -31,23 +29,17 @@ PANEL_API_KEY = (os.getenv("PANEL_API_KEY") or "").strip()
 SUPABASE_URL = (os.getenv("SUPABASE_URL") or "").strip().rstrip("/")
 SUPABASE_SERVICE_ROLE_KEY = (os.getenv("SUPABASE_SERVICE_ROLE_KEY") or "").strip()
 SUPABASE_ANON_KEY = (os.getenv("SUPABASE_ANON_KEY") or "").strip()
-
-# Para validar JWT do Supabase via /auth/v1/user você precisa de um apikey.
 SUPABASE_API_KEY = SUPABASE_ANON_KEY or SUPABASE_SERVICE_ROLE_KEY
 
-# HUMANO (wa.me) — precisa ser DIFERENTE do número do BOT
 HUMAN_NUMBER = (os.getenv("HUMAN_NUMBER") or "5511973510549").strip()
-
-DEBUG_WEBHOOK = (os.getenv("DEBUG_WEBHOOK") or "").strip().lower() in ("1", "true", "yes")
+DEBUG_WEBHOOK = (os.getenv("DEBUG_WEBHOOK") or "").strip().lower() in ("1", "true")
 
 
 # ============================================================
 # IMPORTS
 # ============================================================
 from services.ai_state import get_ai_state, upsert_ai_state, reset_ai_state
-
 from services.state import (
-    # core
     mark_first_message_sent,
     log_message,
     list_conversations,
@@ -55,7 +47,6 @@ from services.state import (
     set_handoff_pending,
     set_handoff_topic,
     clear_handoff,
-    # CRM / Kanban / Agenda
     upsert_user,
     set_stage,
     set_notes,
@@ -64,14 +55,10 @@ from services.state import (
     list_tasks,
     done_task,
     update_task,
-    # Lead Intelligence
     update_lead_intelligence,
 )
-
 from services.whatsapp import send_message
 from services.openai_client import generate_reply
-
-# ✅ NOVO: fluxo Mugô estruturado
 from services.mugo_flow import handle_mugo_flow
 
 
@@ -81,47 +68,31 @@ from services.mugo_flow import handle_mugo_flow
 app = FastAPI()
 
 
+# ============================================================
+# ERROR HANDLER
+# ============================================================
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception):
     print("\n=== UNHANDLED SERVER ERROR ===")
     print("PATH:", request.url.path)
-    print("ERROR:", repr(exc))
     traceback.print_exc()
     print("=== /UNHANDLED SERVER ERROR ===\n")
     return JSONResponse(status_code=500, content={"detail": "Internal Server Error"})
 
 
-@app.on_event("startup")
-async def startup_check():
-    print("BOOT ENV CHECK:")
-    print("ENV_PATH:", str(ENV_PATH))
-    print("SUPABASE_URL:", (SUPABASE_URL[:45] + "...") if SUPABASE_URL else "MISSING")
-    print("SUPABASE_API_KEY:", (SUPABASE_API_KEY[:10] + "...") if SUPABASE_API_KEY else "MISSING")
-    print("PANEL_API_KEY:", PANEL_API_KEY if PANEL_API_KEY else "MISSING")
-
-    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
-        raise RuntimeError("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY in .env (raiz do projeto)")
-
-    if not SUPABASE_API_KEY:
-        raise RuntimeError("Missing SUPABASE_ANON_KEY (or SERVICE_ROLE fallback) in .env")
-
-
 # ============================================================
 # CORS
 # ============================================================
-# ✅ FIX: define ANTES do add_middleware pra Pylance e runtime ficarem felizes
-ALLOW_ORIGINS: List[str] = [
+ALLOW_ORIGINS = [
     "http://localhost:5173",
-    "http://127.0.0.1:5173",
-    "http://localhost:5174",
-    "http://127.0.0.1:5174",
+    "https://mugo-zap-web.onrender.com",
 ]
 if ALLOW_ORIGIN:
     ALLOW_ORIGINS.append(ALLOW_ORIGIN)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOW_ORIGINS,
+    allow_origins=list(set(ALLOW_ORIGINS)),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -129,406 +100,25 @@ app.add_middleware(
 
 
 # ============================================================
-# Auth (Supabase JWT OR X-Panel-Key)
+# HELPERS
 # ============================================================
-async def _supabase_get_user(access_token: str) -> dict:
-    if not SUPABASE_URL or not SUPABASE_API_KEY:
-        raise HTTPException(status_code=500, detail="Supabase env not configured")
-
-    access_token = (access_token or "").strip()
-    if not access_token:
-        raise HTTPException(status_code=401, detail="Missing token")
-
-    async with httpx.AsyncClient(timeout=12) as client:
-        resp = await client.get(
-            f"{SUPABASE_URL}/auth/v1/user",
-            headers={
-                "Authorization": f"Bearer {access_token}",
-                "apikey": SUPABASE_API_KEY,
-            },
-        )
-
-    if resp.status_code != 200:
-        raise HTTPException(status_code=401, detail="Invalid token")
-
-    return resp.json()
-
-
-async def get_current_user(
-    authorization: str = Header(None),
-    x_panel_key: str = Header(None, alias="X-Panel-Key"),
-) -> dict:
-    # Bypass para o painel (dev/admin)
-    if PANEL_API_KEY and x_panel_key and x_panel_key == PANEL_API_KEY:
-        return {"role": "panel"}
-
-    # Auth padrão via Supabase JWT (Authorization: Bearer)
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Missing token")
-
-    token = authorization.split(" ", 1)[1].strip()
-    if not token:
-        raise HTTPException(status_code=401, detail="Missing token")
-
-    return await _supabase_get_user(token)
-
-
-# ============================================================
-# Helpers
-# ============================================================
-def _j(obj: Any) -> str:
-    try:
-        return json.dumps(obj, ensure_ascii=False)
-    except Exception:
-        return str(obj)
-
-
-def parse_iso(dt: str) -> Optional[datetime]:
-    dt = (dt or "").strip()
-    if not dt:
-        return None
-    try:
-        if dt.endswith("Z"):
-            return datetime.fromisoformat(dt.replace("Z", "+00:00"))
-        d = datetime.fromisoformat(dt)
-        if d.tzinfo is None:
-            d = d.replace(tzinfo=timezone.utc)
-        return d
-    except Exception:
-        return None
-
-
-def _safe_tags_to_list(existing_tags: Any) -> List[str]:
-    tags_list: List[str] = []
-    if isinstance(existing_tags, list):
-        return [str(x).strip() for x in existing_tags if str(x).strip()]
-
-    if isinstance(existing_tags, str) and existing_tags.strip():
-        s = existing_tags.strip()
-        try:
-            parsed = json.loads(s)
-            if isinstance(parsed, list):
-                return [str(x).strip() for x in parsed if str(x).strip()]
-        except Exception:
-            return []
-    return []
-
-
-def _lead_signal_bump(lower_text: str) -> int:
-    t = (lower_text or "").lower()
-    bump = 0
-    if any(k in t for k in ["orçamento", "orcamento", "preço", "preco", "valor", "valores", "quanto custa", "proposta"]):
-        bump += 35
-    if any(k in t for k in ["prazo", "cronograma", "quando fica pronto", "essa semana", "urgente", "hoje", "amanhã"]):
-        bump += 20
-    if any(k in t for k in ["fechar", "contrato", "assinar", "começar", "comecar"]):
-        bump += 25
-    return min(100, bump)
-
-
-# ✅ PATCH: safe_send agora aceita texto OU payload dict (botões)
 def safe_send(
     to_wa_id: str,
     payload: Union[str, Dict[str, Any]],
     *,
     meta: Optional[dict] = None,
     cid: str = ""
-) -> bool:
-    if not to_wa_id:
-        return False
-
-    # texto usado pra log
-    if isinstance(payload, str):
-        log_text = (payload or "").strip()
-        if not log_text:
-            return False
-    elif isinstance(payload, dict):
-        # para interactive/buttons, o campo "text" é o body
-        log_text = (payload.get("text") or "").strip()
-        if not log_text:
-            return False
-    else:
-        return False
-
+):
     try:
         send_message(to_wa_id, payload)
-
-        try:
-            log_message(to_wa_id, "out", log_text, meta=meta or {})
-        except Exception as e:
-            print(f"[{cid}] log_message(out) failed:", repr(e))
-
-        if DEBUG_WEBHOOK:
-            print(f"[{cid}] SEND OK -> {to_wa_id}: {log_text[:140]}")
+        text_log = payload if isinstance(payload, str) else payload.get("text", "")
+        log_message(to_wa_id, "out", text_log, meta=meta or {})
         return True
     except Exception as e:
-        print(f"[{cid}] SEND FAIL -> {to_wa_id}:", repr(e))
-        try:
-            log_message(
-                to_wa_id,
-                "out",
-                f"[ERRO ENVIO] {e}",
-                meta={"event": "send_fail", "cid": cid},
-            )
-        except Exception:
-            pass
+        print(f"[{cid}] SEND FAIL:", e)
         return False
 
 
-# ============================================================
-# REALTIME (SSE)
-# ============================================================
-SUBSCRIBERS: Set[asyncio.Queue] = set()
-
-
-def emit_event(event: dict):
-    dead = []
-    for q in list(SUBSCRIBERS):
-        try:
-            q.put_nowait(event)
-        except Exception:
-            dead.append(q)
-    for q in dead:
-        try:
-            SUBSCRIBERS.remove(q)
-        except Exception:
-            pass
-
-
-@app.get("/events")
-async def sse_events(token: str = Query("", alias="token")):
-    """
-    Front usa EventSource e não manda header Authorization.
-    Então aqui o token vem por querystring (?token=<access_token do supabase>).
-    """
-    token = (token or "").strip()
-    if not token:
-        raise HTTPException(status_code=401, detail="Missing token")
-
-    await _supabase_get_user(token)
-
-    q: asyncio.Queue = asyncio.Queue(maxsize=200)
-    SUBSCRIBERS.add(q)
-
-    async def gen():
-        yield "event: ping\ndata: {\"ok\": true}\n\n"
-        try:
-            while True:
-                evt = await q.get()
-                yield f"event: update\ndata: {json.dumps(evt, ensure_ascii=False)}\n\n"
-        except asyncio.CancelledError:
-            pass
-        finally:
-            try:
-                SUBSCRIBERS.remove(q)
-            except Exception:
-                pass
-
-    return StreamingResponse(gen(), media_type="text/event-stream")
-
-
-# ============================================================
-# Scheduler: alerta de task na hora
-# ============================================================
-TASK_TIMERS: Dict[str, asyncio.Task] = {}
-
-
-def cancel_timer(task_id: str):
-    t = TASK_TIMERS.pop(task_id, None)
-    if t:
-        try:
-            t.cancel()
-        except Exception:
-            pass
-
-
-def schedule_task_due(task_id: str, wa_id: str, title: str, due_at_iso: str):
-    cancel_timer(task_id)
-
-    due = parse_iso(due_at_iso)
-    if not due:
-        return
-
-    async def runner():
-        try:
-            now = datetime.now(timezone.utc)
-            wait = (due - now).total_seconds()
-            if wait > 0:
-                await asyncio.sleep(wait)
-            emit_event({"type": "task_due", "id": task_id, "wa_id": wa_id, "title": title, "due_at": due_at_iso})
-        except asyncio.CancelledError:
-            return
-        except Exception as e:
-            print("schedule_task_due error:", repr(e))
-
-    TASK_TIMERS[task_id] = asyncio.create_task(runner())
-
-
-# ============================================================
-# HEALTH
-# ============================================================
-@app.get("/health")
-def health():
-    return {"ok": True, "env_path": str(ENV_PATH), "supabase_ok": bool(SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY)}
-
-
-# ============================================================
-# PAINEL (front) — protegido por get_current_user
-# ============================================================
-@app.get("/api/conversations")
-async def api_conversations(user: dict = Depends(get_current_user)):
-    items = list_conversations(limit=300)
-    return {"items": items}
-
-
-@app.get("/api/conversations/{wa_id}")
-async def api_conversation_detail(wa_id: str, user: dict = Depends(get_current_user)):
-    msgs = get_recent_messages(wa_id, limit=300)
-    return {
-        "wa_id": wa_id,
-        "messages": [
-            {
-                "id": m.get("id"),
-                "direction": m.get("direction"),
-                "text": m.get("text"),
-                "created_at": m.get("created_at"),
-            }
-            for m in (msgs or [])
-        ],
-    }
-
-
-@app.post("/api/conversations/{wa_id}/send")
-async def api_send(wa_id: str, payload: dict, user: dict = Depends(get_current_user)):
-    text = (payload.get("text") or "").strip()
-    if not text:
-        raise HTTPException(status_code=400, detail="text required")
-
-    ok = safe_send(wa_id, text, meta={"source": "panel"}, cid="panel")
-    emit_event({"type": "panel_send", "wa_id": wa_id, "ok": ok})
-    return {"ok": True}
-
-
-@app.post("/api/conversations/{wa_id}/handoff/close")
-def api_close_handoff(wa_id: str, user: dict = Depends(get_current_user)):
-    out = clear_handoff(wa_id)
-    emit_event({"type": "handoff_close", "wa_id": wa_id})
-    return {"ok": True, "result": out}
-
-
-@app.patch("/api/conversations/{wa_id}")
-async def api_update_contact(wa_id: str, payload: dict, user: dict = Depends(get_current_user)):
-    name = payload.get("name") or payload.get("nome")
-    telefone = payload.get("telefone") or payload.get("phone")
-    stage = payload.get("stage")
-    notes = payload.get("notes")
-    tags = payload.get("tags")
-
-    updated = None
-
-    if name is not None or telefone is not None:
-        try:
-            updated = upsert_user(wa_id, name=name, telefone=telefone)
-        except TypeError:
-            updated = upsert_user(wa_id, name or "", telefone or "")
-
-    if stage is not None:
-        updated = set_stage(wa_id, stage)
-
-    if notes is not None:
-        updated = set_notes(wa_id, notes)
-
-    if tags is not None:
-        updated = set_tags(wa_id, tags)
-
-    emit_event({"type": "contact_update", "wa_id": wa_id})
-    return {"ok": True, "item": updated or {"wa_id": wa_id}}
-
-
-@app.get("/api/tasks")
-def api_list_tasks(
-    status: str = Query("open"),
-    due_before: str = Query("", alias="due_before"),
-    wa_id: str = Query("", alias="wa_id"),
-    user: dict = Depends(get_current_user),
-):
-    return {
-        "items": list_tasks(
-            status=status,
-            due_before=(due_before or None),
-            wa_id=(wa_id or None),
-            limit=500,
-        )
-    }
-
-
-@app.post("/api/tasks")
-def api_create_task(payload: dict, user: dict = Depends(get_current_user)):
-    wa_id = (payload.get("wa_id") or "").strip()
-    title = (payload.get("title") or "").strip()
-    due_at = (payload.get("due_at") or "").strip()
-    note = (payload.get("note") or "").strip()
-
-    if not wa_id or not title or not due_at:
-        raise HTTPException(status_code=400, detail="wa_id, title, due_at required")
-
-    item = create_task(wa_id, title, due_at)
-
-    if note:
-        try:
-            set_notes(wa_id, note)
-        except Exception:
-            pass
-
-    try:
-        schedule_task_due(item.get("id") or "", wa_id, title, due_at)
-    except Exception as e:
-        print("schedule_task_due failed:", repr(e))
-
-    emit_event({"type": "task_create", "wa_id": wa_id, "item": item})
-    return {"ok": True, "item": item}
-
-
-@app.patch("/api/tasks/{task_id}")
-def api_patch_task(task_id: str, payload: dict, user: dict = Depends(get_current_user)):
-    due_at = payload.get("due_at") or payload.get("dueAt") or payload.get("due")
-    title = payload.get("title")
-    status = payload.get("status")
-    wa_id = payload.get("wa_id") or payload.get("waId")
-
-    out = update_task(task_id, due_at=due_at, title=title, status=status, wa_id=wa_id)
-    if not out.get("ok"):
-        raise HTTPException(status_code=400, detail=out.get("detail") or out.get("body") or "update failed")
-
-    emit_event({"type": "task_update", "id": task_id, "item": out.get("item")})
-    return {"ok": True, "item": out.get("item")}
-
-
-@app.post("/api/tasks/{task_id}/done")
-def api_done_task(task_id: str, user: dict = Depends(get_current_user)):
-    out = done_task(task_id)
-    cancel_timer(task_id)
-    emit_event({"type": "task_done", "id": task_id})
-    return {"ok": True, "result": out}
-
-
-# ============================================================
-# WEBHOOK verify (Meta) — público
-# ============================================================
-@app.get("/webhook")
-def verify_webhook(
-    hub_mode: str = Query(None, alias="hub.mode"),
-    hub_verify_token: str = Query(None, alias="hub.verify_token"),
-    hub_challenge: str = Query(None, alias="hub.challenge"),
-):
-    if hub_mode == "subscribe" and hub_verify_token == VERIFY_TOKEN:
-        return PlainTextResponse(hub_challenge or "")
-    raise HTTPException(status_code=403, detail="Verification failed")
-
-
-# ============================================================
-# Handoff helper
-# ============================================================
 def start_handoff_now(
     *,
     wa_id: str,
@@ -538,71 +128,52 @@ def start_handoff_now(
     summary: str = "",
     last_text: str = "",
 ):
-    topic = (topic or reason or "Atendimento").strip()[:100]
+    topic = topic or reason or "Atendimento"
 
-    try:
-        set_handoff_pending(wa_id, False)
-        set_handoff_topic(wa_id, topic)
-    except Exception as e:
-        print(f"[{cid}] Falha ao atualizar status de handoff: {e}")
+    set_handoff_pending(wa_id, False)
+    set_handoff_topic(wa_id, topic)
 
-    try:
-        upsert_user(wa_id, lead_stage="em_negociacao", priority=3)
-    except Exception as e:
-        print(f"[{cid}] Falha ao setar lead_stage em_negociacao:", repr(e))
+    link_text = f"Olá! Preciso de atendimento.\nAssunto: {topic}\nID: {wa_id}"
+    encoded = urllib.parse.quote(link_text)
+    link = f"https://wa.me/{HUMAN_NUMBER}?text={encoded}"
 
-    if not summary:
-        try:
-            hist = get_recent_messages(wa_id, limit=6) or []
-            entradas = [(m.get("text") or "").strip() for m in hist if m.get("direction") == "in"]
-            summary = " | ".join(entradas[-3:])[:200]
-        except Exception:
-            summary = (last_text or "")[:150]
-
-    try:
-        notes = f"MOTIVO: {reason}\nTEMA: {topic}\nCONTEXTO: {summary}"
-        set_notes(wa_id, notes)
-    except Exception:
-        pass
-
-    link_text = f"Olá! Preciso de atendimento estratégico.\n\nAssunto: {topic}\nID: {wa_id}"
-    encoded_text = urllib.parse.quote(link_text)
-    link = f"https://wa.me/{HUMAN_NUMBER}?text={encoded_text}"
-
-    safe_send(
-        wa_id,
-        "Perfeito. Vou direcionar você agora para um dos nossos especialistas dar sequência estratégica ao seu projeto.",
-        meta={"event": "handoff_now", "cid": cid},
-        cid=cid
-    )
-
-    safe_send(
-        wa_id,
-        f"Toque no link para iniciar:\n{link}",
-        meta={"event": "handoff_link", "cid": cid},
-        cid=cid
-    )
-
-    emit_event({"type": "handoff_start", "wa_id": wa_id, "handoff": True, "cid": cid})
+    safe_send(wa_id, "Perfeito. Vou te encaminhar agora para um especialista.")
+    safe_send(wa_id, f"Toque no link para continuar:\n{link}")
 
 
 # ============================================================
-# WEBHOOK messages (Meta) — público
+# HEALTH
+# ============================================================
+@app.get("/health")
+def health():
+    return {"ok": True}
+
+
+# ============================================================
+# WEBHOOK VERIFY
+# ============================================================
+@app.get("/webhook")
+def verify_webhook(
+    hub_mode: str = Query(None, alias="hub.mode"),
+    hub_verify_token: str = Query(None, alias="hub.verify_token"),
+    hub_challenge: str = Query(None, alias="hub.challenge"),
+):
+    if hub_mode == "subscribe" and hub_verify_token == VERIFY_TOKEN:
+        return PlainTextResponse(hub_challenge or "")
+    raise HTTPException(status_code=403)
+
+
+# ============================================================
+# WEBHOOK MAIN
 # ============================================================
 @app.post("/webhook")
 async def receive_webhook(request: Request):
-    cid = uuid.uuid4().hex[:10]
-    data = await request.json()
 
-    if DEBUG_WEBHOOK:
-        print(f"[{cid}] INCOMING RAW:", _j(data)[:3000])
-
-    wa_id: Optional[str] = None
-    msg_type: Optional[str] = None
-    user_text: Optional[str] = None
-    choice_id: str = ""
+    cid = uuid.uuid4().hex[:8]
 
     try:
+        data = await request.json()
+
         entry = (data.get("entry") or [])
         if not entry:
             return {"ok": True}
@@ -612,201 +183,93 @@ async def receive_webhook(request: Request):
             return {"ok": True}
 
         value = (changes[0].get("value") or {})
-
-        statuses = value.get("statuses") or []
-        if statuses:
-            return {"ok": True}
-
         messages = value.get("messages") or []
         if not messages:
             return {"ok": True}
 
-        msg = messages[0] or {}
+        msg = messages[0]
         wa_id = (msg.get("from") or "").strip()
         if not wa_id:
             return {"ok": True}
 
-        contacts = value.get("contacts", [{}]) or [{}]
-        profile = (contacts[0].get("profile") or {}) if contacts else {}
-        name = (profile.get("name") or "").strip()
-        telefone = (contacts[0].get("wa_id") or wa_id).strip()
+        contacts = value.get("contacts", [{}])
+        profile = (contacts[0].get("profile") or {})
+        name = profile.get("name", "")
+        telefone = contacts[0].get("wa_id", wa_id)
 
         user = upsert_user(wa_id, name=name, telefone=telefone)
         ai_state = await get_ai_state(wa_id)
 
-        msg_type = (msg.get("type") or "").strip()
-
-        if msg_type in ("audio", "image", "video", "document", "voice", "sticker"):
-            out = "Por enquanto eu não consigo analisar mídia aqui. Pode mandar em texto, em uma frase?"
-            safe_send(wa_id, out, meta={"reason": "media_not_supported", "cid": cid}, cid=cid)
-            emit_event({"type": "message_out", "wa_id": wa_id, "cid": cid})
-            return {"ok": True}
+        # ========= extrai texto =========
+        msg_type = msg.get("type")
+        user_text = ""
+        choice_id = ""
 
         if msg_type == "text":
-            user_text = ((msg.get("text") or {}).get("body") or "").strip()
+            user_text = msg["text"]["body"]
 
         elif msg_type == "interactive":
-            inter = msg.get("interactive") or {}
-            br = (inter.get("button_reply") or {})
-            lr = (inter.get("list_reply") or {})
-            choice_id = (br.get("id") or lr.get("id") or "").strip()
-            user_text = (br.get("title") or lr.get("title") or "").strip()
-
-        else:
-            return {"ok": True}
+            inter = msg["interactive"]
+            choice_id = (
+                inter.get("button_reply", {}).get("id")
+                or inter.get("list_reply", {}).get("id")
+                or ""
+            )
+            user_text = (
+                inter.get("button_reply", {}).get("title")
+                or inter.get("list_reply", {}).get("title")
+                or ""
+            )
 
         if not user_text:
             return {"ok": True}
 
-        lower = user_text.lower().strip()
+        log_message(wa_id, "in", user_text)
 
-        log_message(wa_id, "in", user_text, meta={"src": "whatsapp", "type": msg_type, "cid": cid, "choice_id": choice_id})
-        emit_event({"type": "message_in", "wa_id": wa_id, "cid": cid})
+        # ==================================================
+        # FLOW PRIMEIRO
+        # ==================================================
+        flow_resp = handle_mugo_flow(wa_id, user_text, choice_id=choice_id)
 
-        # voltar pro bot (zera handoff + zera ai_state)
-        back_triggers = ["voltar", "volta", "robo", "robô", "bot", "menu", "inicio", "início"]
-        if any(t in lower for t in back_triggers):
-            clear_handoff(wa_id)
-            try:
-                set_handoff_pending(wa_id, False)
-            except Exception:
-                pass
-            await reset_ai_state(wa_id)
+        if flow_resp:
 
-            # volta com botões
-            safe_send(
-                wa_id,
-                {
-                    "type": "buttons",
-                    "text": "Beleza. Qual é o foco agora?",
-                    "buttons": [
-                        {"id": "FLOW_AUTOMATIZAR", "title": "Automação"},
-                        {"id": "FLOW_SITE", "title": "Site / E-commerce"},
-                        {"id": "FLOW_SOCIAL", "title": "Social / Tráfego"},
-                    ],
-                },
-                meta={"event": "back_to_menu", "cid": cid},
-                cid=cid,
-            )
-            emit_event({"type": "message_out", "wa_id": wa_id, "cid": cid})
-            return {"ok": True}
-
-        # handoff ativo: bloqueia IA, mas atualiza inteligência se tiver sinal
-        if bool(user.get("handoff_active")):
-            try:
-                bump = _lead_signal_bump(lower)
-                if bump > 0:
-                    prev = int(user.get("lead_score") or 0)
-                    new_score = min(100, prev + bump)
-                    new_temp = "quente" if new_score >= 70 else ("qualificado" if new_score >= 40 else "frio")
-                    theme = str(user.get("lead_theme") or "indefinido")
-                    update_lead_intelligence(wa_id=wa_id, score=new_score, temperature=new_temp, theme=theme)
-                    emit_event({"type": "lead_update", "wa_id": wa_id, "lead_score": new_score, "lead_temperature": new_temp, "lead_theme": theme})
-            except Exception:
-                pass
-
-            safe_send(
-                wa_id,
-                'Seu atendimento já foi direcionado. Para retornar ao bot, digite "voltar".',
-                meta={"event": "handoff_active_block", "cid": cid},
-                cid=cid,
-            )
-            emit_event({"type": "message_out", "wa_id": wa_id, "cid": cid})
-            return {"ok": True}
-
-        # pediu humano
-        if any(t in lower for t in ["humano", "pessoa", "atendente", "falar com alguém", "falar com uma pessoa"]):
-            start_handoff_now(
-                wa_id=wa_id,
-                cid=cid,
-                reason="user_asked_human",
-                topic="Pedido de humano",
-                summary="",
-                last_text=user_text,
-            )
-            return {"ok": True}
-
-        # ✅ FUNIL MUGÔ: primeiro tenta fluxo
-        try:
-            flow_resp = handle_mugo_flow(wa_id, user_text, choice_id=choice_id)
-            if flow_resp:
-                safe_send(wa_id, flow_resp, meta={"src": "mugo_flow", "cid": cid, "choice_id": choice_id}, cid=cid)
-                emit_event({"type": "message_out", "wa_id": wa_id, "cid": cid})
+            # resposta normal do fluxo
+            if flow_resp.get("type") in ("buttons", "text"):
+                safe_send(wa_id, flow_resp)
                 return {"ok": True}
-        except Exception as e:
-            print(f"[{cid}] mugo_flow failed:", repr(e))
 
-        # primeira mensagem -> manda menu com botões
-        if not bool(user.get("first_message_sent")):
-            safe_send(
-                wa_id,
-                {
-                    "type": "buttons",
-                    "text": "Oi. Aqui é da Mugô. O que você quer destravar agora?",
-                    "buttons": [
-                        {"id": "FLOW_AUTOMATIZAR", "title": "Automação"},
-                        {"id": "FLOW_SITE", "title": "Site / E-commerce"},
-                        {"id": "FLOW_SOCIAL", "title": "Social / Tráfego"},
-                    ],
-                },
-                meta={"event": "intro_buttons", "cid": cid},
-                cid=cid,
-            )
-            mark_first_message_sent(wa_id)
-            emit_event({"type": "message_out", "wa_id": wa_id, "cid": cid})
-            return {"ok": True}
+            # final do flow -> IA + Handoff
+            if flow_resp.get("type") == "ai":
+                flow_context = flow_resp.get("flow_context") or {}
+                ai_user_msg = flow_resp.get("user_message") or user_text
 
-        # ============================
-        # REGRAS DURAS (ANTES DA IA)
-        # ============================
-        last_user = (ai_state.get("last_user_message") or "").strip().lower()
-        curr_user = (user_text or "").strip().lower()
-        repeat_hits = int(ai_state.get("repeat_hits") or 0)
+                result = generate_reply(
+                    wa_id=wa_id,
+                    user_message=ai_user_msg,
+                    first_message_sent=True,
+                    name=name,
+                    telefone=telefone,
+                    flow_context=flow_context,
+                )
 
-        if curr_user and last_user and curr_user == last_user:
-            repeat_hits += 1
+                reply = result.get("reply") or "Perfeito. Vou te encaminhar agora."
 
-        if any(x in lower for x in ["já falei", "ja falei", "já respondi", "ja respondi", "você já perguntou", "voce ja perguntou"]):
-            repeat_hits += 1
+                safe_send(wa_id, reply)
 
-        ai_state["repeat_hits"] = repeat_hits
-        ai_state["last_user_message"] = user_text
+                start_handoff_now(
+                    wa_id=wa_id,
+                    cid=cid,
+                    reason="flow_completed",
+                    topic="Lead qualificado",
+                    summary=result.get("handoff_summary") or ai_user_msg,
+                    last_text=user_text,
+                )
 
-        if repeat_hits >= 2:
-            start_handoff_now(
-                wa_id=wa_id,
-                cid=cid,
-                reason="loop_detected",
-                topic="Cliente irritado / repetição",
-                summary=(ai_state.get("last_user_goal") or "").strip(),
-                last_text=user_text,
-            )
-            await upsert_ai_state(wa_id, ai_state)
-            return {"ok": True}
+                return {"ok": True}
 
-        bot_qcount = int(ai_state.get("bot_question_count") or ai_state.get("question_count") or 0)
-        if bot_qcount >= 6:
-            start_handoff_now(
-                wa_id=wa_id,
-                cid=cid,
-                reason="too_many_questions",
-                topic="Cliente rodando",
-                summary=(ai_state.get("last_user_goal") or "").strip(),
-                last_text=user_text,
-            )
-            await upsert_ai_state(wa_id, ai_state)
-            return {"ok": True}
-
-        close_score = int(ai_state.get("close_score") or 0)
-        if any(x in lower for x in ["orçamento", "orcamento", "valor", "preço", "preco", "fechar", "contrato", "começar", "comecar", "prazo"]):
-            close_score = min(100, close_score + 15)
-
-        ai_state["close_score"] = close_score
-        await upsert_ai_state(wa_id, ai_state)
-
-        # ============================
-        # IA
-        # ============================
+        # ==================================================
+        # IA NORMAL
+        # ==================================================
         result = generate_reply(
             wa_id=wa_id,
             user_message=user_text,
@@ -815,70 +278,22 @@ async def receive_webhook(request: Request):
             telefone=telefone,
         )
 
-        reply_text = (result.get("reply") or "").strip() or "Em uma frase: qual é o foco agora?"
-        intent = (result.get("intent") or "").strip()
-        question_key = (result.get("question_key") or "").strip()
-        handoff_flag = bool(result.get("handoff"))
-        handoff_summary = (result.get("handoff_summary") or "").strip()
+        reply = result.get("reply") or "Em uma frase: qual é o foco agora?"
+        safe_send(wa_id, reply)
 
-        lead_score = int(result.get("lead_score") or 0)
-        lead_temperature = str(result.get("lead_temperature") or "frio")
-        lead_theme = str(result.get("lead_theme") or "indefinido")
-
-        try:
-            update_lead_intelligence(wa_id=wa_id, score=lead_score, temperature=lead_temperature, theme=lead_theme)
-        except Exception as e:
-            print(f"[{cid}] update_lead_intelligence failed:", repr(e))
-
-        try:
-            user = upsert_user(wa_id, name=name, telefone=telefone)
-        except Exception:
-            pass
-
-        try:
-            tags_list = _safe_tags_to_list(user.get("tags"))
-            if lead_theme and lead_theme != "indefinido" and lead_theme not in tags_list:
-                tags_list.append(lead_theme)
-            if tags_list:
-                set_tags(wa_id, tags_list)
-        except Exception:
-            pass
-
-        emit_event({"type": "lead_update", "wa_id": wa_id, "lead_score": lead_score, "lead_temperature": lead_temperature, "lead_theme": lead_theme})
-
-        if intent:
-            ai_state["intent"] = intent
-
-        if question_key and question_key != "none":
-            ai_state["bot_question_count"] = int(ai_state.get("bot_question_count") or 0) + 1
-            ai_state["question_count"] = int(ai_state.get("question_count") or 0) + 1
-            ai_state["last_question_key"] = question_key
-
-        if handoff_summary:
-            ai_state["last_user_goal"] = handoff_summary
-
-        ai_state["last_bot_message"] = reply_text
-        await upsert_ai_state(wa_id, ai_state)
-
-        if handoff_flag:
-            next_intent = str(result.get("next_intent") or "ai_handoff").strip()
+        if result.get("handoff"):
             start_handoff_now(
                 wa_id=wa_id,
                 cid=cid,
-                reason=next_intent,
-                topic=f"Handoff IA: {next_intent}",
-                summary=handoff_summary,
+                reason="ai_handoff",
+                topic="Encaminhado pela IA",
+                summary=result.get("handoff_summary") or user_text,
                 last_text=user_text,
             )
-            return {"ok": True}
 
-        safe_send(wa_id, reply_text, meta={"src": "ai", "cid": cid}, cid=cid)
-        emit_event({"type": "message_out", "wa_id": wa_id, "cid": cid})
         return {"ok": True}
 
     except Exception as e:
-        print(f"[{cid}] Erro no webhook:", repr(e))
-        if DEBUG_WEBHOOK:
-            print(f"[{cid}] SAFE DEBUG:", {"wa_id": wa_id, "type": msg_type, "text": user_text})
-            print(f"[{cid}] PAYLOAD:", _j(data)[:4000])
+        print(f"[{cid}] ERRO:", e)
+        traceback.print_exc()
         return {"ok": True}

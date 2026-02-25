@@ -1,3 +1,4 @@
+# mugo-zap/server/services/state.py
 import os
 import json
 from datetime import datetime, timezone
@@ -12,6 +13,12 @@ WA_USERS_TABLE = (os.getenv("WA_USERS_TABLE") or "whatsapp_users").strip()
 WA_MESSAGES_TABLE = (os.getenv("WA_MESSAGES_TABLE") or "whatsapp_messages").strip()
 WA_TASKS_TABLE = (os.getenv("WA_TASKS_TABLE") or "whatsapp_tasks").strip()
 
+# ============================================================
+# HTTP client (reutilizável -> MUITO mais rápido no Render)
+# ============================================================
+_TIMEOUT = httpx.Timeout(connect=6.0, read=12.0, write=12.0, pool=12.0)
+_CLIENT = httpx.Client(timeout=_TIMEOUT, headers={"Content-Type": "application/json"})
+
 
 # ============================================================
 # Helpers
@@ -19,14 +26,19 @@ WA_TASKS_TABLE = (os.getenv("WA_TASKS_TABLE") or "whatsapp_tasks").strip()
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
-def _headers() -> Dict[str, str]:
+
+def _headers(extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
     if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
         raise RuntimeError("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY")
-    return {
+    base = {
         "apikey": SUPABASE_SERVICE_ROLE_KEY,
         "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
         "Content-Type": "application/json",
     }
+    if extra:
+        base.update(extra)
+    return base
+
 
 def _safe_json(v: Any, fallback: Any):
     try:
@@ -40,25 +52,25 @@ def _safe_json(v: Any, fallback: Any):
         pass
     return fallback
 
+
 def _get(url: str) -> httpx.Response:
-    with httpx.Client(timeout=12) as client:
-        return client.get(url, headers=_headers())
+    return _CLIENT.get(url, headers=_headers())
+
 
 def _post(url: str, payload: dict, prefer: str = "return=representation") -> httpx.Response:
-    with httpx.Client(timeout=12) as client:
-        return client.post(
-            url,
-            headers={**_headers(), "Prefer": prefer},
-            data=json.dumps(payload),
-        )
+    return _CLIENT.post(
+        url,
+        headers=_headers({"Prefer": prefer}),
+        content=json.dumps(payload, ensure_ascii=False),
+    )
+
 
 def _patch(url: str, payload: dict, prefer: str = "return=representation") -> httpx.Response:
-    with httpx.Client(timeout=12) as client:
-        return client.patch(
-            url,
-            headers={**_headers(), "Prefer": prefer},
-            data=json.dumps(payload),
-        )
+    return _CLIENT.patch(
+        url,
+        headers=_headers({"Prefer": prefer}),
+        content=json.dumps(payload, ensure_ascii=False),
+    )
 
 
 # ============================================================
@@ -75,7 +87,6 @@ def upsert_user(wa_id: str, name: str = "", telefone: str = "", **extra) -> Dict
         "telefone": (telefone or "").strip(),
     }
 
-    # campos opcionais (se existirem na tabela)
     for k in [
         "first_message_sent",
         "handoff_active",
@@ -96,7 +107,7 @@ def upsert_user(wa_id: str, name: str = "", telefone: str = "", **extra) -> Dict
         "lead_theme",
         "lead_stage",
         "priority",
-        # ✅ FLOW
+        # FLOW
         "flow_state",
         "flow_data",
     ]:
@@ -121,6 +132,7 @@ def upsert_user(wa_id: str, name: str = "", telefone: str = "", **extra) -> Dict
     except Exception as e:
         return {"_error": str(e), **payload}
 
+
 def mark_first_message_sent(wa_id: str):
     wa_id = (wa_id or "").strip()
     if not wa_id:
@@ -128,11 +140,14 @@ def mark_first_message_sent(wa_id: str):
     upsert_user(wa_id, first_message_sent=True)
     return {"ok": True}
 
+
 def set_stage(wa_id: str, stage: str):
     return upsert_user(wa_id, stage=stage)
 
+
 def set_notes(wa_id: str, notes: str):
     return upsert_user(wa_id, notes=notes)
+
 
 def set_tags(wa_id: str, tags: Any):
     t = tags
@@ -149,8 +164,10 @@ def set_tags(wa_id: str, tags: Any):
 def set_handoff_pending(wa_id: str, pending: bool):
     return upsert_user(wa_id, handoff_pending=bool(pending))
 
+
 def set_handoff_topic(wa_id: str, topic: str):
     return upsert_user(wa_id, handoff_topic=(topic or "").strip(), handoff_active=True)
+
 
 def clear_handoff(wa_id: str):
     return upsert_user(wa_id, handoff_active=False, handoff_pending=False, handoff_topic="")
@@ -230,6 +247,7 @@ def log_message(wa_id: str, direction: str, text: str, meta: Optional[dict] = No
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
+
 def get_recent_messages(wa_id: str, limit: int = 60) -> List[Dict[str, Any]]:
     wa_id = (wa_id or "").strip()
     if not wa_id:
@@ -247,6 +265,7 @@ def get_recent_messages(wa_id: str, limit: int = 60) -> List[Dict[str, Any]]:
     except Exception:
         pass
     return []
+
 
 def list_conversations(limit: int = 200) -> List[Dict[str, Any]]:
     limit = int(limit or 200)
@@ -374,6 +393,7 @@ def create_task(wa_id: str, title: str, due_at_iso: str) -> Dict[str, Any]:
     except Exception as e:
         return {"_error": str(e), **payload}
 
+
 def list_tasks(
     status: str = "open",
     due_before: Optional[str] = None,
@@ -396,6 +416,7 @@ def list_tasks(
         pass
     return []
 
+
 def done_task(task_id: str) -> Dict[str, Any]:
     task_id = (task_id or "").strip()
     if not task_id:
@@ -416,6 +437,7 @@ def done_task(task_id: str) -> Dict[str, Any]:
         return {"ok": False, "status": r.status_code, "body": r.text}
     except Exception as e:
         return {"ok": False, "error": str(e)}
+
 
 def update_task(task_id: str, **fields) -> Dict[str, Any]:
     task_id = (task_id or "").strip()
@@ -467,8 +489,10 @@ def get_flow(wa_id: str) -> Dict[str, Any]:
 
     return {"state": None, "data": {}}
 
+
 def set_flow_state(wa_id: str, state: Optional[str]):
     return upsert_user(wa_id, flow_state=state)
+
 
 def merge_flow_data(wa_id: str, patch: Dict[str, Any]):
     flow = get_flow(wa_id)
@@ -478,6 +502,7 @@ def merge_flow_data(wa_id: str, patch: Dict[str, Any]):
     if patch and isinstance(patch, dict):
         data.update(patch)
     return upsert_user(wa_id, flow_data=data)
+
 
 def clear_flow(wa_id: str):
     return upsert_user(wa_id, flow_state=None, flow_data={})

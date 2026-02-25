@@ -14,10 +14,8 @@ async function apiFetch(path, opts = {}) {
   const url = `${API_BASE}${path}`;
   const headers = new Headers(opts.headers || {});
 
-  // Painel: bypass simples
   if (PANEL_KEY) headers.set("X-Panel-Key", PANEL_KEY);
 
-  // Se houver sessão supabase, manda também Bearer
   try {
     const { data } = await supabase.auth.getSession();
     const token = data?.session?.access_token;
@@ -93,9 +91,7 @@ export async function createTask(payload) {
 }
 
 export async function doneTask(id) {
-  return apiFetch(`/api/tasks/${encodeURIComponent(id)}/done`, {
-    method: "POST",
-  });
+  return apiFetch(`/api/tasks/${encodeURIComponent(id)}/done`, { method: "POST" });
 }
 
 export async function updateTask(id, payload) {

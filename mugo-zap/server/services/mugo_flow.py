@@ -1,4 +1,3 @@
-# mugo-zap/server/services/mugo_flow.py
 from typing import Any, Dict, Optional
 
 from services.state import (
@@ -10,16 +9,17 @@ from services.state import (
     set_stage,
 )
 
+# TITLES <= 20 chars (senão a Meta rejeita)
 MENU_MAIN = [
     {"id": "FLOW_AUTOMATIZAR", "title": "⚙️ Automação"},
-    {"id": "FLOW_SITE", "title": "🌐 Site / E-commerce"},
-    {"id": "FLOW_SOCIAL", "title": "📈 Social / Tráfego"},
+    {"id": "FLOW_SITE", "title": "🌐 Site / Loja"},
+    {"id": "FLOW_SOCIAL", "title": "📈 Social/Tráfego"},
 ]
 
 AUTOMACAO_MENU = [
-    {"id": "AUTO_ATEND", "title": "💬 Atendimento WhatsApp"},
-    {"id": "AUTO_CRM", "title": "📌 CRM / Funil"},
-    {"id": "AUTO_FIN", "title": "💳 Financeiro / Cobrança"},
+    {"id": "AUTO_ATEND", "title": "💬 WhatsApp"},
+    {"id": "AUTO_CRM", "title": "📌 CRM/Funil"},
+    {"id": "AUTO_FIN", "title": "💳 Cobrança"},
 ]
 
 SITE_MENU = [
@@ -30,14 +30,18 @@ SITE_MENU = [
 
 SOCIAL_MENU = [
     {"id": "SOC_CONT", "title": "✍️ Conteúdo"},
-    {"id": "SOC_GEST", "title": "🧠 Gestão completa"},
+    {"id": "SOC_GEST", "title": "🧠 Gestão"},
     {"id": "SOC_TRAFEGO", "title": "📣 Tráfego pago"},
 ]
 
 CTA_BTNS = [
-    {"id": "CTA_HUMAN", "title": "🤝 Falar com especialista"},
-    {"id": "CTA_PROP", "title": "📩 Receber proposta"},
+    {"id": "CTA_HUMAN", "title": "🤝 Especialista"},
+    {"id": "CTA_PROP", "title": "📩 Proposta"},
 ]
+
+def _is_menu_reset(text: str) -> bool:
+    t = (text or "").strip().lower()
+    return t in ("menu", "inicio", "início", "voltar", "volta")
 
 def handle_mugo_flow(wa_id: str, user_text: str, choice_id: str = "") -> Optional[Dict[str, Any]]:
     flow = get_flow(wa_id) or {}
@@ -47,15 +51,17 @@ def handle_mugo_flow(wa_id: str, user_text: str, choice_id: str = "") -> Optiona
     text = (user_text or "").strip()
     cid = (choice_id or "").strip() or text
 
-    # reset
-    if text.lower().strip() in ("menu", "inicio", "início"):
+    # reset/menu
+    if _is_menu_reset(text):
         set_flow_state(wa_id, "main")
-        return {"type": "buttons", "text": "Beleza. Qual é o foco agora?", "buttons": MENU_MAIN}
+        return {"type": "buttons", "text": "Qual é o foco agora?", "buttons": MENU_MAIN}
 
+    # se não tem state, começa com menu
     if not state:
         set_flow_state(wa_id, "main")
-        return {"type": "buttons", "text": "Oi. Aqui é da Mugô. O que você quer destravar agora?", "buttons": MENU_MAIN}
+        return {"type": "buttons", "text": "Oi! O que você quer destravar agora?", "buttons": MENU_MAIN}
 
+    # ========= MAIN =========
     if state == "main":
         if cid == "FLOW_AUTOMATIZAR":
             merge_flow_data(wa_id, {"macro": "automacao"})
@@ -74,34 +80,48 @@ def handle_mugo_flow(wa_id: str, user_text: str, choice_id: str = "") -> Optiona
 
         return {"type": "buttons", "text": "Escolhe uma opção pra eu te guiar:", "buttons": MENU_MAIN}
 
+    # ========= SUBMENUS =========
     if state in ("automacao_menu", "site_menu", "social_menu"):
-        merge_flow_data(wa_id, {"service_interest": cid})
-        set_flow_state(wa_id, "brief")
-        return {"type": "text", "text": "Em uma frase, o que você quer resolver agora?"}
+        # se clicou em algo válido
+        valid_ids = {b["id"] for b in (AUTOMACAO_MENU + SITE_MENU + SOCIAL_MENU)}
+        if cid in valid_ids:
+            merge_flow_data(wa_id, {"service_interest": cid})
+            set_flow_state(wa_id, "brief")
+            return {"type": "text", "text": "Em 1 frase: o que você quer resolver agora?"}
 
+        # se mandou texto em vez de clicar: ajuda com IA depois, mas mantém menu
+        return {"type": "buttons", "text": "Clica em uma opção aqui pra eu encaminhar certinho:", "buttons": (
+            AUTOMACAO_MENU if state == "automacao_menu" else SITE_MENU if state == "site_menu" else SOCIAL_MENU
+        )}
+
+    # ========= BRIEF =========
     if state == "brief":
         if not text:
-            return {"type": "text", "text": "Me diz em uma frase o que você quer resolver agora."}
+            return {"type": "text", "text": "Em 1 frase: o que você quer resolver agora?"}
 
         merge_flow_data(wa_id, {"briefing_text": text})
         set_flow_state(wa_id, "cta")
         return {"type": "buttons", "text": "Agora você prefere:", "buttons": CTA_BTNS}
 
+    # ========= CTA =========
     if state == "cta":
         if cid not in ("CTA_HUMAN", "CTA_PROP"):
-            return {"type": "buttons", "text": "Escolhe uma opção pra eu encaminhar certo:", "buttons": CTA_BTNS}
+            return {"type": "buttons", "text": "Escolhe uma opção pra eu encaminhar:", "buttons": CTA_BTNS}
 
         merge_flow_data(wa_id, {"cta_choice": cid})
         set_flow_state(wa_id, "name")
-        return {"type": "text", "text": "Antes de eu encaminhar, qual seu nome?"}
+        return {"type": "text", "text": "Qual seu nome? (pra eu te encaminhar certo)"}
 
+    # ========= NAME / FINAL =========
     if state == "name":
         if not text:
-            return {"type": "text", "text": "Qual seu nome? (só pra eu encaminhar certinho)"}
+            return {"type": "text", "text": "Me diz seu nome rapidinho 🙂"}
 
         merge_flow_data(wa_id, {"lead_name": text})
+
         final = (get_flow(wa_id) or {}).get("data") or {}
 
+        # salva no CRM
         notes = (
             "NOVO LEAD MUGÔ\n"
             f"Nome: {final.get('lead_name','')}\n"
@@ -125,17 +145,18 @@ def handle_mugo_flow(wa_id: str, user_text: str, choice_id: str = "") -> Optiona
         # encerra flow
         clear_flow(wa_id)
 
-        # ✅ aqui NÃO envia msg — entrega pra IA com contexto
+        # entrega pra IA + contexto (e depois teu app.py faz handoff)
         return {
             "type": "ai",
             "flow_context": final,
             "user_message": (
-                f"Lead finalizado via botões.\n"
+                "Lead finalizado via botões.\n"
                 f"Nome: {final.get('lead_name','')}\n"
+                f"Macro: {final.get('macro','')}\n"
                 f"Interesse: {final.get('service_interest','')}\n"
                 f"Objetivo: {final.get('briefing_text','')}\n"
                 f"CTA: {final.get('cta_choice','')}\n"
-                "Agora responda como SDR e encaminhe."
+                "Responda como SDR e encaminhe para humano."
             )
         }
 

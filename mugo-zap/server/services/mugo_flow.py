@@ -1,400 +1,387 @@
 # mugo-zap/server/services/mugo_flow.py
-from typing import Any, Dict, Optional, List
+import os
+import json
+from datetime import datetime, timezone
+from typing import Any, Dict, Optional, Tuple, List
 
-from services.state import (
-    get_flow,
-    set_flow_state,
-    merge_flow_data,
-    clear_flow,
-    set_notes,
-    set_stage,
-)
+import httpx
 
 # ============================================================
-# MENUS (3 botões sempre)
+# ENV
 # ============================================================
+SUPABASE_URL = (os.getenv("SUPABASE_URL") or "").strip().rstrip("/")
+SUPABASE_SERVICE_ROLE_KEY = (os.getenv("SUPABASE_SERVICE_ROLE_KEY") or "").strip()
 
-MENU_MAIN = [
-    {"id": "FLOW_AUTOMATIZAR", "title": "Automação"},
-    {"id": "FLOW_SITE", "title": "Site / E-commerce"},
-    {"id": "FLOW_SOCIAL", "title": "Social / Tráfego"},
-]
-MAIN_IDS = {"FLOW_AUTOMATIZAR", "FLOW_SITE", "FLOW_SOCIAL"}
+WA_FLOW_TABLE = (os.getenv("WA_FLOW_TABLE") or "whatsapp_flow_state").strip()
 
-AUTOMACAO_MENU = [
-    {"id": "AUTO_ATEND", "title": "Atendimento Whats"},
-    {"id": "AUTO_CRM", "title": "CRM / Funil"},
-    {"id": "AUTO_FIN", "title": "Financeiro"},
-]
-
-SITE_MENU = [
-    {"id": "SITE_INST", "title": "Institucional"},
-    {"id": "SITE_LP", "title": "Landing page"},
-    {"id": "SITE_LOJA", "title": "Loja virtual"},
-]
-
-SITE_INST_GOAL = [
-    {"id": "SITE_INST_APRESENTAR", "title": "Apresentar"},
-    {"id": "SITE_INST_LEADS", "title": "Gerar leads"},
-    {"id": "SITE_INST_CRED", "title": "Autoridade"},
-]
-
-LP_GOAL = [
-    {"id": "LP_LEADS", "title": "Captar leads"},
-    {"id": "LP_VENDER", "title": "Vender"},
-    {"id": "LP_EVENTO", "title": "Evento"},
-]
-
-ECOM_PLATFORM = [
-    {"id": "ECOM_SHOPIFY", "title": "Shopify"},
-    {"id": "ECOM_NUVEM", "title": "Nuvemshop"},
-    {"id": "ECOM_OUTRO", "title": "Outro / Não sei"},
-]
-
-SOCIAL_MENU = [
-    {"id": "SOC_CONT", "title": "Conteúdo"},
-    {"id": "SOC_GEST", "title": "Gestão completa"},
-    {"id": "SOC_TRAFEGO", "title": "Tráfego pago"},
-]
-
-CONTENT_GOAL = [
-    {"id": "CONT_CRESCER", "title": "Crescer"},
-    {"id": "CONT_VENDER", "title": "Vender"},
-    {"id": "CONT_AUTO", "title": "Autoridade"},
-]
-
-CHANNELS_COUNT = [
-    {"id": "CH_1", "title": "1 rede"},
-    {"id": "CH_2", "title": "2 redes"},
-    {"id": "CH_3", "title": "3+ redes"},
-]
-
-ADS_GOAL = [
-    {"id": "ADS_WHATS", "title": "Leads no Whats"},
-    {"id": "ADS_SITE", "title": "Venda no site"},
-    {"id": "ADS_REMARK", "title": "Remarketing"},
-]
-
-# Prazo paginado (5 -> 2 telas)
-PRAZO_P1 = [
-    {"id": "PRAZO_URG", "title": "Urgente"},
-    {"id": "PRAZO_7", "title": "Até 7 dias"},
-    {"id": "PRAZO_MORE", "title": "Mais opções"},
-]
-PRAZO_P2 = [
-    {"id": "PRAZO_15", "title": "Até 15 dias"},
-    {"id": "PRAZO_30", "title": "Até 30 dias"},
-    {"id": "PRAZO_PLAN", "title": "Sem pressa"},
-]
-
-# Budget paginado por macro
-BUDGET_AUT_P1 = [
-    {"id": "B_AUT_500", "title": "Até R$ 500"},
-    {"id": "B_AUT_2000", "title": "R$ 500-2k"},
-    {"id": "BUD_MORE", "title": "Mais opções"},
-]
-BUDGET_AUT_P2 = [
-    {"id": "B_AUT_5000", "title": "R$ 2k-5k"},
-    {"id": "B_AUT_12000", "title": "R$ 5k+"},
-    {"id": "B_AUT_NS", "title": "Ainda não sei"},
-]
-
-BUDGET_SITE_P1 = [
-    {"id": "B_SITE_2000", "title": "Até R$ 2k"},
-    {"id": "B_SITE_5000", "title": "R$ 2k-5k"},
-    {"id": "BUD_MORE", "title": "Mais opções"},
-]
-BUDGET_SITE_P2 = [
-    {"id": "B_SITE_12000", "title": "R$ 5k-12k"},
-    {"id": "B_SITE_25000", "title": "R$ 12k+"},
-    {"id": "B_SITE_NS", "title": "Ainda não sei"},
-]
-
-BUDGET_SOC_P1 = [
-    {"id": "B_SOC_800", "title": "Até R$ 800"},
-    {"id": "B_SOC_2000", "title": "R$ 800-2k"},
-    {"id": "BUD_MORE", "title": "Mais opções"},
-]
-BUDGET_SOC_P2 = [
-    {"id": "B_SOC_5000", "title": "R$ 2k-5k"},
-    {"id": "B_SOC_5000P", "title": "R$ 5k+"},
-    {"id": "B_SOC_NS", "title": "Ainda não sei"},
-]
-
-SRC_P1 = [
-    {"id": "SRC_IG", "title": "Instagram"},
-    {"id": "SRC_INDIC", "title": "Indicação"},
-    {"id": "SRC_MORE", "title": "Mais opções"},
-]
-SRC_P2 = [
-    {"id": "SRC_GOOGLE", "title": "Google"},
-    {"id": "SRC_ANUNCIO", "title": "Anúncio"},
-    {"id": "SRC_OUTRO", "title": "Outro"},
-]
-
-CTA_BTNS = [
-    {"id": "CTA_HUMAN", "title": "Falar com Julia"},
-    {"id": "CTA_PROP", "title": "Receber proposta"},
-    {"id": "CTA_MENU", "title": "Menu"},
-]
+HTTP_TIMEOUT = float(os.getenv("FLOW_HTTP_TIMEOUT") or "10")
+DEBUG_FLOW = (os.getenv("DEBUG_FLOW") or "").strip().lower() in ("1", "true", "yes")
 
 
 # ============================================================
-# Helpers
+# DB helpers (Supabase REST)
 # ============================================================
-def _intro_text() -> str:
-    return (
-        "Oi! Aqui é da Mugô.\n"
-        "A gente destrava operação com automação, sites e performance.\n"
-        "Qual é o foco agora?"
+def _headers() -> Dict[str, str]:
+    return {
+        "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+        "apikey": SUPABASE_SERVICE_ROLE_KEY,
+        "Content-Type": "application/json",
+    }
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _safe_json(obj: Any) -> str:
+    try:
+        return json.dumps(obj, ensure_ascii=False)
+    except Exception:
+        return str(obj)
+
+
+def _flow_get(wa_id: str) -> Tuple[str, Dict[str, Any]]:
+    """
+    Retorna (state, data). Se não existir, retorna ("mugo_cta", {}).
+    """
+    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY or not wa_id:
+        return "mugo_cta", {}
+
+    url = f"{SUPABASE_URL}/rest/v1/{WA_FLOW_TABLE}"
+    params = {
+        "select": "state,data",
+        "wa_id": f"eq.{wa_id}",
+        "limit": "1",
+    }
+
+    try:
+        with httpx.Client(timeout=HTTP_TIMEOUT) as client:
+            r = client.get(url, headers=_headers(), params=params)
+
+        if r.status_code >= 300:
+            return "mugo_cta", {}
+
+        rows = r.json() or []
+        if not rows:
+            return "mugo_cta", {}
+
+        row = rows[0] or {}
+        state = (row.get("state") or "mugo_cta").strip() or "mugo_cta"
+        data = row.get("data") or {}
+        if not isinstance(data, dict):
+            data = {}
+        return state, data
+
+    except Exception:
+        return "mugo_cta", {}
+
+
+def _flow_save(wa_id: str, state: str, data: Dict[str, Any]) -> None:
+    """
+    Upsert (wa_id, state, data, updated_at)
+    """
+    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY or not wa_id:
+        return
+
+    payload = {
+        "wa_id": wa_id,
+        "state": (state or "mugo_cta").strip(),
+        "data": data or {},
+        "updated_at": _now_iso(),
+    }
+
+    url = f"{SUPABASE_URL}/rest/v1/{WA_FLOW_TABLE}?on_conflict=wa_id"
+    headers = _headers()
+    headers["Prefer"] = "resolution=merge-duplicates"
+
+    try:
+        with httpx.Client(timeout=HTTP_TIMEOUT) as client:
+            client.post(url, headers=headers, json=payload)
+    except Exception:
+        return
+
+
+# ============================================================
+# WA payload helpers
+# ============================================================
+def _text(t: str) -> Dict[str, Any]:
+    return {"type": "text", "text": (t or "").strip()}
+
+
+def _buttons(text: str, buttons: List[Dict[str, str]]) -> Dict[str, Any]:
+    # formato que você já usa no app.py
+    return {"type": "buttons", "text": (text or "").strip(), "buttons": buttons}
+
+
+def _menu_cta() -> Dict[str, Any]:
+    return _buttons(
+        "Beleza. Qual é o foco agora?",
+        [
+            {"id": "FLOW_AUTOMATIZAR", "title": "Automação"},
+            {"id": "FLOW_SITE", "title": "Site / E-commerce"},
+            {"id": "FLOW_SOCIAL", "title": "Social / Tráfego"},
+        ],
     )
 
-def _pretty(v: Any) -> str:
-    return (str(v) if v is not None else "").strip()
 
-def _ensure_main(wa_id: str):
-    set_flow_state(wa_id, "main")
+# ============================================================
+# Normalização
+# ============================================================
+def _norm(s: str) -> str:
+    return (s or "").strip().lower()
 
-def _budget_pages(macro: str):
-    m = (macro or "").lower()
-    if m == "automacao":
-        return BUDGET_AUT_P1, BUDGET_AUT_P2
-    if m == "site":
-        return BUDGET_SITE_P1, BUDGET_SITE_P2
-    return BUDGET_SOC_P1, BUDGET_SOC_P2
+
+def _is_focus_payload(raw: str) -> bool:
+    r = (raw or "").strip()
+    l = _norm(r)
+    return r in {"FLOW_AUTOMATIZAR", "FLOW_SITE", "FLOW_SOCIAL"} or l in {
+        "automação", "automacao",
+        "site / e-commerce", "site / ecommerce", "site", "e-commerce", "ecommerce",
+        "social / tráfego", "social / trafego", "social", "tráfego", "trafego",
+    }
+
+
+def _focus_from_payload(raw: str) -> str:
+    r = (raw or "").strip()
+    l = _norm(r)
+
+    if r == "FLOW_AUTOMATIZAR" or l in {"automação", "automacao"}:
+        return "automacao"
+    if r == "FLOW_SITE" or l in {"site / e-commerce", "site / ecommerce", "site", "e-commerce", "ecommerce"}:
+        return "site"
+    if r == "FLOW_SOCIAL" or l in {"social / tráfego", "social / trafego", "social", "tráfego", "trafego"}:
+        return "social"
+    return "indefinido"
 
 
 # ============================================================
-# Flow
+# Step builders
 # ============================================================
-def handle_mugo_flow(wa_id: str, user_text: str, choice_id: str = "") -> Optional[Dict[str, Any]]:
-    flow = get_flow(wa_id) or {}
-    state = (flow.get("state") or "").strip()
-    text = (user_text or "").strip()
-    lower = text.lower().strip()
+def _ask_service_type(foco: str) -> Dict[str, Any]:
+    if foco == "automacao":
+        return _buttons(
+            "Qual tipo de automação você quer?",
+            [
+                {"id": "AUTO_WPP", "title": "WhatsApp / Atendimento"},
+                {"id": "AUTO_N8N", "title": "Automações (n8n / integrações)"},
+                {"id": "AUTO_CRM", "title": "CRM / Funil / Pipeline"},
+            ],
+        )
+    if foco == "site":
+        return _buttons(
+            "O que você precisa no digital?",
+            [
+                {"id": "SITE_LP", "title": "Landing Page"},
+                {"id": "SITE_SITE", "title": "Site institucional"},
+                {"id": "SITE_ECOM", "title": "E-commerce"},
+            ],
+        )
+    # social
+    return _buttons(
+        "Qual é a prioridade agora?",
+        [
+            {"id": "SOCIAL_CONTEUDO", "title": "Conteúdo / Linha editorial"},
+            {"id": "SOCIAL_TRAFEGO", "title": "Tráfego pago"},
+            {"id": "SOCIAL_FULL", "title": "Social + Tráfego"},
+        ],
+    )
 
-    # reset simples (menu/inicio)
-    if lower in ("menu", "inicio", "início"):
-        _ensure_main(wa_id)
-        return {"type": "buttons", "text": "Beleza. Qual é o foco agora?", "buttons": MENU_MAIN}
 
-    # ✅ CORREÇÃO CRÍTICA:
-    # Se state está vazio, mas já veio um comando FLOW_* (clique do botão),
-    # a gente seta main e continua o roteamento (não cai na IA).
-    if not state:
-        if (choice_id or text).strip() in MAIN_IDS:
-            state = "main"
-            _ensure_main(wa_id)
-        else:
-            _ensure_main(wa_id)
-            return {"type": "buttons", "text": _intro_text(), "buttons": MENU_MAIN}
+def _ask_deadline() -> Dict[str, Any]:
+    return _buttons(
+        "Qual prazo você pretende ter isso rodando?",
+        [
+            {"id": "PRAZO_7D", "title": "Até 7 dias"},
+            {"id": "PRAZO_15D", "title": "15–20 dias"},
+            {"id": "PRAZO_30D", "title": "30+ dias"},
+        ],
+    )
 
-    cid = (choice_id or "").strip() or text
 
-    # ============================================================
-    # MAIN
-    # ============================================================
-    if state == "main":
-        if cid == "FLOW_AUTOMATIZAR":
-            merge_flow_data(wa_id, {"macro": "automacao"})
-            set_flow_state(wa_id, "automacao_menu")
-            return {"type": "buttons", "text": "O que você quer automatizar primeiro?", "buttons": AUTOMACAO_MENU}
+def _ask_budget() -> Dict[str, Any]:
+    return _buttons(
+        "Quanto você tem disponível para investir?",
+        [
+            {"id": "BUDGET_1", "title": "Até R$ 1.000"},
+            {"id": "BUDGET_3", "title": "R$ 1.000 – R$ 3.000"},
+            {"id": "BUDGET_5", "title": "R$ 3.000 – R$ 5.000"},
+            {"id": "BUDGET_10", "title": "R$ 5.000+"},
+        ],
+    )
 
-        if cid == "FLOW_SITE":
-            merge_flow_data(wa_id, {"macro": "site"})
-            set_flow_state(wa_id, "site_menu")
-            return {"type": "buttons", "text": "Que tipo de projeto você quer?", "buttons": SITE_MENU}
 
-        if cid == "FLOW_SOCIAL":
-            merge_flow_data(wa_id, {"macro": "social"})
-            set_flow_state(wa_id, "social_menu")
-            return {"type": "buttons", "text": "O que você precisa no social?", "buttons": SOCIAL_MENU}
+def _ask_company_and_ig() -> Dict[str, Any]:
+    return _text("Qual o nome da empresa e o link do Instagram? (ex: MinhaMarca — https://instagram.com/minhamarca)")
 
-        return {"type": "buttons", "text": "Escolhe uma opção pra eu te guiar:", "buttons": MENU_MAIN}
 
-    # ============================================================
-    # AUTOMACAO
-    # ============================================================
-    if state == "automacao_menu":
-        merge_flow_data(wa_id, {"service_interest": cid})
-        set_flow_state(wa_id, "prazo_p1")
-        return {"type": "buttons", "text": "Qual prazo você pretende ter?", "buttons": PRAZO_P1}
+def _ask_how_found() -> Dict[str, Any]:
+    return _buttons(
+        "Como você conheceu a Mugô?",
+        [
+            {"id": "ORIGEM_INDIC", "title": "Indicação"},
+            {"id": "ORIGEM_INST", "title": "Instagram"},
+            {"id": "ORIGEM_GOOG", "title": "Google"},
+            {"id": "ORIGEM_OUTRO", "title": "Outro"},
+        ],
+    )
 
-    # ============================================================
-    # SITE
-    # ============================================================
-    if state == "site_menu":
-        merge_flow_data(wa_id, {"service_interest": cid})
 
-        if cid == "SITE_INST":
-            set_flow_state(wa_id, "site_inst_goal")
-            return {"type": "buttons", "text": "Qual objetivo do site?", "buttons": SITE_INST_GOAL}
+def _map_choice_to_value(choice_id: str, title: str) -> str:
+    # salva o ID + title se quiser
+    cid = (choice_id or "").strip()
+    ttl = (title or "").strip()
+    return cid or ttl
 
-        if cid == "SITE_LP":
-            set_flow_state(wa_id, "lp_goal")
-            return {"type": "buttons", "text": "Essa landing é pra quê?", "buttons": LP_GOAL}
 
-        if cid == "SITE_LOJA":
-            set_flow_state(wa_id, "ecom_platform")
-            return {"type": "buttons", "text": "Onde você quer vender?", "buttons": ECOM_PLATFORM}
+def _is_ig_line(text: str) -> bool:
+    t = _norm(text)
+    # aceita "Empresa - @insta" ou link etc.
+    return ("instagram.com" in t) or ("@" in t) or (len(t) >= 3)
 
-        return {"type": "buttons", "text": "Escolhe uma opção:", "buttons": SITE_MENU}
 
-    if state in ("site_inst_goal", "lp_goal", "ecom_platform"):
-        merge_flow_data(wa_id, {"goal": cid})
-        set_flow_state(wa_id, "prazo_p1")
-        return {"type": "buttons", "text": "Qual prazo você pretende ter?", "buttons": PRAZO_P1}
+def _build_summary(data: Dict[str, Any]) -> str:
+    foco = data.get("foco", "")
+    tipo = data.get("tipo", "")
+    prazo = data.get("prazo", "")
+    budget = data.get("budget", "")
+    empresa = data.get("empresa_instagram", "")
+    origem = data.get("origem", "")
 
-    # ============================================================
-    # SOCIAL
-    # ============================================================
-    if state == "social_menu":
-        merge_flow_data(wa_id, {"service_interest": cid})
+    return (
+        f"Mini briefing:\n"
+        f"- Foco: {foco}\n"
+        f"- Tipo: {tipo}\n"
+        f"- Prazo: {prazo}\n"
+        f"- Investimento: {budget}\n"
+        f"- Empresa/Instagram: {empresa}\n"
+        f"- Origem: {origem}\n"
+    ).strip()
 
-        if cid == "SOC_CONT":
-            set_flow_state(wa_id, "content_goal")
-            return {"type": "buttons", "text": "Qual foco do conteúdo?", "buttons": CONTENT_GOAL}
 
-        if cid == "SOC_GEST":
-            set_flow_state(wa_id, "channels_count")
-            return {"type": "buttons", "text": "Quantas redes você quer incluir?", "buttons": CHANNELS_COUNT}
+# ============================================================
+# MAIN
+# ============================================================
+def handle_mugo_flow(wa_id: str, user_input: str, *, choice_id: str = "") -> Optional[Dict[str, Any]]:
+    """
+    Retorna um payload do WhatsApp (type: text/buttons/list) ou
+    {"type":"ai","user_message":"...","flow_context":{...}} quando finalizar.
+    Retorna None se não quer capturar (deixa IA normal responder).
+    """
+    ui = (user_input or "").strip()
+    if not wa_id or not ui:
+        return None
 
-        if cid == "SOC_TRAFEGO":
-            set_flow_state(wa_id, "ads_goal")
-            return {"type": "buttons", "text": "Qual objetivo do tráfego?", "buttons": ADS_GOAL}
+    state, data = _flow_get(wa_id)
+    if not isinstance(data, dict):
+        data = {}
 
-        return {"type": "buttons", "text": "Escolhe uma opção:", "buttons": SOCIAL_MENU}
-
-    if state in ("content_goal", "channels_count", "ads_goal"):
-        merge_flow_data(wa_id, {"goal": cid})
-        set_flow_state(wa_id, "prazo_p1")
-        return {"type": "buttons", "text": "Qual prazo você pretende ter?", "buttons": PRAZO_P1}
-
-    # ============================================================
-    # PRAZO (paginado)
-    # ============================================================
-    if state == "prazo_p1":
-        if cid == "PRAZO_MORE":
-            set_flow_state(wa_id, "prazo_p2")
-            return {"type": "buttons", "text": "Qual prazo você pretende ter?", "buttons": PRAZO_P2}
-
-        merge_flow_data(wa_id, {"prazo": cid})
-        set_flow_state(wa_id, "budget_p1")
-        macro = _pretty((get_flow(wa_id) or {}).get("data", {}).get("macro"))
-        b1, _ = _budget_pages(macro)
-        return {"type": "buttons", "text": "Quanto você tem disponível para investir?", "buttons": b1}
-
-    if state == "prazo_p2":
-        merge_flow_data(wa_id, {"prazo": cid})
-        set_flow_state(wa_id, "budget_p1")
-        macro = _pretty((get_flow(wa_id) or {}).get("data", {}).get("macro"))
-        b1, _ = _budget_pages(macro)
-        return {"type": "buttons", "text": "Quanto você tem disponível para investir?", "buttons": b1}
+    # debug
+    if DEBUG_FLOW:
+        print(f"[FLOW] wa_id={wa_id} state={state} input={ui} choice_id={choice_id} data_keys={list(data.keys())}")
 
     # ============================================================
-    # BUDGET (paginado)
+    # 1) MENU PRINCIPAL (mugo_cta)
     # ============================================================
-    if state == "budget_p1":
-        if cid == "BUD_MORE":
-            set_flow_state(wa_id, "budget_p2")
-            macro = _pretty((get_flow(wa_id) or {}).get("data", {}).get("macro"))
-            _, b2 = _budget_pages(macro)
-            return {"type": "buttons", "text": "Quanto você tem disponível para investir?", "buttons": b2}
+    if state in ("", "mugo_cta", None):
+        # ✅ CORREÇÃO DO SEU BUG: se vier FLOW_* tem que AVANÇAR
+        if _is_focus_payload(ui):
+            foco = _focus_from_payload(ui)
+            data["foco"] = foco
+            state = "step_tipo"
+            _flow_save(wa_id, state, data)
+            return _ask_service_type(foco)
 
-        merge_flow_data(wa_id, {"budget_range": cid})
-        set_flow_state(wa_id, "company_name")
-        return {"type": "text", "text": "Qual o nome da empresa?"}
+        # Se mandar "oi", "olá" etc e não for escolha: mostra menu
+        if _norm(ui) in {"oi", "olá", "ola", "bom dia", "boa tarde", "boa noite", "menu"}:
+            _flow_save(wa_id, "mugo_cta", data)
+            return _menu_cta()
 
-    if state == "budget_p2":
-        merge_flow_data(wa_id, {"budget_range": cid})
-        set_flow_state(wa_id, "company_name")
-        return {"type": "text", "text": "Qual o nome da empresa?"}
+        # Não capturou: deixa a IA normal tocar
+        return None
 
     # ============================================================
-    # EMPRESA / IG / ORIGEM / CTA
+    # 2) STEP TIPO (botões)
     # ============================================================
-    if state == "company_name":
-        if not text:
-            return {"type": "text", "text": "Qual o nome da empresa?"}
-        merge_flow_data(wa_id, {"company_name": text})
-        set_flow_state(wa_id, "instagram")
-        return {"type": "text", "text": "Me manda o link do Instagram (ou @user). Se não tiver, digita: nao tenho"}
+    if state == "step_tipo":
+        # se a pessoa apertar os botões do menu de novo, mantém consistência
+        if _is_focus_payload(ui):
+            data["foco"] = _focus_from_payload(ui)
+            _flow_save(wa_id, "step_tipo", data)
+            return _ask_service_type(data.get("foco", "social"))
 
-    if state == "instagram":
-        if not text:
-            return {"type": "text", "text": "Me manda o link do Instagram (ou @user). Se não tiver, digita: nao tenho"}
-        merge_flow_data(wa_id, {"instagram": text})
-        set_flow_state(wa_id, "source_p1")
-        return {"type": "buttons", "text": "Como você conheceu a Mugô?", "buttons": SRC_P1}
+        # aqui esperamos IDs tipo AUTO_WPP / SITE_ECOM / SOCIAL_TRAFEGO
+        data["tipo"] = _map_choice_to_value(choice_id or ui, ui)
+        state = "step_prazo"
+        _flow_save(wa_id, state, data)
+        return _ask_deadline()
 
-    if state == "source_p1":
-        if cid == "SRC_MORE":
-            set_flow_state(wa_id, "source_p2")
-            return {"type": "buttons", "text": "Como você conheceu a Mugô?", "buttons": SRC_P2}
+    # ============================================================
+    # 3) STEP PRAZO (botões)
+    # ============================================================
+    if state == "step_prazo":
+        data["prazo"] = _map_choice_to_value(choice_id or ui, ui)
+        state = "step_budget"
+        _flow_save(wa_id, state, data)
+        return _ask_budget()
 
-        merge_flow_data(wa_id, {"source": cid})
-        set_flow_state(wa_id, "cta")
-        return {"type": "buttons", "text": "Perfeito. Como prefere seguir agora?", "buttons": CTA_BTNS}
+    # ============================================================
+    # 4) STEP BUDGET (botões)
+    # ============================================================
+    if state == "step_budget":
+        data["budget"] = _map_choice_to_value(choice_id or ui, ui)
+        state = "step_empresa"
+        _flow_save(wa_id, state, data)
+        return _ask_company_and_ig()
 
-    if state == "source_p2":
-        merge_flow_data(wa_id, {"source": cid})
-        set_flow_state(wa_id, "cta")
-        return {"type": "buttons", "text": "Perfeito. Como prefere seguir agora?", "buttons": CTA_BTNS}
+    # ============================================================
+    # 5) STEP EMPRESA + IG (texto)
+    # ============================================================
+    if state == "step_empresa":
+        # se o usuário clicar algum botão perdido, não quebra:
+        if _is_focus_payload(ui):
+            # ele voltou a mexer no menu; reinicia pro tipo do novo foco
+            data = {"foco": _focus_from_payload(ui)}
+            state = "step_tipo"
+            _flow_save(wa_id, state, data)
+            return _ask_service_type(data["foco"])
 
-    if state == "cta":
-        if cid == "CTA_MENU":
-            clear_flow(wa_id)
-            _ensure_main(wa_id)
-            return {"type": "buttons", "text": "Show. Qual é o foco agora?", "buttons": MENU_MAIN}
+        if not _is_ig_line(ui):
+            return _text("Me manda assim: Nome da empresa + Instagram (link ou @).")
 
-        if cid not in ("CTA_HUMAN", "CTA_PROP"):
-            return {"type": "buttons", "text": "Escolhe uma opção:", "buttons": CTA_BTNS}
+        data["empresa_instagram"] = ui
+        state = "step_origem"
+        _flow_save(wa_id, state, data)
+        return _ask_how_found()
 
-        merge_flow_data(wa_id, {"cta_choice": cid})
-        final = (get_flow(wa_id) or {}).get("data") or {}
+    # ============================================================
+    # 6) STEP ORIGEM (botões) -> FINALIZA
+    # ============================================================
+    if state == "step_origem":
+        data["origem"] = _map_choice_to_value(choice_id or ui, ui)
 
-        notes = (
-            "NOVO LEAD (Mini-Briefing Mugô)\n"
-            f"WhatsApp: {wa_id}\n"
-            f"Macro: {final.get('macro')}\n"
-            f"Serviço: {final.get('service_interest')}\n"
-            f"Objetivo: {final.get('goal')}\n"
-            f"Prazo: {final.get('prazo')}\n"
-            f"Investimento: {final.get('budget_range')}\n"
-            f"Empresa: {final.get('company_name')}\n"
-            f"Instagram: {final.get('instagram')}\n"
-            f"Origem: {final.get('source')}\n"
-            f"CTA: {final.get('cta_choice')}\n"
-        ).strip()
+        summary = _build_summary(data)
+        flow_context = {
+            "flow": "mini_briefing_mugo",
+            "state": "done",
+            "data": data,
+            "summary": summary,
+        }
 
-        try:
-            set_notes(wa_id, notes)
-        except Exception:
-            pass
-
-        try:
-            set_stage(wa_id, "Qualificado")
-        except Exception:
-            pass
-
-        clear_flow(wa_id)
+        # marca como finalizado no flow_state
+        _flow_save(wa_id, "done", data)
 
         return {
             "type": "ai",
-            "flow_context": final,
-            "user_message": (
-                "Lead finalizado via mini-briefing.\n"
-                f"Empresa: {final.get('company_name')}\n"
-                f"Macro: {final.get('macro')}\n"
-                f"Serviço: {final.get('service_interest')}\n"
-                f"Objetivo: {final.get('goal')}\n"
-                f"Prazo: {final.get('prazo')}\n"
-                f"Investimento: {final.get('budget_range')}\n"
-                f"Instagram: {final.get('instagram')}\n"
-                f"Origem: {final.get('source')}\n"
-                f"CTA: {final.get('cta_choice')}\n"
-                "Responda curto, confirme entendimento e encaminhe para especialista."
-            ),
+            "user_message": summary,
+            "flow_context": flow_context,
         }
 
-    return None
+    # ============================================================
+    # DONE: se já finalizou, deixa IA normal tocar (ou volta menu se quiser)
+    # ============================================================
+    if state == "done":
+        return None
+
+    # estado desconhecido: reseta para menu
+    _flow_save(wa_id, "mugo_cta", {})
+    return _menu_cta()

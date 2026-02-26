@@ -38,7 +38,6 @@ DEBUG_WEBHOOK = (os.getenv("DEBUG_WEBHOOK") or "").strip().lower() in ("1", "tru
 from services.ai_state import get_ai_state, upsert_ai_state, reset_ai_state
 
 from services.state import (
-    # core
     mark_first_message_sent,
     log_message,
     list_conversations,
@@ -46,7 +45,6 @@ from services.state import (
     set_handoff_pending,
     set_handoff_topic,
     clear_handoff,
-    # CRM / Kanban / Agenda
     upsert_user,
     set_stage,
     set_notes,
@@ -55,11 +53,8 @@ from services.state import (
     list_tasks,
     done_task,
     update_task,
-    # Lead Intelligence
     update_lead_intelligence,
-    # FLOW RESET
     clear_flow,
-    # (opcional) pegar flow p/ debug
     get_flow,
 )
 
@@ -184,18 +179,11 @@ def _menu_fallback_text() -> str:
 
 
 def _is_back_trigger(lower: str) -> bool:
-    """
-    Reset apenas por match EXATO (evita reset acidental por substring).
-    """
     lower = (lower or "").strip()
     return lower in {"voltar", "volta", "menu", "início", "inicio", "robô", "robo", "bot"}
 
 
 async def _dedupe_incoming(wa_id: str, message_id: str, cid: str) -> bool:
-    """
-    Retorna True se já foi processada (dupe).
-    Usa ai_state (persistente) para evitar responder 2x ao mesmo evento.
-    """
     if not wa_id or not message_id:
         return False
 
@@ -219,33 +207,17 @@ async def _dedupe_incoming(wa_id: str, message_id: str, cid: str) -> bool:
 
 
 def _extract_log_text(payload: Union[str, Dict[str, Any]]) -> str:
-    """
-    Pega o texto "humano" do payload para log no Supabase.
-    """
     if isinstance(payload, str):
         return (payload or "").strip()
-
     if not isinstance(payload, dict):
         return ""
 
     ptype = (payload.get("type") or "").lower().strip()
-
-    # nosso formato interno: {"type":"text","text":"..."}
-    if ptype == "text":
+    if ptype in ("text", "buttons", "list"):
         return (payload.get("text") or "").strip()
 
-    # nosso formato interno: {"type":"buttons","text":"...","buttons":[...]}
-    if ptype == "buttons":
-        return (payload.get("text") or "").strip()
-
-    # caso alguém mande direto no formato Cloud:
     if "text" in payload and isinstance(payload.get("text"), dict):
         return (payload["text"].get("body") or "").strip()
-
-    if "interactive" in payload and isinstance(payload["interactive"], dict):
-        body = payload["interactive"].get("body") or {}
-        if isinstance(body, dict):
-            return (body.get("text") or "").strip()
 
     return (payload.get("body") or "").strip()
 
@@ -266,7 +238,6 @@ def safe_send(
 
     try:
         send_message(to_wa_id, payload)
-
         try:
             log_message(to_wa_id, "out", log_text, meta=meta or {})
         except Exception as e:
@@ -278,10 +249,8 @@ def safe_send(
 
     except Exception as e:
         print(f"[{cid}] SEND FAIL -> {to_wa_id}:", repr(e))
-
-        # fallback automático se era menu (buttons/list)
         try:
-            if isinstance(payload, dict) and (payload.get("type") or "").lower() in ("buttons", "list"):
+            if isinstance(payload, dict) and (payload.get("type") or "").lower().strip() in ("buttons", "list"):
                 send_message(to_wa_id, _menu_fallback_text())
         except Exception as _e2:
             print(f"[{cid}] FALLBACK SEND FAIL -> {to_wa_id}:", repr(_e2))
@@ -290,7 +259,6 @@ def safe_send(
             log_message(to_wa_id, "out", f"[ERRO ENVIO] {e}", meta={"event": "send_fail", "cid": cid})
         except Exception:
             pass
-
         return False
 
 
@@ -317,8 +285,15 @@ def verify_webhook(
 
 
 # ============================================================
-# Handoff helper
+# Handoff helper (AGORA com briefing real)
 # ============================================================
+async def mark_handoff_done(wa_id: str):
+    try:
+        await upsert_ai_state(wa_id, {"handoff_done": True, "handoff_done_at": datetime.now(timezone.utc).isoformat()})
+    except Exception:
+        pass
+
+
 def start_handoff_now(
     *,
     wa_id: str,
@@ -343,31 +318,31 @@ def start_handoff_now(
 
     if not summary:
         try:
-            hist = get_recent_messages(wa_id, limit=6) or []
+            hist = get_recent_messages(wa_id, limit=10) or []
             entradas = [(m.get("text") or "").strip() for m in hist if m.get("direction") == "in"]
-            summary = " | ".join(entradas[-3:])[:200]
+            summary = " | ".join(entradas[-4:])[:400]
         except Exception:
-            summary = (last_text or "")[:150]
+            summary = (last_text or "")[:200]
 
     try:
-        notes = f"MOTIVO: {reason}\nTEMA: {topic}\nCONTEXTO: {summary}"
+        notes = f"MOTIVO: {reason}\nTEMA: {topic}\nCONTEXTO:\n{summary}"
         set_notes(wa_id, notes)
     except Exception:
         pass
 
-    link_text = f"Olá! Preciso de atendimento estratégico.\n\nAssunto: {topic}\nID: {wa_id}"
+    link_text = f"Olá Julia! Chegou um lead pelo MugôZap.\n\nID: {wa_id}\nAssunto: {topic}\n\nBriefing:\n{summary}"
     encoded_text = urllib.parse.quote(link_text)
     link = f"https://wa.me/{HUMAN_NUMBER}?text={encoded_text}"
 
     safe_send(
         wa_id,
-        "Perfeito. Vou direcionar você agora para um especialista dar sequência estratégica ao seu projeto.",
+        "Perfeito. Encaminhei para a Julia dar sequência com você. ✅",
         meta={"event": "handoff_now", "cid": cid},
         cid=cid,
     )
     safe_send(
         wa_id,
-        f"Toque no link para iniciar:\n{link}",
+        f"Se quiser falar agora, toque no link:\n{link}",
         meta={"event": "handoff_link", "cid": cid},
         cid=cid,
     )
@@ -410,7 +385,7 @@ async def receive_webhook(request: Request):
 
         message_id = (msg.get("id") or "").strip()
 
-        # ✅ DEDUPE
+        # DEDUPE
         if await _dedupe_incoming(wa_id, message_id, cid):
             return {"ok": True}
 
@@ -452,8 +427,29 @@ async def receive_webhook(request: Request):
             meta={"src": "whatsapp", "type": msg_type, "cid": cid, "choice_id": choice_id, "message_id": message_id},
         )
 
-        # ✅ RESET
+        # ==========================
+        # BACK / MENU
+        # ==========================
         if _is_back_trigger(lower):
+            ai_state = await get_ai_state(wa_id) or {}
+            if ai_state.get("handoff_done"):
+                # pós-handoff: não reseta tudo, dá opção de refazer briefing
+                safe_send(
+                    wa_id,
+                    {
+                        "type": "buttons",
+                        "text": "Já encaminhei pra Julia ✅\n\nSe quiser, você pode preencher o briefing novamente:",
+                        "buttons": [
+                            {"id": "BRIEF_RESTART", "title": "Preencher novamente"},
+                            {"id": "TALK_HUMAN", "title": "Falar com Julia"},
+                        ],
+                    },
+                    meta={"event": "back_after_handoff", "cid": cid},
+                    cid=cid,
+                )
+                return {"ok": True}
+
+            # antes do handoff: reset total
             clear_handoff(wa_id)
             try:
                 set_handoff_pending(wa_id, False)
@@ -461,29 +457,19 @@ async def receive_webhook(request: Request):
                 pass
 
             await reset_ai_state(wa_id)
-
             try:
                 clear_flow(wa_id)
             except Exception:
                 pass
 
-            ok = safe_send(
-                wa_id,
-                {
-                    "type": "buttons",
-                    "text": "Beleza. Qual é o foco agora?",
-                    "buttons": [
-                        {"id": "FLOW_AUTOMATIZAR", "title": "Automação"},
-                        {"id": "FLOW_SITE", "title": "Site / E-commerce"},
-                        {"id": "FLOW_SOCIAL", "title": "Social / Tráfego"},
-                    ],
-                },
-                meta={"event": "back_to_menu", "cid": cid},
-                cid=cid,
-            )
-            if not ok:
-                safe_send(wa_id, _menu_fallback_text(), meta={"event": "back_to_menu_fallback", "cid": cid}, cid=cid)
+            # deixa o flow mandar INTRO+botões (evita duplicação)
+            flow_resp = handle_mugo_flow(wa_id, "start", choice_id="")
+            if flow_resp:
+                safe_send(wa_id, flow_resp, meta={"event": "back_to_flow_start", "cid": cid}, cid=cid)
+                return {"ok": True}
 
+            # fallback
+            safe_send(wa_id, _menu_fallback_text(), meta={"event": "back_to_menu_fallback", "cid": cid}, cid=cid)
             return {"ok": True}
 
         # ============================================================
@@ -494,32 +480,16 @@ async def receive_webhook(request: Request):
         if DEBUG_WEBHOOK:
             try:
                 cur = get_flow(wa_id) or {}
-                print(f"[{cid}] FLOW DEBUG -> input={flow_input} choice_id={choice_id} state={cur.get('state')} data_keys={list((cur.get('data') or {}).keys())}")
+                print(
+                    f"[{cid}] FLOW DEBUG -> input={flow_input} choice_id={choice_id} "
+                    f"state={cur.get('state')} data_keys={list((cur.get('data') or {}).keys())}"
+                )
             except Exception as e:
                 print(f"[{cid}] FLOW DEBUG WARN:", repr(e))
 
         flow_resp = handle_mugo_flow(wa_id, flow_input, choice_id=choice_id)
 
-        # ✅ ANTI-IA: se foi clique de botão e o flow não respondeu, NUNCA cai na IA.
-        if not flow_resp and msg_type == "interactive" and choice_id:
-            ok = safe_send(
-                wa_id,
-                {
-                    "type": "buttons",
-                    "text": "Beleza. Vamos de novo — qual é o foco agora?",
-                    "buttons": [
-                        {"id": "FLOW_AUTOMATIZAR", "title": "Automação"},
-                        {"id": "FLOW_SITE", "title": "Site / E-commerce"},
-                        {"id": "FLOW_SOCIAL", "title": "Social / Tráfego"},
-                    ],
-                },
-                meta={"event": "flow_miss_interactive_fallback", "cid": cid, "choice_id": choice_id, "message_id": message_id},
-                cid=cid,
-            )
-            if not ok:
-                safe_send(wa_id, _menu_fallback_text(), meta={"event": "flow_miss_fallback_text", "cid": cid}, cid=cid)
-            return {"ok": True}
-
+        # se o flow respondeu com UI/texto/handoff, encerra aqui
         if flow_resp:
             ftype = (flow_resp.get("type") or "").lower().strip()
 
@@ -536,48 +506,42 @@ async def receive_webhook(request: Request):
                     meta={"src": "mugo_flow", "cid": cid, "choice_id": choice_id, "message_id": message_id},
                     cid=cid,
                 )
-
                 if not ok and ftype in ("buttons", "list"):
-                    safe_send(
-                        wa_id,
-                        _menu_fallback_text(),
-                        meta={"src": "mugo_flow_menu_fallback", "cid": cid, "message_id": message_id},
-                        cid=cid,
-                    )
-
+                    safe_send(wa_id, _menu_fallback_text(), meta={"event": "flow_menu_fallback", "cid": cid}, cid=cid)
                 return {"ok": True}
 
-            if ftype == "ai":
-                flow_context = flow_resp.get("flow_context") or {}
-                ai_user_msg = (flow_resp.get("user_message") or user_text or "").strip()
+            if ftype == "handoff":
+                # ✅ briefing de verdade
+                text_to_user = (flow_resp.get("text") or "").strip() or "Perfeito. Vou te direcionar agora."
+                topic = (flow_resp.get("topic") or "").strip()
+                summary = (flow_resp.get("summary") or "").strip()
 
-                result = generate_reply(
-                    wa_id=wa_id,
-                    user_message=ai_user_msg,
-                    first_message_sent=True,
-                    name=name,
-                    telefone=telefone,
-                    flow_context=flow_context,
-                )
-
-                reply_text = (result.get("reply") or "").strip() or "Perfeito. Vou te encaminhar pra um especialista agora."
-                handoff_summary = (result.get("handoff_summary") or "").strip() or ai_user_msg[:220]
-
-                safe_send(wa_id, reply_text, meta={"src": "ai_after_flow", "cid": cid, "message_id": message_id}, cid=cid)
+                safe_send(wa_id, text_to_user, meta={"src": "mugo_flow_handoff", "cid": cid}, cid=cid)
 
                 start_handoff_now(
                     wa_id=wa_id,
                     cid=cid,
                     reason="flow_completed",
-                    topic="Lead qualificado (pós-botões)",
-                    summary=handoff_summary,
+                    topic=topic,
+                    summary=summary,
                     last_text=user_text,
                 )
+
+                await mark_handoff_done(wa_id)
                 return {"ok": True}
 
         # ============================================================
-        # IA NORMAL (só texto livre mesmo)
+        # IA NORMAL (somente se NÃO estava em clique de botão)
         # ============================================================
+        if msg_type == "interactive" and choice_id:
+            # se caiu aqui com clique, não chama IA; reabre o flow
+            flow_resp2 = handle_mugo_flow(wa_id, "start", choice_id="")
+            if flow_resp2:
+                safe_send(wa_id, flow_resp2, meta={"event": "interactive_flow_recover", "cid": cid}, cid=cid)
+                return {"ok": True}
+            safe_send(wa_id, _menu_fallback_text(), meta={"event": "interactive_fallback_text", "cid": cid}, cid=cid)
+            return {"ok": True}
+
         result = generate_reply(
             wa_id=wa_id,
             user_message=user_text,
@@ -601,6 +565,7 @@ async def receive_webhook(request: Request):
                 summary=handoff_summary or user_text,
                 last_text=user_text,
             )
+            await mark_handoff_done(wa_id)
 
         return {"ok": True}
 

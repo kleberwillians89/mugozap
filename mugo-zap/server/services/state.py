@@ -506,3 +506,169 @@ def merge_flow_data(wa_id: str, patch: Dict[str, Any]):
 
 def clear_flow(wa_id: str):
     return upsert_user(wa_id, flow_state=None, flow_data={})
+
+# ============================================================
+# FLOW (Mugô Atendimento Estruturado)
+# ============================================================
+def get_flow(wa_id: str) -> Dict[str, Any]:
+    wa_id = (wa_id or "").strip()
+    if not wa_id:
+        return {"state": None, "data": {}}
+
+    url = f"{SUPABASE_URL}/rest/v1/{WA_USERS_TABLE}?wa_id=eq.{wa_id}&select=flow_state,flow_data"
+    try:
+        r = _get(url)
+        if r.status_code == 200:
+            rows = r.json() or []
+            if rows:
+                row = rows[0] or {}
+                return {
+                    "state": row.get("flow_state"),
+                    "data": _safe_json(row.get("flow_data"), {}),
+                }
+    except Exception:
+        pass
+
+    return {"state": None, "data": {}}
+
+
+def set_flow_state(wa_id: str, state: Optional[str]):
+    """
+    ATENÇÃO: aqui a gente permite limpar com NULL também.
+    """
+    wa_id = (wa_id or "").strip()
+    if not wa_id:
+        return {"ok": False}
+
+    url = f"{SUPABASE_URL}/rest/v1/{WA_USERS_TABLE}?wa_id=eq.{wa_id}"
+    payload = {"flow_state": state}
+
+    try:
+        r = _patch(url, payload, prefer="return=representation")
+        if r.status_code in (200, 201):
+            rows = r.json() or []
+            return {"ok": True, "item": (rows[0] if rows else payload)}
+        if r.status_code == 204:
+            return {"ok": True, "item": payload}
+        return {"ok": False, "status": r.status_code, "body": r.text}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+def merge_flow_data(wa_id: str, patch: Dict[str, Any]):
+    flow = get_flow(wa_id)
+    data = flow.get("data") or {}
+    if not isinstance(data, dict):
+        data = {}
+    if patch and isinstance(patch, dict):
+        data.update(patch)
+
+    # flow_data pode ser atualizado via upsert sem problema (não precisa NULL)
+    return upsert_user(wa_id, flow_data=data)
+
+
+def clear_flow(wa_id: str):
+    """
+    ✅ CORRIGIDO: precisa gravar NULL no flow_state.
+    upsert_user não grava None (por regra do payload), então aqui fazemos PATCH direto.
+    """
+    wa_id = (wa_id or "").strip()
+    if not wa_id:
+        return {"ok": False}
+
+    url = f"{SUPABASE_URL}/rest/v1/{WA_USERS_TABLE}?wa_id=eq.{wa_id}"
+    payload = {"flow_state": None, "flow_data": {}}
+
+    try:
+        r = _patch(url, payload, prefer="return=representation")
+        if r.status_code in (200, 201):
+            rows = r.json() or []
+            return {"ok": True, "item": (rows[0] if rows else payload)}
+        if r.status_code == 204:
+            return {"ok": True, "item": payload}
+        return {"ok": False, "status": r.status_code, "body": r.text}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+        # ============================================================
+# FLOW (Mugô Atendimento Estruturado)
+# ============================================================
+def get_flow(wa_id: str) -> Dict[str, Any]:
+    wa_id = (wa_id or "").strip()
+    if not wa_id:
+        return {"state": None, "data": {}}
+
+    url = f"{SUPABASE_URL}/rest/v1/{WA_USERS_TABLE}?wa_id=eq.{wa_id}&select=flow_state,flow_data"
+    try:
+        r = _get(url)
+        if r.status_code == 200:
+            rows = r.json() or []
+            if rows:
+                row = rows[0] or {}
+                return {
+                    "state": row.get("flow_state"),
+                    "data": _safe_json(row.get("flow_data"), {}),
+                }
+    except Exception:
+        pass
+
+    return {"state": None, "data": {}}
+
+
+def set_flow_state(wa_id: str, state: Optional[str]):
+    """
+    ATENÇÃO: aqui a gente permite limpar com NULL também.
+    """
+    wa_id = (wa_id or "").strip()
+    if not wa_id:
+        return {"ok": False}
+
+    url = f"{SUPABASE_URL}/rest/v1/{WA_USERS_TABLE}?wa_id=eq.{wa_id}"
+    payload = {"flow_state": state}
+
+    try:
+        r = _patch(url, payload, prefer="return=representation")
+        if r.status_code in (200, 201):
+            rows = r.json() or []
+            return {"ok": True, "item": (rows[0] if rows else payload)}
+        if r.status_code == 204:
+            return {"ok": True, "item": payload}
+        return {"ok": False, "status": r.status_code, "body": r.text}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+def merge_flow_data(wa_id: str, patch: Dict[str, Any]):
+    flow = get_flow(wa_id)
+    data = flow.get("data") or {}
+    if not isinstance(data, dict):
+        data = {}
+    if patch and isinstance(patch, dict):
+        data.update(patch)
+
+    # flow_data pode ser atualizado via upsert sem problema (não precisa NULL)
+    return upsert_user(wa_id, flow_data=data)
+
+
+def clear_flow(wa_id: str):
+    """
+    ✅ CORRIGIDO: precisa gravar NULL no flow_state.
+    upsert_user não grava None (por regra do payload), então aqui fazemos PATCH direto.
+    """
+    wa_id = (wa_id or "").strip()
+    if not wa_id:
+        return {"ok": False}
+
+    url = f"{SUPABASE_URL}/rest/v1/{WA_USERS_TABLE}?wa_id=eq.{wa_id}"
+    payload = {"flow_state": None, "flow_data": {}}
+
+    try:
+        r = _patch(url, payload, prefer="return=representation")
+        if r.status_code in (200, 201):
+            rows = r.json() or []
+            return {"ok": True, "item": (rows[0] if rows else payload)}
+        if r.status_code == 204:
+            return {"ok": True, "item": payload}
+        return {"ok": False, "status": r.status_code, "body": r.text}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}

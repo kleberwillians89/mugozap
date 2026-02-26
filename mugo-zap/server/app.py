@@ -59,6 +59,8 @@ from services.state import (
     update_lead_intelligence,
     # FLOW RESET
     clear_flow,
+    # (opcional) pegar flow p/ debug
+    get_flow,
 )
 
 from services.whatsapp import send_message
@@ -186,10 +188,7 @@ def _is_back_trigger(lower: str) -> bool:
     Reset apenas por match EXATO (evita reset acidental por substring).
     """
     lower = (lower or "").strip()
-    return lower in {
-        "voltar", "volta", "menu", "início", "inicio",
-        "robô", "robo", "bot",
-    }
+    return lower in {"voltar", "volta", "menu", "início", "inicio", "robô", "robo", "bot"}
 
 
 async def _dedupe_incoming(wa_id: str, message_id: str, cid: str) -> bool:
@@ -210,16 +209,45 @@ async def _dedupe_incoming(wa_id: str, message_id: str, cid: str) -> bool:
 
         await upsert_ai_state(
             wa_id,
-            {
-                "last_in_msg_id": message_id,
-                "last_in_at": datetime.now(timezone.utc).isoformat(),
-            },
+            {"last_in_msg_id": message_id, "last_in_at": datetime.now(timezone.utc).isoformat()},
         )
         return False
     except Exception as e:
         if DEBUG_WEBHOOK:
             print(f"[{cid}] DEDUPE WARN:", repr(e))
         return False
+
+
+def _extract_log_text(payload: Union[str, Dict[str, Any]]) -> str:
+    """
+    Pega o texto "humano" do payload para log no Supabase.
+    """
+    if isinstance(payload, str):
+        return (payload or "").strip()
+
+    if not isinstance(payload, dict):
+        return ""
+
+    ptype = (payload.get("type") or "").lower().strip()
+
+    # nosso formato interno: {"type":"text","text":"..."}
+    if ptype == "text":
+        return (payload.get("text") or "").strip()
+
+    # nosso formato interno: {"type":"buttons","text":"...","buttons":[...]}
+    if ptype == "buttons":
+        return (payload.get("text") or "").strip()
+
+    # caso alguém mande direto no formato Cloud:
+    if "text" in payload and isinstance(payload.get("text"), dict):
+        return (payload["text"].get("body") or "").strip()
+
+    if "interactive" in payload and isinstance(payload["interactive"], dict):
+        body = payload["interactive"].get("body") or {}
+        if isinstance(body, dict):
+            return (body.get("text") or "").strip()
+
+    return (payload.get("body") or "").strip()
 
 
 def safe_send(
@@ -232,18 +260,8 @@ def safe_send(
     if not to_wa_id:
         return False
 
-    if isinstance(payload, str):
-        log_text = (payload or "").strip()
-        if not log_text:
-            return False
-
-    elif isinstance(payload, dict):
-        # aceita text em diferentes formatos (blindagem)
-        log_text = (payload.get("text") or payload.get("body") or "").strip()
-        if not log_text:
-            return False
-
-    else:
+    log_text = _extract_log_text(payload)
+    if not log_text:
         return False
 
     try:
@@ -255,7 +273,7 @@ def safe_send(
             print(f"[{cid}] log_message(out) failed:", repr(e))
 
         if DEBUG_WEBHOOK:
-            print(f"[{cid}] SEND OK -> {to_wa_id}: {log_text[:140]}")
+            print(f"[{cid}] SEND OK -> {to_wa_id}: {log_text[:160]}")
         return True
 
     except Exception as e:
@@ -269,12 +287,7 @@ def safe_send(
             print(f"[{cid}] FALLBACK SEND FAIL -> {to_wa_id}:", repr(_e2))
 
         try:
-            log_message(
-                to_wa_id,
-                "out",
-                f"[ERRO ENVIO] {e}",
-                meta={"event": "send_fail", "cid": cid},
-            )
+            log_message(to_wa_id, "out", f"[ERRO ENVIO] {e}", meta={"event": "send_fail", "cid": cid})
         except Exception:
             pass
 
@@ -397,7 +410,7 @@ async def receive_webhook(request: Request):
 
         message_id = (msg.get("id") or "").strip()
 
-        # ✅ DEDUPE: evita responder duas vezes a mesma msg (causa loop)
+        # ✅ DEDUPE
         if await _dedupe_incoming(wa_id, message_id, cid):
             return {"ok": True}
 
@@ -419,15 +432,11 @@ async def receive_webhook(request: Request):
             inter = msg.get("interactive") or {}
             br = (inter.get("button_reply") or {})
             lr = (inter.get("list_reply") or {})
-
-            # ✅ sempre prioriza ID como comando interno
             choice_id = (br.get("id") or lr.get("id") or "").strip()
             user_text = (br.get("title") or lr.get("title") or "").strip()
-
         else:
             return {"ok": True}
 
-        # Se vier sem texto, mas tiver ID, usa o ID como fallback
         if not user_text and choice_id:
             user_text = choice_id
 
@@ -443,7 +452,7 @@ async def receive_webhook(request: Request):
             meta={"src": "whatsapp", "type": msg_type, "cid": cid, "choice_id": choice_id, "message_id": message_id},
         )
 
-        # ✅ RESET TOTAL apenas por match exato
+        # ✅ RESET
         if _is_back_trigger(lower):
             clear_handoff(wa_id)
             try:
@@ -453,7 +462,6 @@ async def receive_webhook(request: Request):
 
             await reset_ai_state(wa_id)
 
-            # limpa estado do fluxo (pra não “lembrar” submenu/brief)
             try:
                 clear_flow(wa_id)
             except Exception:
@@ -482,12 +490,39 @@ async def receive_webhook(request: Request):
         # FLOW PRIMEIRO (sempre)
         # ============================================================
         flow_input = choice_id or user_text
+
+        if DEBUG_WEBHOOK:
+            try:
+                cur = get_flow(wa_id) or {}
+                print(f"[{cid}] FLOW DEBUG -> input={flow_input} choice_id={choice_id} state={cur.get('state')} data_keys={list((cur.get('data') or {}).keys())}")
+            except Exception as e:
+                print(f"[{cid}] FLOW DEBUG WARN:", repr(e))
+
         flow_resp = handle_mugo_flow(wa_id, flow_input, choice_id=choice_id)
+
+        # ✅ ANTI-IA: se foi clique de botão e o flow não respondeu, NUNCA cai na IA.
+        if not flow_resp and msg_type == "interactive" and choice_id:
+            ok = safe_send(
+                wa_id,
+                {
+                    "type": "buttons",
+                    "text": "Beleza. Vamos de novo — qual é o foco agora?",
+                    "buttons": [
+                        {"id": "FLOW_AUTOMATIZAR", "title": "Automação"},
+                        {"id": "FLOW_SITE", "title": "Site / E-commerce"},
+                        {"id": "FLOW_SOCIAL", "title": "Social / Tráfego"},
+                    ],
+                },
+                meta={"event": "flow_miss_interactive_fallback", "cid": cid, "choice_id": choice_id, "message_id": message_id},
+                cid=cid,
+            )
+            if not ok:
+                safe_send(wa_id, _menu_fallback_text(), meta={"event": "flow_miss_fallback_text", "cid": cid}, cid=cid)
+            return {"ok": True}
 
         if flow_resp:
             ftype = (flow_resp.get("type") or "").lower().strip()
 
-            # ✅ AGORA ACEITA LIST TAMBÉM
             if ftype in ("buttons", "text", "list"):
                 if not bool(user.get("first_message_sent")):
                     try:
@@ -502,7 +537,6 @@ async def receive_webhook(request: Request):
                     cid=cid,
                 )
 
-                # ✅ fallback para menus (buttons/list)
                 if not ok and ftype in ("buttons", "list"):
                     safe_send(
                         wa_id,
@@ -542,7 +576,7 @@ async def receive_webhook(request: Request):
                 return {"ok": True}
 
         # ============================================================
-        # IA NORMAL (se flow não respondeu)
+        # IA NORMAL (só texto livre mesmo)
         # ============================================================
         result = generate_reply(
             wa_id=wa_id,

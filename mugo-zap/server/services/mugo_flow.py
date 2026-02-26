@@ -21,14 +21,14 @@ MENU_MAIN: List[Dict[str, str]] = [
     {"id": "FLOW_CONSULT", "title": "Consultoria Mugô"},
 ]
 
-# -------- Automação
+# -------- Automação (3 ok como buttons)
 AUTOMACAO_MENU = [
     {"id": "AUTO_ATEND", "title": "Atendimento WhatsApp"},
     {"id": "AUTO_CRM", "title": "CRM / Funil"},
     {"id": "AUTO_FIN", "title": "Financeiro / Cobrança"},
 ]
 
-# -------- Site / E-commerce
+# -------- Site / E-commerce (4 -> vira list)
 SITE_MENU = [
     {"id": "SITE_INST", "title": "Institucional"},
     {"id": "SITE_LP", "title": "Landing page"},
@@ -57,7 +57,7 @@ ECOM_PLATFORM = [
     {"id": "ECOM_NAO_SEI", "title": "Nao sei (me orienta)"},
 ]
 
-# -------- Social / Tráfego
+# -------- Social / Tráfego (4 -> list)
 SOCIAL_MENU = [
     {"id": "SOC_CONT", "title": "Conteudo"},
     {"id": "SOC_GEST", "title": "Gestao completa"},
@@ -93,7 +93,7 @@ AUDIT_GOAL = [
     {"id": "AUD_TRAFEGO", "title": "Trafego"},
 ]
 
-# -------- Vídeos / Avatar com IA
+# -------- Vídeos / Avatar com IA (4 -> list)
 VIDEO_MENU = [
     {"id": "VID_INST", "title": "Institucional (marca/empresa)"},
     {"id": "VID_REELS", "title": "Reels (conteudo)"},
@@ -108,7 +108,7 @@ VIDEO_GOAL = [
     {"id": "VID_GOAL_APRES", "title": "Apresentar produto"},
 ]
 
-# -------- Consultoria
+# -------- Consultoria (4 -> list)
 CONSULT_MENU = [
     {"id": "CONS_MKT", "title": "Marketing e vendas"},
     {"id": "CONS_PROC", "title": "Processos / operacao"},
@@ -123,7 +123,7 @@ CONSULT_STAGE = [
     {"id": "CONS_S3", "title": "Quero escalar"},
 ]
 
-# -------- Prazo (universal)
+# -------- Prazo (5 -> list)
 PRAZO_BTNS = [
     {"id": "PRAZO_URG", "title": "Urgente (esta semana)"},
     {"id": "PRAZO_7", "title": "Ate 7 dias"},
@@ -132,7 +132,7 @@ PRAZO_BTNS = [
     {"id": "PRAZO_PLAN", "title": "Sem pressa (planejar)"},
 ]
 
-# -------- Investimento (por macro)
+# -------- Investimento (5 -> list)
 BUDGET_AUTOMACAO = [
     {"id": "B_AUT_500", "title": "Ate R$ 500"},
     {"id": "B_AUT_2000", "title": "R$ 500 a R$ 2.000"},
@@ -173,7 +173,7 @@ BUDGET_CONSULT = [
     {"id": "B_CONS_NS", "title": "Ainda nao sei"},
 ]
 
-# -------- Origem
+# -------- Origem (5 -> list)
 SOURCE_BTNS = [
     {"id": "SRC_IG", "title": "Instagram"},
     {"id": "SRC_INDIC", "title": "Indicacao"},
@@ -182,7 +182,7 @@ SOURCE_BTNS = [
     {"id": "SRC_OUTRO", "title": "Outro"},
 ]
 
-# -------- CTA final
+# -------- CTA final (3 ok como buttons)
 CTA_BTNS = [
     {"id": "CTA_HUMAN", "title": "Falar com Julia agora"},
     {"id": "CTA_PROP", "title": "Receber proposta"},
@@ -220,6 +220,37 @@ def _pretty(v: Any) -> str:
 def _ensure_main(wa_id: str):
     set_flow_state(wa_id, "main")
 
+def _menu_payload(
+    *,
+    text: str,
+    options: List[Dict[str, str]],
+    button_text: str = "Selecionar",
+    section_title: str = "Opcoes",
+) -> Dict[str, Any]:
+    """
+    WhatsApp Cloud:
+      - <=3 opções: interactive buttons
+      - >=4 opções: interactive list
+    """
+    opts = options or []
+    if len(opts) <= 3:
+        return {"type": "buttons", "text": text, "buttons": opts}
+
+    # vira LIST
+    rows = []
+    for o in opts:
+        rid = (o.get("id") or "").strip()
+        ttl = (o.get("title") or "").strip()
+        if rid and ttl:
+            rows.append({"id": rid, "title": ttl})
+
+    return {
+        "type": "list",
+        "text": text,
+        "button": button_text,
+        "sections": [{"title": section_title, "rows": rows}],
+    }
+
 
 # ============================================================
 # Flow principal
@@ -230,17 +261,17 @@ def handle_mugo_flow(wa_id: str, user_text: str, choice_id: str = "") -> Optiona
     data = flow.get("data") or {}
 
     text = (user_text or "").strip()
-    cid = (choice_id or "").strip() or text
+    cid = (choice_id or "").strip() or text  # comando real (id) ou texto
 
     # reset
     if text.lower().strip() in ("menu", "inicio", "início"):
         _ensure_main(wa_id)
-        return {"type": "buttons", "text": "Beleza. Qual e o foco agora?", "buttons": MENU_MAIN}
+        return _menu_payload(text="Beleza. Qual e o foco agora?", options=MENU_MAIN, button_text="Escolher", section_title="Servicos")
 
     # primeiro contato no flow
     if not state:
         _ensure_main(wa_id)
-        return {"type": "buttons", "text": _intro_text(), "buttons": MENU_MAIN}
+        return _menu_payload(text=_intro_text(), options=MENU_MAIN, button_text="Escolher", section_title="Servicos")
 
     # ============================================================
     # MAIN
@@ -249,29 +280,29 @@ def handle_mugo_flow(wa_id: str, user_text: str, choice_id: str = "") -> Optiona
         if cid == "FLOW_AUTOMATIZAR":
             merge_flow_data(wa_id, {"macro": "automacao"})
             set_flow_state(wa_id, "automacao_menu")
-            return {"type": "buttons", "text": "O que voce quer automatizar primeiro?", "buttons": AUTOMACAO_MENU}
+            return _menu_payload(text="O que voce quer automatizar primeiro?", options=AUTOMACAO_MENU, button_text="Escolher", section_title="Automacao")
 
         if cid == "FLOW_SITE":
             merge_flow_data(wa_id, {"macro": "site"})
             set_flow_state(wa_id, "site_menu")
-            return {"type": "buttons", "text": "Que tipo de projeto voce quer?", "buttons": SITE_MENU}
+            return _menu_payload(text="Que tipo de projeto voce quer?", options=SITE_MENU, button_text="Escolher", section_title="Site")
 
         if cid == "FLOW_SOCIAL":
             merge_flow_data(wa_id, {"macro": "social"})
             set_flow_state(wa_id, "social_menu")
-            return {"type": "buttons", "text": "O que voce precisa no social?", "buttons": SOCIAL_MENU}
+            return _menu_payload(text="O que voce precisa no social?", options=SOCIAL_MENU, button_text="Escolher", section_title="Social")
 
         if cid == "FLOW_VIDEO_IA":
             merge_flow_data(wa_id, {"macro": "video_ia"})
             set_flow_state(wa_id, "video_menu")
-            return {"type": "buttons", "text": "Que tipo de video voce quer?", "buttons": VIDEO_MENU}
+            return _menu_payload(text="Que tipo de video voce quer?", options=VIDEO_MENU, button_text="Escolher", section_title="Videos")
 
         if cid == "FLOW_CONSULT":
             merge_flow_data(wa_id, {"macro": "consultoria"})
             set_flow_state(wa_id, "consult_menu")
-            return {"type": "buttons", "text": "Onde voce mais precisa organizar agora?", "buttons": CONSULT_MENU}
+            return _menu_payload(text="Onde voce mais precisa organizar agora?", options=CONSULT_MENU, button_text="Escolher", section_title="Consultoria")
 
-        return {"type": "buttons", "text": "Escolhe uma opcao pra eu te guiar:", "buttons": MENU_MAIN}
+        return _menu_payload(text="Escolhe uma opcao pra eu te guiar:", options=MENU_MAIN, button_text="Escolher", section_title="Servicos")
 
     # ============================================================
     # AUTOMACAO
@@ -279,7 +310,7 @@ def handle_mugo_flow(wa_id: str, user_text: str, choice_id: str = "") -> Optiona
     if state == "automacao_menu":
         merge_flow_data(wa_id, {"service_interest": cid})
         set_flow_state(wa_id, "prazo")
-        return {"type": "buttons", "text": "Qual prazo voce pretende ter?", "buttons": PRAZO_BTNS}
+        return _menu_payload(text="Qual prazo voce pretende ter?", options=PRAZO_BTNS, button_text="Selecionar", section_title="Prazos")
 
     # ============================================================
     # SITE
@@ -289,34 +320,34 @@ def handle_mugo_flow(wa_id: str, user_text: str, choice_id: str = "") -> Optiona
 
         if cid == "SITE_INST":
             set_flow_state(wa_id, "site_inst_goal")
-            return {"type": "buttons", "text": "Qual objetivo principal do site?", "buttons": SITE_INST_GOAL}
+            return _menu_payload(text="Qual objetivo principal do site?", options=SITE_INST_GOAL, button_text="Selecionar", section_title="Objetivo")
 
         if cid == "SITE_LP":
             set_flow_state(wa_id, "lp_goal")
-            return {"type": "buttons", "text": "Essa landing e pra que?", "buttons": LP_GOAL}
+            return _menu_payload(text="Essa landing e pra que?", options=LP_GOAL, button_text="Selecionar", section_title="Objetivo")
 
         if cid == "SITE_LOJA":
             set_flow_state(wa_id, "ecom_platform")
-            return {"type": "buttons", "text": "Onde voce quer vender?", "buttons": ECOM_PLATFORM}
+            return _menu_payload(text="Onde voce quer vender?", options=ECOM_PLATFORM, button_text="Selecionar", section_title="Plataforma")
 
         # SITE_MELHORAR
         set_flow_state(wa_id, "prazo")
-        return {"type": "buttons", "text": "Qual prazo voce pretende ter?", "buttons": PRAZO_BTNS}
+        return _menu_payload(text="Qual prazo voce pretende ter?", options=PRAZO_BTNS, button_text="Selecionar", section_title="Prazos")
 
     if state == "site_inst_goal":
         merge_flow_data(wa_id, {"goal": cid})
         set_flow_state(wa_id, "prazo")
-        return {"type": "buttons", "text": "Qual prazo voce pretende ter?", "buttons": PRAZO_BTNS}
+        return _menu_payload(text="Qual prazo voce pretende ter?", options=PRAZO_BTNS, button_text="Selecionar", section_title="Prazos")
 
     if state == "lp_goal":
         merge_flow_data(wa_id, {"goal": cid})
         set_flow_state(wa_id, "prazo")
-        return {"type": "buttons", "text": "Qual prazo voce pretende ter?", "buttons": PRAZO_BTNS}
+        return _menu_payload(text="Qual prazo voce pretende ter?", options=PRAZO_BTNS, button_text="Selecionar", section_title="Prazos")
 
     if state == "ecom_platform":
         merge_flow_data(wa_id, {"goal": cid})
         set_flow_state(wa_id, "prazo")
-        return {"type": "buttons", "text": "Qual prazo voce pretende ter?", "buttons": PRAZO_BTNS}
+        return _menu_payload(text="Qual prazo voce pretende ter?", options=PRAZO_BTNS, button_text="Selecionar", section_title="Prazos")
 
     # ============================================================
     # SOCIAL
@@ -326,26 +357,26 @@ def handle_mugo_flow(wa_id: str, user_text: str, choice_id: str = "") -> Optiona
 
         if cid == "SOC_CONT":
             set_flow_state(wa_id, "content_goal")
-            return {"type": "buttons", "text": "Qual foco do conteudo?", "buttons": CONTENT_GOAL}
+            return _menu_payload(text="Qual foco do conteudo?", options=CONTENT_GOAL, button_text="Selecionar", section_title="Conteudo")
 
         if cid == "SOC_GEST":
             set_flow_state(wa_id, "channels_count")
-            return {"type": "buttons", "text": "Quantas redes voce quer incluir?", "buttons": CHANNELS_COUNT}
+            return _menu_payload(text="Quantas redes voce quer incluir?", options=CHANNELS_COUNT, button_text="Selecionar", section_title="Redes")
 
         if cid == "SOC_TRAFEGO":
             set_flow_state(wa_id, "ads_goal")
-            return {"type": "buttons", "text": "Qual objetivo do trafego?", "buttons": ADS_GOAL}
+            return _menu_payload(text="Qual objetivo do trafego?", options=ADS_GOAL, button_text="Selecionar", section_title="Trafego")
 
         if cid == "SOC_AUDIT":
             set_flow_state(wa_id, "audit_goal")
-            return {"type": "buttons", "text": "Diagnostico de que?", "buttons": AUDIT_GOAL}
+            return _menu_payload(text="Diagnostico de que?", options=AUDIT_GOAL, button_text="Selecionar", section_title="Auditoria")
 
-        return {"type": "buttons", "text": "Escolhe uma opcao:", "buttons": SOCIAL_MENU}
+        return _menu_payload(text="Escolhe uma opcao:", options=SOCIAL_MENU, button_text="Escolher", section_title="Social")
 
     if state in ("content_goal", "channels_count", "ads_goal", "audit_goal"):
         merge_flow_data(wa_id, {"goal": cid})
         set_flow_state(wa_id, "prazo")
-        return {"type": "buttons", "text": "Qual prazo voce pretende ter?", "buttons": PRAZO_BTNS}
+        return _menu_payload(text="Qual prazo voce pretende ter?", options=PRAZO_BTNS, button_text="Selecionar", section_title="Prazos")
 
     # ============================================================
     # VIDEO IA
@@ -353,12 +384,12 @@ def handle_mugo_flow(wa_id: str, user_text: str, choice_id: str = "") -> Optiona
     if state == "video_menu":
         merge_flow_data(wa_id, {"service_interest": cid})
         set_flow_state(wa_id, "video_goal")
-        return {"type": "buttons", "text": "Qual objetivo principal do video?", "buttons": VIDEO_GOAL}
+        return _menu_payload(text="Qual objetivo principal do video?", options=VIDEO_GOAL, button_text="Selecionar", section_title="Objetivo")
 
     if state == "video_goal":
         merge_flow_data(wa_id, {"goal": cid})
         set_flow_state(wa_id, "prazo")
-        return {"type": "buttons", "text": "Qual prazo voce pretende ter?", "buttons": PRAZO_BTNS}
+        return _menu_payload(text="Qual prazo voce pretende ter?", options=PRAZO_BTNS, button_text="Selecionar", section_title="Prazos")
 
     # ============================================================
     # CONSULTORIA
@@ -366,21 +397,27 @@ def handle_mugo_flow(wa_id: str, user_text: str, choice_id: str = "") -> Optiona
     if state == "consult_menu":
         merge_flow_data(wa_id, {"service_interest": cid})
         set_flow_state(wa_id, "consult_stage")
-        return {"type": "buttons", "text": "Qual cenario hoje?", "buttons": CONSULT_STAGE}
+        return _menu_payload(text="Qual cenario hoje?", options=CONSULT_STAGE, button_text="Selecionar", section_title="Cenario")
 
     if state == "consult_stage":
         merge_flow_data(wa_id, {"goal": cid})
         set_flow_state(wa_id, "prazo")
-        return {"type": "buttons", "text": "Qual prazo voce pretende ter?", "buttons": PRAZO_BTNS}
+        return _menu_payload(text="Qual prazo voce pretende ter?", options=PRAZO_BTNS, button_text="Selecionar", section_title="Prazos")
 
     # ============================================================
     # PRAZO -> BUDGET -> EMPRESA -> IG -> ORIGEM -> CTA -> FINAL
     # ============================================================
     if state == "prazo":
         merge_flow_data(wa_id, {"prazo": cid})
-        macro = _pretty((get_flow(wa_id) or {}).get("data", {}).get("macro") if isinstance(get_flow(wa_id), dict) else data.get("macro"))
+        final_flow = get_flow(wa_id) or {}
+        macro = _pretty((final_flow.get("data") or {}).get("macro") or data.get("macro"))
         set_flow_state(wa_id, "budget")
-        return {"type": "buttons", "text": "Quanto voce tem disponivel para investir?", "buttons": _pick_budget_buttons(macro)}
+        return _menu_payload(
+            text="Quanto voce tem disponivel para investir?",
+            options=_pick_budget_buttons(macro),
+            button_text="Selecionar",
+            section_title="Investimento",
+        )
 
     if state == "budget":
         merge_flow_data(wa_id, {"budget_range": cid})
@@ -399,21 +436,26 @@ def handle_mugo_flow(wa_id: str, user_text: str, choice_id: str = "") -> Optiona
             return {"type": "text", "text": "Me manda o link do Instagram (ou @user). Se nao tiver, digita: nao tenho"}
         merge_flow_data(wa_id, {"instagram": text})
         set_flow_state(wa_id, "source")
-        return {"type": "buttons", "text": "Como voce conheceu a Mugô?", "buttons": SOURCE_BTNS}
+        return _menu_payload(
+            text="Como voce conheceu a Mugô?",
+            options=SOURCE_BTNS,
+            button_text="Selecionar",
+            section_title="Origem",
+        )
 
     if state == "source":
         merge_flow_data(wa_id, {"source": cid})
         set_flow_state(wa_id, "cta")
-        return {"type": "buttons", "text": "Perfeito. Como prefere seguir agora?", "buttons": CTA_BTNS}
+        return _menu_payload(text="Perfeito. Como prefere seguir agora?", options=CTA_BTNS, button_text="Selecionar", section_title="Proximo passo")
 
     if state == "cta":
         if cid == "CTA_MENU":
             clear_flow(wa_id)
             _ensure_main(wa_id)
-            return {"type": "buttons", "text": "Show. Qual e o foco agora?", "buttons": MENU_MAIN}
+            return _menu_payload(text="Show. Qual e o foco agora?", options=MENU_MAIN, button_text="Escolher", section_title="Servicos")
 
         if cid not in ("CTA_HUMAN", "CTA_PROP"):
-            return {"type": "buttons", "text": "Escolhe uma opcao pra eu encaminhar certo:", "buttons": CTA_BTNS}
+            return _menu_payload(text="Escolhe uma opcao pra eu encaminhar certo:", options=CTA_BTNS, button_text="Selecionar", section_title="Proximo passo")
 
         merge_flow_data(wa_id, {"cta_choice": cid})
 
@@ -452,10 +494,8 @@ def handle_mugo_flow(wa_id: str, user_text: str, choice_id: str = "") -> Optiona
         except Exception:
             pass
 
-        # encerra flow
         clear_flow(wa_id)
 
-        # Entrega para IA com contexto (pra responder curto e já encaminhar)
         return {
             "type": "ai",
             "flow_context": final,

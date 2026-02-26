@@ -1,5 +1,6 @@
 import os
 import json
+import re
 from typing import Any, Dict, Optional
 import httpx
 
@@ -44,6 +45,45 @@ def _score_from_text(t: str) -> int:
     return min(100, max(0, score))
 
 
+def _derive_temp(score: int) -> str:
+    if score >= 70:
+        return "quente"
+    if score >= 40:
+        return "qualificado"
+    return "frio"
+
+
+def _extract_json_object(s: str) -> Optional[Dict[str, Any]]:
+    """
+    Tenta parsear JSON puro; se vier texto com JSON no meio, tenta extrair o primeiro objeto.
+    """
+    if not s:
+        return None
+    s = s.strip()
+
+    # 1) JSON puro
+    try:
+        obj = json.loads(s)
+        if isinstance(obj, dict):
+            return obj
+    except Exception:
+        pass
+
+    # 2) Extrai primeiro {...} (heurística)
+    m = re.search(r"\{.*\}", s, flags=re.S)
+    if not m:
+        return None
+
+    try:
+        obj = json.loads(m.group(0))
+        if isinstance(obj, dict):
+            return obj
+    except Exception:
+        return None
+
+    return None
+
+
 def generate_reply(
     wa_id: str,
     user_message: str,
@@ -57,17 +97,38 @@ def generate_reply(
     if not msg:
         return _fallback(user_message)
 
-    # se não tiver chave, não quebra deploy
+    # ------------------------------------------------------------
+    # Se não tiver chave, não quebra deploy
+    # ------------------------------------------------------------
     if not OPENAI_API_KEY:
         out = _fallback(user_message)
         s = _score_from_text(msg)
+
+        # se veio do briefing (flow_context), já encaminha
+        if flow_context:
+            out["reply"] = "Perfeito. Já entendi o cenário e vou te encaminhar agora para um especialista dar sequência."
+            out["handoff"] = True
+            out["next_intent"] = "flow_handoff"
+            out["handoff_summary"] = msg[:220]
+            out["lead_score"] = max(70, s)
+            out["lead_temperature"] = "quente"
+            out["lead_theme"] = "briefing"
+            return out
+
         if s >= 60:
             out["handoff"] = True
             out["next_intent"] = "ai_handoff"
             out["lead_score"] = 85
             out["lead_temperature"] = "quente"
+        else:
+            out["lead_score"] = s
+            out["lead_temperature"] = _derive_temp(s)
+
         return out
 
+    # ------------------------------------------------------------
+    # Contexto do fluxo (se existir)
+    # ------------------------------------------------------------
     flow_txt = ""
     if flow_context:
         try:
@@ -75,15 +136,31 @@ def generate_reply(
         except Exception:
             flow_txt = str(flow_context)
 
-    system_prompt = (
-        "Você é um SDR estratégico da Mugô.\n"
-        "Responda de forma clara, direta e estratégica.\n"
-        "Máximo 3 linhas.\n"
-        "Se faltar informação, faça 1 pergunta objetiva.\n"
-        "Nunca responda fora do JSON.\n"
-        "Retorne JSON com as chaves:\n"
-        "reply, intent, question_key, handoff, handoff_summary, next_intent, lead_score, lead_temperature, lead_theme"
-    )
+    # ------------------------------------------------------------
+    # Prompts
+    # ------------------------------------------------------------
+    # Regra extra: se veio do mini-briefing (flow_context preenchido),
+    # NÃO abrir novas perguntas e já preparar handoff.
+    if flow_context:
+        system_prompt = (
+            "Você é um SDR estratégico da Mugô.\n"
+            "O lead já concluiu um mini-briefing estruturado.\n"
+            "Responda no máximo 2 linhas confirmando entendimento e afirmando encaminhamento.\n"
+            "NÃO faça perguntas.\n"
+            "Retorne APENAS JSON.\n"
+            "Retorne JSON com as chaves:\n"
+            "reply, intent, question_key, handoff, handoff_summary, next_intent, lead_score, lead_temperature, lead_theme"
+        )
+    else:
+        system_prompt = (
+            "Você é um SDR estratégico da Mugô.\n"
+            "Responda de forma clara, direta e estratégica.\n"
+            "Máximo 3 linhas.\n"
+            "Se faltar informação, faça 1 pergunta objetiva.\n"
+            "Retorne APENAS JSON.\n"
+            "Retorne JSON com as chaves:\n"
+            "reply, intent, question_key, handoff, handoff_summary, next_intent, lead_score, lead_temperature, lead_theme"
+        )
 
     user_prompt = (
         f"WA_ID: {wa_id}\n"
@@ -102,6 +179,8 @@ def generate_reply(
         ],
         "temperature": 0.3,
         "max_tokens": 250,
+        # quando suportado pelo modelo: força JSON válido
+        "response_format": {"type": "json_object"},
     }
 
     try:
@@ -118,16 +197,14 @@ def generate_reply(
         if r.status_code >= 300:
             return _fallback(user_message)
 
-        content = r.json()["choices"][0]["message"]["content"].strip()
+        content = (r.json().get("choices", [{}])[0].get("message", {}) or {}).get("content", "") or ""
+        content = content.strip()
 
-        try:
-            out = json.loads(content)
-        except Exception:
+        out = _extract_json_object(content)
+        if not out or not isinstance(out, dict) or not out.get("reply"):
             return _fallback(user_message)
 
-        if not isinstance(out, dict) or not out.get("reply"):
-            return _fallback(user_message)
-
+        # defaults
         out.setdefault("intent", "geral")
         out.setdefault("question_key", "none")
         out.setdefault("handoff", False)
@@ -141,14 +218,18 @@ def generate_reply(
         except Exception:
             score = _score_from_text(msg)
 
-        if score >= 70:
-            temp = "quente"
-        elif score >= 40:
-            temp = "qualificado"
-        else:
-            temp = "frio"
+        out["lead_score"] = score
+        out["lead_temperature"] = _derive_temp(score)
 
-        out["lead_temperature"] = temp
+        # se veio do briefing, garante handoff (não deixa a IA decidir errado)
+        if flow_context:
+            out["handoff"] = True
+            out["next_intent"] = out.get("next_intent") or "flow_handoff"
+            out["lead_score"] = max(70, out["lead_score"])
+            out["lead_temperature"] = "quente"
+            out["lead_theme"] = out.get("lead_theme") or "briefing"
+            if not out.get("handoff_summary"):
+                out["handoff_summary"] = msg[:220]
 
         return out
 

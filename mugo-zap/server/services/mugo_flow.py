@@ -150,7 +150,7 @@ def handle_mugo_flow(wa_id: str, user_text: str, *, choice_id: str = "") -> Opti
                     {"id": BTN_SOCIAL_TENHO_MARCA, "title": "Tenho uma marca"},
                     # >20 antes: "Quero criar uma marca do zero"
                     {"id": BTN_SOCIAL_MARCA_ZERO, "title": "Criar marca do zero"},
-                    {"id": BTN_SOCIAL_CONSULTORIA, "title": "Quero consultoria"},
+                    {"id": BTN_SOCIAL_CONSULTORIA, "title": "Consultoria"},
                 ],
             )
 
@@ -164,7 +164,7 @@ def handle_mugo_flow(wa_id: str, user_text: str, *, choice_id: str = "") -> Opti
                     {"id": BTN_IA_IMAGENS, "title": "Criar imagens/vídeos"},
                     # >20 antes: "Tenho uma ideia e quero colocar em prática"
                     {"id": BTN_IA_IDEIA, "title": "Tenho uma ideia"},
-                    {"id": BTN_IA_CONSULTORIA, "title": "Quero uma consultoria"},
+                    {"id": BTN_IA_CONSULTORIA, "title": "Consultoria"},
                 ],
             )
 

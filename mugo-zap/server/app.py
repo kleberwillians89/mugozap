@@ -4,6 +4,7 @@ import json
 import uuid
 import urllib.parse
 import traceback
+import asyncio
 from pathlib import Path
 from typing import Any, Optional, List, Dict, Union
 from datetime import datetime, timezone
@@ -12,7 +13,7 @@ import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import PlainTextResponse, JSONResponse
+from fastapi.responses import PlainTextResponse, JSONResponse, StreamingResponse
 
 # ============================================================
 # ENV
@@ -277,6 +278,70 @@ def health():
 
 
 # ============================================================
+# PANEL API (Front)
+# ============================================================
+@app.get("/api/conversations")
+async def api_conversations(
+    authorization: str = Header(None),
+    x_panel_key: str = Header(None, alias="X-Panel-Key"),
+):
+    _ = await get_current_user(authorization=authorization, x_panel_key=x_panel_key)
+    items = list_conversations(limit=200) or []
+    return {"ok": True, "items": items}
+
+
+@app.get("/api/messages")
+async def api_messages(
+    wa_id: str = Query(...),
+    limit: int = Query(60),
+    authorization: str = Header(None),
+    x_panel_key: str = Header(None, alias="X-Panel-Key"),
+):
+    _ = await get_current_user(authorization=authorization, x_panel_key=x_panel_key)
+    msgs = get_recent_messages(wa_id, limit=int(limit)) or []
+    return {"ok": True, "items": msgs}
+
+
+# ============================================================
+# SSE (EventSource) para painel atualizar
+# Front chama: /events?token=...
+# ============================================================
+@app.get("/events")
+async def sse_events(token: str = Query("")):
+    token = (token or "").strip()
+    if not token:
+        raise HTTPException(status_code=401, detail="Missing token")
+
+    # valida token supabase (EventSource não manda header)
+    _ = await _supabase_get_user(token)
+
+    async def event_gen():
+        # handshake
+        yield "event: ready\ndata: ok\n\n"
+
+        # loop: envia "conversations" a cada 2s
+        while True:
+            try:
+                items = list_conversations(limit=200) or []
+                payload = json.dumps({"type": "conversations", "items": items}, ensure_ascii=False)
+                yield f"event: conversations\ndata: {payload}\n\n"
+            except Exception as e:
+                err = json.dumps({"type": "error", "detail": str(e)}, ensure_ascii=False)
+                yield f"event: error\ndata: {err}\n\n"
+
+            await asyncio.sleep(2)
+
+    return StreamingResponse(
+        event_gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+        },
+    )
+
+
+# ============================================================
 # WEBHOOK verify (Meta)
 # ============================================================
 @app.get("/webhook")
@@ -475,7 +540,6 @@ async def receive_webhook(request: Request):
                 )
                 return {"ok": True}
 
-            # antes do handoff: reset total
             clear_handoff(wa_id)
             try:
                 set_handoff_pending(wa_id, False)
@@ -488,7 +552,6 @@ async def receive_webhook(request: Request):
             except Exception:
                 pass
 
-            # deixa o flow mandar INTRO+botões
             flow_resp = handle_mugo_flow(wa_id, "start", choice_id="")
             if flow_resp:
                 safe_send(wa_id, flow_resp, meta={"event": "back_to_flow_start", "cid": cid}, cid=cid)
@@ -498,16 +561,14 @@ async def receive_webhook(request: Request):
             return {"ok": True}
 
         # ============================================================
-        # Botões pós-handoff (tratados aqui, independente do flow)
+        # Botões pós-handoff (tratados aqui)
         # ============================================================
-        if (choice_id or user_text) in ("BRIEF_RESTART", "BRIEF_RESTART".lower()):
-            # refaz briefing: limpa flow e inicia
+        if (choice_id or user_text) in ("BRIEF_RESTART", "brief_restart"):
             try:
                 clear_flow(wa_id)
             except Exception:
                 pass
 
-            # não reseta handoff_done; apenas refaz o briefing se ele quiser
             flow_resp = handle_mugo_flow(wa_id, "start", choice_id="")
             if flow_resp:
                 safe_send(wa_id, flow_resp, meta={"event": "brief_restart", "cid": cid}, cid=cid)
@@ -516,13 +577,12 @@ async def receive_webhook(request: Request):
             safe_send(wa_id, _menu_fallback_text(), meta={"event": "brief_restart_fallback", "cid": cid}, cid=cid)
             return {"ok": True}
 
-        if (choice_id or user_text) in ("TALK_HUMAN", "TALK_HUMAN".lower()):
-            # manda link pra Julia com o último briefing salvo (se tiver)
+        if (choice_id or user_text) in ("TALK_HUMAN", "talk_human"):
             st = await get_ai_state(wa_id) or {}
             topic = (st.get("handoff_topic") or "Lead (pós-bot)").strip()[:100]
             summary = (st.get("handoff_summary") or "").strip()
+
             if not summary:
-                # fallback mínimo
                 try:
                     hist = get_recent_messages(wa_id, limit=10) or []
                     entradas = [(m.get("text") or "").strip() for m in hist if m.get("direction") == "in"]
@@ -577,7 +637,6 @@ async def receive_webhook(request: Request):
                 return {"ok": True}
 
             if ftype == "handoff":
-                # briefing real vindo do flow
                 text_to_user = (flow_resp.get("text") or "").strip() or "Perfeito. Vou te direcionar agora."
                 topic = (flow_resp.get("topic") or "").strip() or "Lead qualificado"
                 summary = (flow_resp.get("summary") or "").strip()
@@ -608,7 +667,7 @@ async def receive_webhook(request: Request):
             return {"ok": True}
 
         # ============================================================
-        # Se ainda não teve first_message_sent, tenta iniciar flow (INTRO+botões)
+        # Se ainda não teve first_message_sent, tenta iniciar flow
         # ============================================================
         if not bool(user.get("first_message_sent")):
             flow_start = handle_mugo_flow(wa_id, "start", choice_id="")

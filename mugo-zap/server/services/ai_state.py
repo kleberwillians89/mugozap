@@ -24,6 +24,7 @@ DEFAULT_STATE: Dict[str, Any] = {
     "repeat_hits": 0,
     "close_score": 0,
     "last_question_key": "",
+    "last_question_asked": "",
     "last_bot_message": "",
     "last_user_message": "",
     "last_user_goal": "",

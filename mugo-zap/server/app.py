@@ -1,5 +1,6 @@
 import os
 import json
+import re
 import uuid
 import urllib.parse
 import traceback
@@ -591,6 +592,189 @@ def _merge_briefing(old_briefing: dict | None, new_briefing: dict | None) -> dic
     return merged
 
 
+def _compact_text(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    text = re.sub(r"[^\w\s/]", " ", text, flags=re.UNICODE)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _question_key(text: str) -> str:
+    compact = _compact_text(text)
+    if "vendas/leads" in compact or ("vendas" in compact and "operação" in compact):
+        return "goal_sales_or_operations"
+    if "whatsapp" in compact and "instagram" in compact and "site" in compact:
+        return "lead_source"
+    if "crm" in compact or "manual" in compact or "ferramenta" in compact:
+        return "current_tools"
+    if "este mês" in compact or "essa semana" in compact or "fase de entender" in compact:
+        return "urgency"
+    return compact[:90]
+
+
+def _extract_last_question(text: str) -> str:
+    text = str(text or "").strip()
+    if "?" not in text:
+        return ""
+    parts = [part.strip() for part in re.split(r"(?<=[?])", text) if "?" in part]
+    return parts[-1][-240:] if parts else text[-240:]
+
+
+def _infer_fields_from_text(user_text: str, ai_state: dict | None, result: dict | None = None) -> dict:
+    text = _compact_text(user_text)
+    state_fields = ((ai_state or {}).get("lead_fields") or {})
+    result_fields = ((result or {}).get("lead_fields") or {})
+    service_interest = result_fields.get("service_interest") or state_fields.get("service_interest") or (ai_state or {}).get("selected_service")
+    inferred: dict = {}
+
+    if service_interest:
+        inferred["service_interest"] = service_interest
+
+    if any(k in text for k in ["vender mais", "mais vendas", "aumentar venda", "aumentar as vendas", "gerar lead", "gerar leads", "mais clientes", "vender pelo whatsapp", "perco vendas", "perder vendas"]):
+        inferred["main_goal"] = "vendas/leads"
+        inferred["desired_result"] = "vender mais / gerar mais vendas"
+        inferred["funnel_stage"] = "qualificacao"
+        if service_interest == "automacao_whatsapp":
+            inferred["service_interest"] = "automacao_whatsapp"
+
+    if any(k in text for k in ["ganhar tempo", "responder mais rápido", "responder mais rapido", "diminuir trabalho", "automatizar atendimento", "não perder mensagem", "nao perder mensagem"]):
+        inferred["main_goal"] = inferred.get("main_goal") or "operação/tempo"
+        inferred["current_problem"] = inferred.get("current_problem") or "atendimento manual ou mensagens perdidas"
+        inferred["funnel_stage"] = "qualificacao"
+
+    if any(k in text for k in ["organizar contatos", "crm", "funil", "acompanhar clientes"]):
+        inferred["main_goal"] = inferred.get("main_goal") or "gestão/comercial"
+        inferred["current_tools"] = "CRM/funil" if "crm" in text or "funil" in text else inferred.get("current_tools")
+        inferred["funnel_stage"] = "qualificacao"
+
+    if any(k in text for k in ["quero site", "landing", "página", "pagina"]):
+        inferred["service_interest"] = "landing_page" if "landing" in text else "site"
+
+    if any(k in text for k in ["whatsapp", "atendimento automático", "atendimento automatico", "bot", "automação", "automacao"]):
+        inferred["service_interest"] = inferred.get("service_interest") or "automacao_whatsapp"
+
+    if any(k in text for k in ["ia", "inteligência artificial", "inteligencia artificial", "agente"]):
+        inferred["service_interest"] = inferred.get("service_interest") or "inteligencia_artificial"
+
+    sources = []
+    if "instagram" in text or "direct" in text:
+        sources.append("Instagram")
+    if "whatsapp" in text:
+        sources.append("WhatsApp")
+    if "site" in text:
+        sources.append("site")
+    if "indicação" in text or "indicacao" in text:
+        sources.append("indicação")
+    if sources:
+        inferred["lead_source"] = " e ".join(dict.fromkeys(sources))
+
+    if any(k in text for k in ["tudo manual", "manual", "sem crm", "planilha", "sem ferramenta"]):
+        inferred["current_tools"] = "manual"
+        inferred["current_problem"] = inferred.get("current_problem") or "atendimento e acompanhamento manual"
+        inferred["funnel_stage"] = "qualificacao"
+
+    if any(k in text for k in ["loja", "ecommerce", "e commerce", "restaurante", "clínica", "clinica", "empresa"]):
+        inferred["business_type"] = "loja" if "loja" in text else inferred.get("business_type")
+
+    if any(k in text for k in ["essa semana", "esta semana", "urgente", "hoje", "amanhã", "amanha", "este mês", "esse mes", "campanha"]):
+        inferred["urgency"] = "essa semana" if "semana" in text else "urgente"
+        inferred["funnel_stage"] = "decisao"
+
+    if any(k in text for k in ["verba", "orçamento", "orcamento", "budget", "investir", "proposta"]):
+        inferred["budget_signal"] = "tem sinal de orçamento/verba"
+
+    return inferred
+
+
+def _next_question_for_fields(fields: dict) -> str:
+    main_goal = (fields.get("main_goal") or "").strip().lower()
+    service = (fields.get("service_interest") or "").strip().lower()
+
+    if main_goal == "vendas/leads" and not fields.get("lead_source"):
+        return "Boa. Hoje esses contatos chegam mais pelo WhatsApp, Instagram ou site?"
+    if fields.get("lead_source") and not fields.get("current_tools"):
+        return "Entendi. Hoje vocês já atendem esses leads por algum CRM ou fazem tudo manualmente?"
+    if fields.get("current_tools") and not fields.get("urgency"):
+        return "Você quer colocar isso pra rodar ainda este mês ou está mais na fase de entender possibilidades?"
+    if service == "automacao_whatsapp" and not main_goal:
+        return "Boa. A automação seria mais para vender mais, ganhar tempo no atendimento ou organizar os leads?"
+    return ""
+
+
+def _postprocess_ai_result(
+    *,
+    cid: str,
+    wa_id: str,
+    result: dict,
+    ai_state: dict | None,
+    user_text: str,
+) -> dict:
+    result = dict(result or {})
+    state_fields = ((ai_state or {}).get("lead_fields") or {})
+    result_fields = result.get("lead_fields") if isinstance(result.get("lead_fields"), dict) else {}
+    inferred = _infer_fields_from_text(user_text, ai_state, result)
+    before_fields = _merge_lead_fields(state_fields, result_fields)
+    merged_fields = _merge_lead_fields(before_fields, inferred)
+    result["lead_fields"] = merged_fields
+
+    print(f"AI_CONTEXT_FIELDS_BEFORE cid={cid} wa_id={wa_id} fields={json.dumps(before_fields, ensure_ascii=False)[:900]}")
+    print(f"AI_CONTEXT_FIELDS_AFTER cid={cid} wa_id={wa_id} fields={json.dumps(merged_fields, ensure_ascii=False)[:900]}")
+
+    last_question = (
+        merged_fields.get("last_question_asked")
+        or state_fields.get("last_question_asked")
+        or (ai_state or {}).get("last_question_asked")
+        or (ai_state or {}).get("last_bot_message")
+        or ""
+    )
+    reply = (result.get("reply") or "").strip()
+    next_question = _next_question_for_fields(merged_fields)
+    print(f"AI_LAST_QUESTION cid={cid} wa_id={wa_id} question={last_question[:240]!r}")
+
+    duplicate_goal_question = (
+        _question_key(last_question) == "goal_sales_or_operations"
+        and (merged_fields.get("main_goal") or "").lower() == "vendas/leads"
+        and _question_key(reply) == "goal_sales_or_operations"
+    )
+
+    if duplicate_goal_question and next_question:
+        print(f"AI_DUPLICATE_QUESTION_PREVENTED cid={cid} wa_id={wa_id} old_reply={reply[:240]!r} new_reply={next_question!r}")
+        reply = next_question
+        result["reply"] = reply
+        result["next_action"] = "ask_question"
+
+    if not duplicate_goal_question and next_question and _question_key(reply) == "goal_sales_or_operations" and merged_fields.get("main_goal"):
+        print(f"AI_DUPLICATE_QUESTION_PREVENTED cid={cid} wa_id={wa_id} reason=answered_goal new_reply={next_question!r}")
+        reply = next_question
+        result["reply"] = reply
+        result["next_action"] = "ask_question"
+
+    current_question = _extract_last_question(result.get("reply") or "")
+    if current_question:
+        result["lead_fields"] = _merge_lead_fields(result.get("lead_fields"), {"last_question_asked": current_question})
+        print(f"AI_NEXT_QUESTION cid={cid} wa_id={wa_id} question={current_question[:240]!r}")
+
+    if merged_fields.get("urgency") and (merged_fields.get("main_goal") or merged_fields.get("current_problem")):
+        result["lead_temperature"] = "hot"
+        result["meeting_suggested"] = True
+        result["briefing_ready"] = True
+        result["next_action"] = "offer_meeting" if not result.get("handoff") else "handoff"
+        briefing = result.get("briefing") if isinstance(result.get("briefing"), dict) else {}
+        result["briefing"] = _merge_briefing(
+            briefing,
+            {
+                "summary": briefing.get("summary") or _briefing_summary_from_result(result, user_text),
+                "goals": [goal for goal in [merged_fields.get("desired_result") or merged_fields.get("main_goal")] if goal],
+                "recommended_solution": merged_fields.get("service_interest") or result.get("intent"),
+                "urgency": merged_fields.get("urgency"),
+                "budget_signal": merged_fields.get("budget_signal"),
+                "suggested_next_step": "Agendar conversa com Julia",
+                "questions_to_julia": ["Confirmar escopo, canais de entrada e prazo de implantação."],
+            },
+        )
+
+    return result
+
+
 def _build_panel_conversation_link(wa_id: str) -> str:
     base = (
         os.getenv("PANEL_BASE_URL")
@@ -689,6 +873,7 @@ async def _save_ai_result_state(
         **state,
         "last_user_message": user_text[:500],
         "last_user_goal": result.get("memory_goal") or user_text[:180],
+        "last_question_asked": ((result.get("lead_fields") or {}).get("last_question_asked") or state.get("last_question_asked") or ""),
         "memory_summary": result.get("memory_summary") or user_text[:220],
         "memory_theme": result.get("memory_theme") or result.get("lead_theme") or "",
         "memory_goal": result.get("memory_goal") or user_text[:180],
@@ -1373,8 +1558,9 @@ async def api_debug_simulate_incoming(
         workspace_id=workspace_id,
     )
 
-    if button_id and is_service_choice(button_id):
-        service_ctx = apply_service_choice(wa_id, button_id, workspace_id=workspace_id)
+    selected_choice = button_id or (text if is_service_choice(text) else "")
+    if selected_choice and is_service_choice(selected_choice):
+        service_ctx = apply_service_choice(wa_id, selected_choice, workspace_id=workspace_id)
         try:
             mark_first_message_sent(wa_id, workspace_id=workspace_id)
         except Exception:
@@ -1394,8 +1580,9 @@ async def api_debug_simulate_incoming(
             },
             workspace_id=workspace_id,
         )
+        text = service_ctx.get("label") or text
 
-    if not bool(user.get("first_message_sent")) and not button_id and text.lower() in {"oi", "olá", "ola", "opa", "start", "menu"}:
+    if not bool(user.get("first_message_sent")) and not selected_choice and text.lower() in {"oi", "oie", "olá", "ola", "opa", "start", "menu"}:
         flow_start = handle_mugo_flow(wa_id, "start", choice_id="", workspace_id=workspace_id)
         if flow_start:
             try:
@@ -1422,6 +1609,13 @@ async def api_debug_simulate_incoming(
         telefone=wa_id,
         recent_messages=recent_messages,
         lead_context=lead_context,
+    )
+    result = _postprocess_ai_result(
+        cid=cid,
+        wa_id=wa_id,
+        result=result,
+        ai_state=lead_context,
+        user_text=text,
     )
 
     try:
@@ -2734,6 +2928,21 @@ async def _process_webhook_payload(data: dict, cid: str):
                 result["handoff_reason"] = result.get("handoff_reason") or "lead_pediu_humano"
                 result["lead_temperature"] = "hot"
                 result["briefing_ready"] = True
+
+        if _is_human_service_choice(result, user_text):
+            result["handoff"] = True
+            result["next_action"] = "handoff"
+            result["handoff_reason"] = result.get("handoff_reason") or "lead_pediu_humano"
+            result["lead_temperature"] = "hot"
+            result["briefing_ready"] = True
+
+        result = _postprocess_ai_result(
+            cid=cid,
+            wa_id=wa_id,
+            result=result,
+            ai_state=lead_context,
+            user_text=user_text,
+        )
 
         if _is_human_service_choice(result, user_text):
             result["handoff"] = True

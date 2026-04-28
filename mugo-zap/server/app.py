@@ -762,6 +762,61 @@ def _wants_human_from_text(user_text: str) -> bool:
     return sales_brain.should_handoff({}, user_text)
 
 
+async def _apply_menu_choice_state(
+    wa_id: str,
+    *,
+    choice: dict,
+    current_state: dict | None,
+    workspace_id: str = "",
+) -> dict:
+    choice_id = choice.get("choice_id") or ""
+    updates = sales_brain.service_choice_update(choice_id)
+    state = sales_brain.merge_state(current_state or {}, updates)
+    state = sales_brain.merge_state(
+        state,
+        {
+            "selected_service_id": choice_id,
+            "selected_service": choice.get("service_interest"),
+            "service_interest": choice.get("service_interest"),
+            "intent": choice.get("intent"),
+        },
+    )
+    return await upsert_ai_state(wa_id, state, workspace_id=workspace_id)
+
+
+def _deterministic_choice_result(choice: dict, state: dict) -> dict:
+    next_q = sales_brain.get_next_question(state)
+    fields = sales_brain.flatten_state(state)
+    result = {
+        "reply": next_q.get("question") or "",
+        "intent": choice.get("intent") or fields.get("intent") or "outro",
+        "next_action": next_q.get("next_action") or "ask_question",
+        "handoff": bool(fields.get("handoff")),
+        "handoff_reason": fields.get("handoff_reason"),
+        "lead_temperature": fields.get("lead_temperature") or ("hot" if fields.get("handoff") else "cold"),
+        "meeting_suggested": bool(fields.get("meeting_suggested")),
+        "briefing_ready": bool(fields.get("briefing_ready")),
+        "suggested_tags": [],
+        "lead_fields": {
+            **(fields.get("lead_fields") or {}),
+            "service_interest": fields.get("service_interest"),
+            "intent": fields.get("intent"),
+            "funnel_stage": fields.get("funnel_stage"),
+            "last_question_asked": next_q.get("question"),
+            "last_question_category": next_q.get("category"),
+            "next_best_question": next_q.get("question"),
+        },
+        "briefing": {},
+        "follow_up": {"needed": False, "when": None, "message": None},
+    }
+    if result["handoff"]:
+        result["briefing_ready"] = True
+        result["meeting_suggested"] = True
+        result["lead_temperature"] = "hot"
+        result["briefing"] = sales_brain.build_briefing(state, [])
+    return result
+
+
 def _postprocess_ai_result(
     *,
     cid: str,
@@ -853,6 +908,8 @@ def _postprocess_ai_result(
 
     validation = sales_brain.validate_reply(result.get("reply") or "", brain_state)
     if validation.get("blocked"):
+        if validation.get("reason") == "forbidden_generic_reply":
+            print(f"AI_FORBIDDEN_REPLY_BLOCKED cid={cid} wa_id={wa_id} reply={(result.get('reply') or '')[:240]!r}")
         print(
             f"AI_DUPLICATE_QUESTION_PREVENTED cid={cid} wa_id={wa_id} "
             f"reason={validation.get('reason')} new_reply={validation.get('reply')!r}"
@@ -1788,8 +1845,11 @@ async def api_debug_simulate_incoming(
     workspace_id = auth_user.get("workspace_id")
     payload = await request.json()
     button_id = (payload.get("button_id") or payload.get("choice_id") or "").strip()
-    service_ctx = service_choice_context(button_id) if button_id else {}
-    text = (payload.get("message") or payload.get("text") or service_ctx.get("label") or button_id).strip()
+    button_title = (payload.get("button_title") or "").strip()
+    list_id = (payload.get("list_id") or "").strip()
+    list_title = (payload.get("list_title") or "").strip()
+    list_description = (payload.get("list_description") or payload.get("description") or "").strip()
+    text = (payload.get("message") or payload.get("text") or button_title or list_title or list_description or button_id or list_id).strip()
     name = (payload.get("name") or "Lead Teste").strip()
     source = (payload.get("source") or "").strip()
     campaign = (payload.get("campaign") or "").strip()
@@ -1827,39 +1887,30 @@ async def api_debug_simulate_incoming(
         workspace_id=workspace_id,
     )
 
-    selected_choice = button_id or (text if is_service_choice(text) else "")
-    if selected_choice and is_service_choice(selected_choice):
+    current_state = await get_ai_state(wa_id, workspace_id=workspace_id) or {}
+    normalized_choice = sales_brain.normalize_inbound_choice(
+        text=text,
+        button_id=button_id,
+        button_title=button_title,
+        list_id=list_id,
+        list_title=list_title,
+        list_description=list_description,
+        current_state=current_state,
+    )
+    selected_choice = normalized_choice.get("choice_id") if normalized_choice.get("is_menu_choice") else ""
+    if selected_choice:
         service_ctx = apply_service_choice(wa_id, selected_choice, workspace_id=workspace_id)
         try:
             mark_first_message_sent(wa_id, workspace_id=workspace_id)
         except Exception:
             pass
-        current_state = await get_ai_state(wa_id, workspace_id=workspace_id) or {}
-        brain_updates = sales_brain.service_choice_update(selected_choice)
-        brain_state = sales_brain.merge_state(current_state, brain_updates)
-        await upsert_ai_state(
-            wa_id,
-            {
-                **brain_state,
-                "selected_service_id": service_ctx.get("id"),
-                "selected_service": service_ctx.get("service_interest"),
-                "service_interest": service_ctx.get("service_interest"),
-                "intent": service_ctx.get("intent") or brain_state.get("intent") or "",
-                "lead_fields": _merge_lead_fields(
-                    brain_state.get("lead_fields"),
-                    {
-                        "service_interest": service_ctx.get("service_interest"),
-                        "intent": service_ctx.get("intent"),
-                        "funnel_stage": "qualificacao",
-                        "last_question_asked": brain_updates.get("last_question_asked"),
-                        "last_question_category": brain_updates.get("last_question_category"),
-                        "next_best_question": brain_updates.get("next_best_question"),
-                    },
-                ),
-            },
-            workspace_id=workspace_id,
-        )
-        text = service_ctx.get("label") or text
+        updated_state = await _apply_menu_choice_state(wa_id, choice=normalized_choice, current_state=current_state, workspace_id=workspace_id)
+        result = _deterministic_choice_result(normalized_choice, updated_state)
+        reply_text = (result.get("reply") or "").strip()
+        log_message(wa_id, "out", reply_text, meta={"src": "debug_menu_choice", "cid": cid, "normalized_choice": normalized_choice}, workspace_id=workspace_id)
+        await _save_ai_result_state(wa_id, ai_state=updated_state, result=result, user_text=text, workspace_id=workspace_id)
+        await _handle_ai_operational_decision(wa_id=wa_id, cid=cid, result=result, user_text=text, user=user, workspace_id=workspace_id)
+        return {"ok": True, "wa_id": wa_id, "reply": reply_text, "result": result, "normalized_choice": normalized_choice}
 
     if not bool(user.get("first_message_sent")) and not selected_choice and text.lower() in {"oi", "oie", "olá", "ola", "opa", "start", "menu"}:
         flow_start = handle_mugo_flow(wa_id, "start", choice_id="", workspace_id=workspace_id)
@@ -2751,15 +2802,25 @@ async def _process_webhook_payload(data: dict, cid: str):
         msg_type = (msg.get("type") or "").strip()
         user_text = ""
         choice_id = ""
+        button_title = ""
+        list_id = ""
+        list_title = ""
+        list_description = ""
+        interactive_type = ""
 
         if msg_type == "text":
             user_text = ((msg.get("text") or {}).get("body") or "").strip()
         elif msg_type == "interactive":
             inter = msg.get("interactive") or {}
+            interactive_type = (inter.get("type") or "").strip()
             br = (inter.get("button_reply") or {})
             lr = (inter.get("list_reply") or {})
-            choice_id = (br.get("id") or lr.get("id") or "").strip()
-            user_text = (br.get("title") or lr.get("title") or "").strip()
+            button_title = (br.get("title") or "").strip()
+            list_id = (lr.get("id") or "").strip()
+            list_title = (lr.get("title") or "").strip()
+            list_description = (lr.get("description") or "").strip()
+            choice_id = (br.get("id") or list_id or "").strip()
+            user_text = (button_title or list_title or list_description).strip()
         else:
             print(f"[{cid}] WEBHOOK:unsupported_message_type wa_id={wa_id} msg_type={msg_type}")
             print(
@@ -2844,6 +2905,24 @@ async def _process_webhook_payload(data: dict, cid: str):
         )
 
         ai_state = await get_ai_state(wa_id, workspace_id=workspace_id) or {}
+        normalized_choice = sales_brain.normalize_inbound_choice(
+            text=user_text,
+            button_id=choice_id if button_title else "",
+            button_title=button_title,
+            list_id=list_id,
+            list_title=list_title,
+            list_description=list_description,
+            current_state=ai_state,
+        )
+        if msg_type == "interactive":
+            print(
+                "INTERACTIVE_PAYLOAD_PARSED "
+                f"cid={cid} wa_id={wa_id} msg_type={msg_type} interactive_type={interactive_type or '-'} "
+                f"button_id={(choice_id if button_title else '')!r} button_title={button_title[:120]!r} "
+                f"list_id={list_id!r} list_title={list_title[:120]!r} list_description={list_description[:160]!r} "
+                f"normalized_choice_id={normalized_choice.get('choice_id') or ''!r} "
+                f"normalized_service_interest={normalized_choice.get('service_interest') or ''!r}"
+            )
         flow_data = _flow_data(wa_id, workspace_id=workspace_id)
         post_handoff_mode = _is_post_handoff_mode(ai_state)
         automation_paused = bool((user or {}).get("automation_paused"))
@@ -3027,8 +3106,8 @@ async def _process_webhook_payload(data: dict, cid: str):
         flow_resp = None
         service_context = {}
 
-        selected_choice = choice_id or (user_text if is_service_choice(user_text) else "")
-        if selected_choice and is_service_choice(selected_choice):
+        selected_choice = normalized_choice.get("choice_id") if normalized_choice.get("is_menu_choice") else ""
+        if selected_choice:
             print(f"[{cid}] WEBHOOK:service_choice_to_ai wa_id={wa_id} choice_id={selected_choice}")
             service_context = apply_service_choice(wa_id, selected_choice, workspace_id=workspace_id)
             try:
@@ -3036,32 +3115,36 @@ async def _process_webhook_payload(data: dict, cid: str):
             except Exception:
                 pass
             ai_state = await get_ai_state(wa_id, workspace_id=workspace_id) or {}
-            brain_updates = sales_brain.service_choice_update(selected_choice)
-            brain_state = sales_brain.merge_state(ai_state, brain_updates)
-            await upsert_ai_state(
+            updated_state = await _apply_menu_choice_state(
                 wa_id,
-                {
-                    **brain_state,
-                    "selected_service_id": service_context.get("id"),
-                    "selected_service": service_context.get("service_interest"),
-                    "service_interest": service_context.get("service_interest"),
-                    "intent": service_context.get("intent") or brain_state.get("intent") or "",
-                    "lead_fields": _merge_lead_fields(
-                        brain_state.get("lead_fields"),
-                        {
-                            "service_interest": service_context.get("service_interest"),
-                            "intent": service_context.get("intent"),
-                            "funnel_stage": "qualificacao",
-                            "last_question_asked": brain_updates.get("last_question_asked"),
-                            "last_question_category": brain_updates.get("last_question_category"),
-                            "next_best_question": brain_updates.get("next_best_question"),
-                        },
-                    ),
-                },
+                choice=normalized_choice,
+                current_state=ai_state,
                 workspace_id=workspace_id,
             )
-            user_text = service_context.get("label") or user_text
-            lower = user_text.lower().strip()
+            result = _deterministic_choice_result(normalized_choice, updated_state)
+            reply_text = (result.get("reply") or "").strip()
+            _log_outbound_decision(cid, wa_id, "handoff" if result.get("handoff") else "menu", reply_text)
+            ok = safe_send(
+                wa_id,
+                reply_text,
+                meta={"event": "deterministic_menu_choice", "cid": cid, "normalized_choice": normalized_choice},
+                workspace_id=workspace_id,
+                cid=cid,
+            )
+            if ok:
+                await _save_ai_result_state(wa_id, ai_state=updated_state, result=result, user_text=user_text, workspace_id=workspace_id)
+                _remember_bot_message(wa_id, result.get("lead_fields", {}).get("last_question_category") or "menu_choice", reply_text, workspace_id=workspace_id)
+                await _handle_ai_operational_decision(
+                    wa_id=wa_id,
+                    cid=cid,
+                    result=result,
+                    user_text=user_text,
+                    user=user,
+                    workspace_id=workspace_id,
+                )
+            else:
+                _log_outbound_skipped(cid, wa_id, "send_failed:deterministic_menu_choice")
+            return
         elif choice_id and not post_handoff_mode:
             print(f"[{cid}] WEBHOOK:enter_mugo_flow wa_id={wa_id} choice_id={choice_id}")
             flow_resp = handle_mugo_flow(wa_id, choice_id, choice_id=choice_id, workspace_id=workspace_id)

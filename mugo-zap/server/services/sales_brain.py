@@ -56,6 +56,99 @@ SERVICE_CHOICES = {
     "service_human": ("humano", "humano", "handoff", "Claro. Vou te encaminhar para a Julia com um resumo do que você precisa."),
 }
 
+CHOICE_ID_BY_SERVICE = {
+    "site": "service_site",
+    "automacao_whatsapp": "service_automation",
+    "inteligencia_artificial": "service_ai",
+    "trafego_pago": "service_traffic",
+    "branding": "service_branding",
+    "humano": "service_human",
+}
+
+INTENT_BY_SERVICE = {
+    "site": "site",
+    "automacao_whatsapp": "automacao_whatsapp",
+    "inteligencia_artificial": "inteligencia_artificial",
+    "trafego_pago": "trafego_pago",
+    "branding": "branding",
+    "humano": "humano",
+}
+
+MENU_TEXT_PATTERNS = {
+    "site": [
+        "service_site",
+        "1",
+        "01",
+        "site",
+        "pagina",
+        "landing",
+        "site ou landing",
+        "criar ou melhorar paginas",
+        "criar ou melhorar pagina",
+        "criar paginas",
+        "melhorar paginas",
+    ],
+    "automacao_whatsapp": [
+        "service_automation",
+        "2",
+        "02",
+        "automacao",
+        "automatizar",
+        "automatizar whatsapp",
+        "automatizar atendimento",
+        "whatsapp/atendimento",
+        "atendimento automatico",
+        "whatsapp",
+        "zap",
+    ],
+    "inteligencia_artificial": [
+        "service_ai",
+        "3",
+        "03",
+        "ia",
+        "ia no negocio",
+        "inteligencia artificial",
+        "agentes",
+        "agentes processos e escala",
+        "processos e escala",
+    ],
+    "trafego_pago": [
+        "service_traffic",
+        "4",
+        "04",
+        "trafego",
+        "trafego pago",
+        "performance",
+        "anuncios",
+        "performance e anuncios",
+        "ads",
+    ],
+    "branding": [
+        "service_branding",
+        "5",
+        "05",
+        "branding",
+        "marca",
+        "conteudo",
+        "redes sociais",
+        "social media",
+        "identidade",
+        "posicionamento",
+    ],
+    "humano": [
+        "service_human",
+        "6",
+        "06",
+        "humano",
+        "pessoa",
+        "atendente",
+        "falar com a equipe",
+        "falar com humano",
+        "falar com alguem",
+        "julia",
+    ],
+}
+
 
 def normalize_text(text: str) -> str:
     value = str(text or "").strip().lower()
@@ -67,6 +160,20 @@ def normalize_text(text: str) -> str:
 
 def _has_any(text: str, terms: List[str]) -> bool:
     return any(term in text for term in terms)
+
+
+def _match_menu_service(value: str) -> tuple[str, str]:
+    norm = normalize_text(value)
+    if not norm:
+        return "", "low"
+    for service, patterns in MENU_TEXT_PATTERNS.items():
+        if norm in patterns:
+            return service, "high"
+    for service, patterns in MENU_TEXT_PATTERNS.items():
+        for pattern in patterns:
+            if len(pattern) >= 4 and (pattern in norm or norm in pattern):
+                return service, "medium"
+    return "", "low"
 
 
 def _append_source(current: Any, source: str) -> str:
@@ -113,6 +220,73 @@ def _explicit_service_switch(text: str) -> bool:
     )
 
 
+def detect_explicit_service_switch(text: str) -> bool:
+    return _explicit_service_switch(normalize_text(text))
+
+
+def normalize_inbound_choice(
+    text: str | None = None,
+    button_id: str | None = None,
+    button_title: str | None = None,
+    list_id: str | None = None,
+    list_title: str | None = None,
+    list_description: str | None = None,
+    current_state: dict | None = None,
+) -> Dict[str, Any]:
+    state = flatten_state(current_state or {})
+    locked_service = state.get("service_interest") or state.get("selected_service") or ""
+    candidates = [
+        ("list_id", list_id),
+        ("button_id", button_id),
+        ("list_title", list_title),
+        ("button_title", button_title),
+        ("list_description", list_description),
+        ("text", text),
+    ]
+    raw_text = ""
+    for _, value in candidates:
+        if str(value or "").strip():
+            raw_text = str(value or "").strip()
+            break
+
+    best_service = ""
+    best_confidence = "low"
+    best_source = ""
+    for source, value in candidates:
+        value = str(value or "").strip()
+        if not value:
+            continue
+        service, confidence = _match_menu_service(value)
+        if not service:
+            continue
+        if source == "text" and locked_service and service != locked_service and not detect_explicit_service_switch(value):
+            print(f"SALES_BRAIN_SERVICE_LOCKED service={locked_service} ignored_candidate={service} source=text text={value[:160]!r}")
+            continue
+        best_service = service
+        best_confidence = "high" if source in {"list_id", "button_id"} and confidence != "low" else confidence
+        best_source = source
+        break
+
+    if locked_service and best_service and best_service != locked_service and not detect_explicit_service_switch(raw_text):
+        source_is_visual_click = best_source in {"list_id", "button_id", "list_title", "button_title", "list_description"}
+        if not source_is_visual_click:
+            print(f"SALES_BRAIN_SERVICE_LOCKED service={locked_service} ignored_candidate={best_service} source={best_source} text={raw_text[:160]!r}")
+            best_service = ""
+            best_confidence = "low"
+            best_source = ""
+
+    return {
+        "raw_text": raw_text,
+        "normalized_text": normalize_text(raw_text),
+        "choice_id": CHOICE_ID_BY_SERVICE.get(best_service),
+        "service_interest": best_service or None,
+        "intent": INTENT_BY_SERVICE.get(best_service),
+        "is_menu_choice": bool(best_service and best_confidence in {"high", "medium"}),
+        "confidence": best_confidence,
+        "source": best_source or "text",
+    }
+
+
 def flatten_state(state: Dict[str, Any] | None) -> Dict[str, Any]:
     src = state or {}
     fields = src.get("lead_fields") if isinstance(src.get("lead_fields"), dict) else {}
@@ -130,6 +304,9 @@ def flatten_state(state: Dict[str, Any] | None) -> Dict[str, Any]:
 
 def service_choice_update(choice_id: str) -> Dict[str, Any]:
     key = normalize_text(choice_id)
+    service_from_text, _ = _match_menu_service(key)
+    if service_from_text:
+        key = CHOICE_ID_BY_SERVICE.get(service_from_text, key)
     if key not in SERVICE_CHOICES:
         return {}
     service, intent, category, question = SERVICE_CHOICES[key]
@@ -165,8 +342,12 @@ def extract_signal_from_message(text: str, current_state: Dict[str, Any]) -> Dic
 
     choice_updates = service_choice_update(norm)
     if choice_updates:
-        updates.update(choice_updates)
-        return updates
+        choice_service = choice_updates.get("service_interest") or ""
+        if service and choice_service and choice_service != service and not detect_explicit_service_switch(text):
+            print(f"SALES_BRAIN_SERVICE_LOCKED service={service} ignored_candidate={choice_service} source=text text={text[:160]!r}")
+        else:
+            updates.update(choice_updates)
+            return updates
 
     if _has_any(norm, ["humano", "pessoa", "atendente", "julia", "falar com alguem", "quero falar", "falar com a equipe"]):
         updates.update(
@@ -196,6 +377,10 @@ def extract_signal_from_message(text: str, current_state: Dict[str, Any]) -> Dic
     service = updates.get("service_interest") or service
 
     if service == "site" or last_category == "site_scope":
+        if service == "site" and last_category == "site_scope" and _has_any(norm, ["whatsapp", "whats", "zap"]):
+            updates["desired_result"] = "usar WhatsApp como canal de conversão"
+            updates["current_problem"] = updates.get("current_problem") or "página precisa levar as pessoas para o WhatsApp"
+            print(f"SALES_BRAIN_CONTEXT_SIGNAL category=site_scope field=desired_result value='usar WhatsApp como canal de conversão' text={text[:160]!r}")
         if _has_any(norm, ["do zero", "nova", "novo", "criar", "comecar"]):
             updates["site_scope"] = "criar do zero"
         elif _has_any(norm, ["melhorar", "ja existe", "existe", "refazer", "otimizar"]):
@@ -247,6 +432,10 @@ def extract_signal_from_message(text: str, current_state: Dict[str, Any]) -> Dic
         updates["lead_source"] = source
         if last_category == "lead_source":
             print(f"SALES_BRAIN_CONTEXT_SIGNAL category=lead_source field=lead_source value={source!r} text={text[:160]!r}")
+
+    if last_category == "current_tools" and _has_any(norm, ["whatsapp", "whats", "zap"]) and not updates.get("current_tools"):
+        updates["current_tools"] = "WhatsApp"
+        print(f"SALES_BRAIN_CONTEXT_SIGNAL category=current_tools field=current_tools value='WhatsApp' text={text[:160]!r}")
 
     if _has_any(norm, ["manual", "na mao", "sem crm", "planilha", "caderno"]):
         updates["current_tools"] = "manual"
@@ -348,7 +537,7 @@ def get_next_question(state: Dict[str, Any]) -> Dict[str, Any]:
         if not state.get("urgency"):
             return {"category": "urgency", "question": "Você quer iniciar isso agora ou está planejando para os próximos meses?", "next_action": "ask_question"}
         return offer
-    return {"category": "service_interest", "question": "Pra eu te direcionar melhor: a prioridade é página, WhatsApp, IA, anúncios ou marca?", "next_action": "ask_question"}
+    return {"category": "service_interest", "question": "Pra eu te direcionar melhor: você procura site, automação, IA, tráfego ou branding?", "next_action": "ask_question"}
 
 
 def question_category(text: str) -> str:
@@ -374,6 +563,20 @@ def question_category(text: str) -> str:
     if "julia" in norm and ("resumo" in norm or "encaminhar" in norm):
         return "offer_meeting"
     return ""
+
+
+def is_forbidden_generic_reply(reply: str, state: Dict[str, Any] | None = None) -> bool:
+    current = flatten_state(state or {})
+    if not current.get("service_interest"):
+        return False
+    norm = normalize_text(reply)
+    forbidden = [
+        "pra eu te direcionar melhor a prioridade e pagina whatsapp ia anuncios ou marca",
+        "voce procura site automacao ia trafego ou branding",
+        "isso impacta mais vendas/leads ou operacao/tempo",
+        "isso impacta mais vendas leads ou operacao tempo",
+    ]
+    return any(item in norm for item in forbidden)
 
 
 def is_duplicate_question(reply: str, last_question: str) -> bool:
@@ -406,6 +609,9 @@ def validate_reply(reply: str, state: Dict[str, Any]) -> Dict[str, Any]:
     if is_duplicate_question(reply, state.get("last_question_asked") or ""):
         blocked = True
         reason = "duplicate_last_question"
+    elif is_forbidden_generic_reply(reply, state):
+        blocked = True
+        reason = "forbidden_generic_reply"
     elif category and _category_answered(state, category):
         blocked = True
         reason = f"known_{category}"

@@ -92,7 +92,7 @@ def _fallback_reply(msg: str, intent: str, score: int) -> str:
         return "Perfeito, vou encaminhar para alguém da equipe da Mugô continuar com você."
     if score >= 70:
         return "Entendi. Parece um caso com prioridade. Qual resultado você precisa alcançar primeiro?"
-    return "Perfeito. Pra eu te direcionar melhor: isso impacta mais vendas/leads ou operação/tempo?"
+    return "Perfeito. Me conta em uma frase o que você quer resolver primeiro."
 
 
 def _score_from_text(t: str) -> int:
@@ -211,9 +211,11 @@ def _default_lead_fields(msg: str, intent: str) -> Dict[str, Any]:
         "business_type": None,
         "main_goal": msg[:180] if msg else None,
         "service_interest": intent if intent != "outro" else None,
+        "site_scope": None,
         "urgency": None,
         "budget_signal": None,
         "current_tools": None,
+        "current_status": None,
         "current_problem": None,
         "desired_result": None,
         "lead_source": None,
@@ -257,16 +259,51 @@ def _format_lead_context(lead_context: Optional[Dict[str, Any]]) -> str:
     if not lead_context:
         return "Sem contexto comercial salvo."
 
+    fields = lead_context.get("lead_fields") if isinstance(lead_context.get("lead_fields"), dict) else {}
+    known_fields = {
+        key: (lead_context.get(key) if lead_context.get(key) not in (None, "", [], {}) else fields.get(key))
+        for key in [
+            "service_interest",
+            "intent",
+            "main_goal",
+            "desired_result",
+            "site_scope",
+            "lead_source",
+            "current_tools",
+            "current_status",
+            "current_problem",
+            "business_type",
+            "business_name",
+            "urgency",
+            "budget_signal",
+            "funnel_stage",
+        ]
+    }
+    known_fields = {k: v for k, v in known_fields.items() if v not in (None, "", [], {})}
+    missing_fields = [
+        key
+        for key in ["service_interest", "main_goal", "site_scope", "lead_source", "current_tools", "current_problem", "urgency", "budget_signal"]
+        if key not in known_fields
+    ]
+
     safe_context = {
         "memory_summary": lead_context.get("memory_summary"),
         "memory_theme": lead_context.get("memory_theme"),
         "memory_goal": lead_context.get("memory_goal"),
         "memory_notes": lead_context.get("memory_notes"),
         "lead_fields": lead_context.get("lead_fields"),
+        "known_fields": known_fields,
+        "missing_fields": missing_fields,
         "briefing": lead_context.get("briefing"),
         "follow_up": lead_context.get("follow_up"),
         "last_question_asked": lead_context.get("last_question_asked"),
         "last_question_category": lead_context.get("last_question_category"),
+        "next_best_question": lead_context.get("next_best_question") or fields.get("next_best_question"),
+        "forbidden_questions": [
+            "não perguntar serviço se service_interest existe",
+            "não perguntar objetivo se main_goal existe",
+            "não repetir last_question_asked",
+        ],
         "selected_service": lead_context.get("selected_service"),
         "selected_service_id": lead_context.get("selected_service_id"),
         "intent": lead_context.get("intent"),
@@ -517,6 +554,7 @@ async def generate_reply(
             {"role": "system", "content": official_prompt},
             {"role": "system", "content": f"Histórico recente da conversa:\n{history_text}"},
             {"role": "system", "content": f"Contexto comercial salvo do lead:\n{lead_context_text}"},
+            {"role": "system", "content": "A próxima pergunta sugerida pelo backend tem prioridade. Se next_best_question existir, use-a como base. Não pergunte serviço, objetivo, origem, processo, urgência ou orçamento quando esse campo já estiver preenchido."},
             {"role": "system", "content": f"Perfil técnico do lead:\n{json.dumps(lead_profile, ensure_ascii=False)}"},
             {"role": "system", "content": f"Contexto do fluxo atual:\n{flow_txt or 'Nenhum.'}"},
             {"role": "user", "content": msg},

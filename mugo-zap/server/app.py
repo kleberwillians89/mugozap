@@ -113,6 +113,7 @@ from services.state import (
 from services.whatsapp import meta_env_status, send_message, send_message_detailed
 from services.openai_client import generate_reply
 from services.mugo_flow import apply_service_choice, handle_mugo_flow, is_service_choice, service_choice_context
+from services import sales_brain
 from services.followup import process_followups
 from services.workspace import build_default_workspace, ensure_default_workspace, resolve_workspace_id
 
@@ -631,6 +632,8 @@ def _infer_fields_from_text(user_text: str, ai_state: dict | None, result: dict 
     text = _compact_text(user_text)
     state_fields = ((ai_state or {}).get("lead_fields") or {})
     result_fields = ((result or {}).get("lead_fields") or {})
+    brain_state = sales_brain.merge_state(sales_brain.flatten_state(ai_state or {}), result_fields)
+    brain_updates = sales_brain.extract_signal_from_message(user_text, brain_state)
     service_interest = result_fields.get("service_interest") or state_fields.get("service_interest") or (ai_state or {}).get("selected_service")
     last_question_category = (
         result_fields.get("last_question_category")
@@ -638,7 +641,7 @@ def _infer_fields_from_text(user_text: str, ai_state: dict | None, result: dict 
         or (ai_state or {}).get("last_question_category")
         or _question_key(state_fields.get("last_question_asked") or (ai_state or {}).get("last_question_asked") or "")
     )
-    inferred: dict = {}
+    inferred: dict = dict(brain_updates)
 
     if service_interest:
         inferred["service_interest"] = service_interest
@@ -703,6 +706,18 @@ def _infer_fields_from_text(user_text: str, ai_state: dict | None, result: dict 
 
 
 def _progress_stage_for_fields(fields: dict) -> str:
+    next_q = sales_brain.get_next_question(fields)
+    category = next_q.get("category") or ""
+    if category == "service_interest":
+        return "identificar_interesse"
+    if category in {"main_goal", "site_scope"}:
+        return "identificar_objetivo"
+    if category in {"lead_source", "current_tools", "current_status", "current_problem"}:
+        return "entender_cenario_atual"
+    if category in {"urgency", "budget_signal"}:
+        return "entender_urgencia"
+    if category in {"offer_meeting", "handoff"}:
+        return "encaminhar"
     if not fields.get("service_interest"):
         return "identificar_interesse"
     if not fields.get("main_goal"):
@@ -717,24 +732,8 @@ def _progress_stage_for_fields(fields: dict) -> str:
 
 
 def _next_question_for_fields(fields: dict) -> tuple[str, str]:
-    main_goal = (fields.get("main_goal") or "").strip().lower()
-    service = (fields.get("service_interest") or "").strip().lower()
-
-    if not service:
-        return "service_interest", "Pra te direcionar melhor: você procura site, automação, IA, tráfego ou branding?"
-    if service == "automacao_whatsapp" and not main_goal:
-        return "main_goal", "Perfeito. Nesse caso, o foco hoje é mais vender mais, ganhar tempo no atendimento ou organizar melhor a operação?"
-    if not main_goal:
-        return "main_goal", "Boa. O principal objetivo agora é vender mais, ganhar tempo ou organizar melhor a operação?"
-    if main_goal == "vendas/leads" and not fields.get("lead_source"):
-        return "lead_source", "Boa. Hoje esses contatos chegam mais pelo WhatsApp, Instagram ou site?"
-    if fields.get("lead_source") and not (fields.get("current_tools") or fields.get("current_problem")):
-        return "current_tools", "Entendi. E hoje vocês atendem isso tudo manualmente ou já usam alguma ferramenta?"
-    if fields.get("current_tools") and not fields.get("urgency"):
-        return "urgency", "Faz sentido. Você quer colocar isso para rodar mais no curto prazo?"
-    if fields.get("urgency"):
-        return "offer_meeting", "Perfeito. Já faz sentido envolver nosso time. Posso te encaminhar com um resumo do seu cenário para a Julia e agilizar isso?"
-    return "", ""
+    next_q = sales_brain.get_next_question(fields)
+    return next_q.get("category") or "", next_q.get("question") or ""
 
 
 def _field_for_question_category(category: str) -> str:
@@ -758,8 +757,7 @@ def _has_answer_for_category(fields: dict, category: str) -> bool:
 
 
 def _wants_human_from_text(user_text: str) -> bool:
-    text = _compact_text(user_text)
-    return any(k in text for k in ["falar com alguém", "falar com alguem", "quero falar", "atendente", "humano", "pessoa da equipe", "falar com a equipe", "consultor"])
+    return sales_brain.should_handoff({}, user_text)
 
 
 def _postprocess_ai_result(
@@ -771,12 +769,27 @@ def _postprocess_ai_result(
     user_text: str,
 ) -> dict:
     result = dict(result or {})
-    state_fields = ((ai_state or {}).get("lead_fields") or {})
+    brain_base = sales_brain.flatten_state(ai_state or {})
+    state_fields = {**(((ai_state or {}).get("lead_fields") or {})), **{k: v for k, v in brain_base.items() if k != "lead_fields" and v not in (None, "", [], {})}}
     result_fields = result.get("lead_fields") if isinstance(result.get("lead_fields"), dict) else {}
     inferred = _infer_fields_from_text(user_text, ai_state, result)
     before_fields = _merge_lead_fields(state_fields, result_fields)
     merged_fields = _merge_lead_fields(before_fields, inferred)
+    brain_state = sales_brain.merge_state(brain_base, merged_fields)
+    if result.get("handoff"):
+        brain_state = sales_brain.merge_state(brain_state, {"handoff": True, "handoff_reason": result.get("handoff_reason") or "handoff"})
+    if sales_brain.should_offer_meeting(brain_state):
+        brain_state = sales_brain.merge_state(
+            brain_state,
+            {
+                "meeting_suggested": True,
+                "briefing_ready": True,
+                "lead_temperature": "hot" if brain_state.get("urgency") == "alta" else "warm",
+            },
+        )
+    merged_fields = _merge_lead_fields(merged_fields, {k: v for k, v in brain_state.items() if k in sales_brain.FIELD_KEYS})
     result["lead_fields"] = merged_fields
+    result["intent"] = result.get("intent") or brain_state.get("intent") or merged_fields.get("intent") or "outro"
 
     print(f"AI_CONTEXT_FIELDS_BEFORE cid={cid} wa_id={wa_id} fields={json.dumps(before_fields, ensure_ascii=False)[:900]}")
     print(f"AI_CONTEXT_FIELDS_AFTER cid={cid} wa_id={wa_id} fields={json.dumps(merged_fields, ensure_ascii=False)[:900]}")
@@ -791,7 +804,7 @@ def _postprocess_ai_result(
     reply = (result.get("reply") or "").strip()
     progress_stage = _progress_stage_for_fields(merged_fields)
     next_category, next_question = _next_question_for_fields(merged_fields)
-    reply_category = _question_key(reply)
+    reply_category = sales_brain.question_category(reply) or _question_key(reply)
     last_category = (
         merged_fields.get("last_question_category")
         or state_fields.get("last_question_category")
@@ -806,9 +819,9 @@ def _postprocess_ai_result(
     print(f"AI_LAST_QUESTION cid={cid} wa_id={wa_id} question={last_question[:240]!r}")
     print(f"AI_PROGRESS_STAGE cid={cid} wa_id={wa_id} stage={progress_stage} next_category={next_category or '-'}")
 
-    duplicate_goal_question = (
-        _question_key(last_question) == "main_goal"
-        and (merged_fields.get("main_goal") or "").lower() == "vendas/leads"
+    duplicate_goal_question = sales_brain.is_duplicate_question(reply, last_question) or (
+        (sales_brain.question_category(last_question) or _question_key(last_question)) == "main_goal"
+        and bool(merged_fields.get("main_goal"))
         and reply_category == "main_goal"
     )
 
@@ -836,7 +849,23 @@ def _postprocess_ai_result(
         result["reply"] = reply
         result["next_action"] = "ask_question"
 
-    if _wants_human_from_text(user_text):
+    validation = sales_brain.validate_reply(result.get("reply") or "", brain_state)
+    if validation.get("blocked"):
+        print(
+            f"AI_DUPLICATE_QUESTION_PREVENTED cid={cid} wa_id={wa_id} "
+            f"reason={validation.get('reason')} new_reply={validation.get('reply')!r}"
+        )
+        result["reply"] = validation.get("reply") or next_question or result.get("reply")
+        result["next_action"] = validation.get("next_action") or result.get("next_action") or "ask_question"
+        result["lead_fields"] = _merge_lead_fields(
+            result.get("lead_fields"),
+            {
+                "next_best_question": validation.get("question"),
+                "last_question_category": validation.get("category"),
+            },
+        )
+
+    if sales_brain.should_handoff(brain_state, user_text):
         result["handoff"] = True
         result["next_action"] = "handoff"
         result["handoff_reason"] = result.get("handoff_reason") or "lead_pediu_humano"
@@ -861,7 +890,7 @@ def _postprocess_ai_result(
 
     current_question = _extract_last_question(result.get("reply") or "")
     if current_question:
-        current_category = _question_key(current_question)
+        current_category = sales_brain.question_category(current_question) or _question_key(current_question)
         result["lead_fields"] = _merge_lead_fields(
             result.get("lead_fields"),
             {
@@ -873,25 +902,18 @@ def _postprocess_ai_result(
         result["last_question_category"] = current_category
         print(f"AI_NEXT_QUESTION cid={cid} wa_id={wa_id} question={current_question[:240]!r}")
 
-    if merged_fields.get("urgency") and (merged_fields.get("main_goal") or merged_fields.get("current_problem")):
-        result["lead_temperature"] = "hot"
+    if sales_brain.should_offer_meeting(sales_brain.merge_state(brain_state, result.get("lead_fields") or {})):
+        result["lead_temperature"] = "hot" if merged_fields.get("urgency") == "alta" or result.get("handoff") else "warm"
         result["meeting_suggested"] = True
         result["briefing_ready"] = True
         result["next_action"] = "offer_meeting" if not result.get("handoff") else "handoff"
-        if not result.get("handoff") and next_category == "offer_meeting":
-            result["reply"] = next_question
+        final_next = sales_brain.get_next_question(sales_brain.merge_state(brain_state, result.get("lead_fields") or {}))
+        if not result.get("handoff") and final_next.get("next_action") == "offer_meeting":
+            result["reply"] = final_next.get("question") or result.get("reply")
         briefing = result.get("briefing") if isinstance(result.get("briefing"), dict) else {}
         result["briefing"] = _merge_briefing(
             briefing,
-            {
-                "summary": briefing.get("summary") or _briefing_summary_from_result(result, user_text),
-                "goals": [goal for goal in [merged_fields.get("desired_result") or merged_fields.get("main_goal")] if goal],
-                "recommended_solution": merged_fields.get("service_interest") or result.get("intent"),
-                "urgency": merged_fields.get("urgency"),
-                "budget_signal": merged_fields.get("budget_signal"),
-                "suggested_next_step": "Agendar conversa com Julia",
-                "questions_to_julia": ["Confirmar escopo, canais de entrada e prazo de implantação."],
-            },
+            sales_brain.build_briefing(sales_brain.merge_state(brain_state, result.get("lead_fields") or {}), []),
         )
         current_question = _extract_last_question(result.get("reply") or "")
         if current_question:
@@ -1021,12 +1043,18 @@ async def _save_ai_result_state(
         "service_interest": lead_fields.get("service_interest") or state.get("service_interest") or "",
         "main_goal": lead_fields.get("main_goal") or state.get("main_goal") or "",
         "desired_result": lead_fields.get("desired_result") or state.get("desired_result") or "",
+        "site_scope": lead_fields.get("site_scope") or state.get("site_scope") or "",
         "lead_source": lead_fields.get("lead_source") or state.get("lead_source") or "",
         "current_tools": lead_fields.get("current_tools") or state.get("current_tools") or "",
+        "current_status": lead_fields.get("current_status") or state.get("current_status") or "",
         "current_problem": lead_fields.get("current_problem") or state.get("current_problem") or "",
+        "business_type": lead_fields.get("business_type") or state.get("business_type") or "",
+        "business_name": lead_fields.get("business_name") or state.get("business_name") or "",
         "urgency": lead_fields.get("urgency") or state.get("urgency") or "",
         "budget_signal": lead_fields.get("budget_signal") or state.get("budget_signal") or "",
+        "funnel_stage": lead_fields.get("funnel_stage") or state.get("funnel_stage") or "",
         "next_best_question": lead_fields.get("next_best_question") or state.get("next_best_question") or "",
+        "handoff": bool(result.get("handoff") or state.get("handoff")),
         "lead_fields": lead_fields,
         "briefing": _merge_briefing(state.get("briefing"), result.get("briefing")),
         "follow_up": result.get("follow_up") or state.get("follow_up") or {},
@@ -1034,6 +1062,46 @@ async def _save_ai_result_state(
         "lead_temperature": result.get("lead_temperature") or state.get("lead_temperature") or "",
     }
     return await upsert_ai_state(wa_id, merged, workspace_id=workspace_id)
+
+
+async def _prepare_sales_brain_state(
+    wa_id: str,
+    *,
+    ai_state: dict | None,
+    user_text: str,
+    workspace_id: str = "",
+    cid: str = "",
+) -> dict:
+    state = sales_brain.flatten_state(ai_state or {})
+    updates = sales_brain.extract_signal_from_message(user_text, state)
+    state = sales_brain.merge_state(state, updates)
+    next_q = sales_brain.get_next_question(state)
+    if next_q.get("question"):
+        state = sales_brain.merge_state(
+            state,
+            {
+                "next_best_question": next_q.get("question"),
+                "last_question_category": state.get("last_question_category") or next_q.get("category"),
+                "next_action": next_q.get("next_action"),
+            },
+        )
+    if sales_brain.should_offer_meeting(state):
+        state = sales_brain.merge_state(
+            state,
+            {
+                "meeting_suggested": True,
+                "briefing_ready": True,
+                "lead_temperature": "hot" if state.get("urgency") == "alta" else "warm",
+                "next_action": "offer_meeting" if not state.get("handoff") else "handoff",
+                "briefing": sales_brain.build_briefing(state, []),
+            },
+        )
+    print(
+        f"AI_PROGRESS_STAGE cid={cid} wa_id={wa_id} "
+        f"service={state.get('service_interest') or '-'} next_category={next_q.get('category') or '-'} "
+        f"updates={json.dumps(updates, ensure_ascii=False)[:700]}"
+    )
+    return await upsert_ai_state(wa_id, state, workspace_id=workspace_id)
 
 
 def _should_trigger_internal_briefing(result: dict) -> bool:
@@ -1622,6 +1690,7 @@ async def api_debug_lead_state(
     )
     workspace_id = user.get("workspace_id")
     ai_state = await get_ai_state(wa_id, workspace_id=workspace_id)
+    flat_state = sales_brain.flatten_state(ai_state)
     messages = get_recent_messages(wa_id, limit=20, workspace_id=workspace_id) or []
     conversations = list_conversations(limit=500, workspace_id=workspace_id) or []
     lead_row = next((item for item in conversations if str(item.get("wa_id") or "") == str(wa_id)), {})
@@ -1630,21 +1699,75 @@ async def api_debug_lead_state(
         "ok": True,
         "wa_id": wa_id,
         "ai_state": ai_state,
+        "service_interest": flat_state.get("service_interest"),
+        "intent": flat_state.get("intent") or ai_state.get("memory_theme") or "",
+        "main_goal": flat_state.get("main_goal"),
+        "desired_result": flat_state.get("desired_result"),
+        "site_scope": flat_state.get("site_scope"),
+        "lead_source": flat_state.get("lead_source"),
+        "current_tools": flat_state.get("current_tools"),
+        "current_problem": flat_state.get("current_problem"),
+        "business_type": flat_state.get("business_type"),
+        "urgency": flat_state.get("urgency"),
+        "budget_signal": flat_state.get("budget_signal"),
+        "funnel_stage": flat_state.get("funnel_stage"),
+        "last_question_asked": flat_state.get("last_question_asked"),
+        "last_question_category": flat_state.get("last_question_category"),
+        "next_best_question": flat_state.get("next_best_question"),
+        "meeting_suggested": bool(flat_state.get("meeting_suggested")),
+        "briefing_ready": bool(flat_state.get("briefing_ready")),
+        "handoff": bool(flat_state.get("handoff")),
+        "handoff_reason": flat_state.get("handoff_reason") or "",
         "recent_messages": messages,
         "tags": lead_row.get("tags") or ai_state.get("suggested_tags") or [],
         "lead_temperature": ai_state.get("lead_temperature") or lead_row.get("lead_temperature") or "",
-        "intent": ai_state.get("intent") or ai_state.get("memory_theme") or "",
         "next_action": ai_state.get("next_action") or "",
-        "meeting_suggested": bool(ai_state.get("meeting_suggested")),
-        "briefing_ready": bool(ai_state.get("briefing_ready")),
         "lead_fields": ai_state.get("lead_fields") or {},
         "briefing": ai_state.get("briefing") or {},
         "follow_up": ai_state.get("follow_up") or {},
         "suggested_tags": ai_state.get("suggested_tags") or [],
-        "handoff_reason": ai_state.get("handoff_reason") or "",
         "briefing_sent_at": ai_state.get("briefing_sent_at") or "",
         "handoff_sent_at": ai_state.get("handoff_sent_at") or "",
     }
+
+
+@app.post("/api/debug/reset-lead/{wa_id}")
+async def api_debug_reset_lead(
+    wa_id: str,
+    authorization: str = Header(None),
+    x_panel_key: str = Header(None, alias="X-Panel-Key"),
+    x_workspace_id: str = Header(None, alias="X-Workspace-Id"),
+):
+    user = await get_current_user(
+        authorization=authorization,
+        x_panel_key=x_panel_key,
+        x_workspace_id=x_workspace_id,
+    )
+    workspace_id = user.get("workspace_id")
+    reset = []
+    await reset_ai_state(wa_id, workspace_id=workspace_id)
+    reset.append("ai_state")
+    try:
+        clear_flow(wa_id, workspace_id=workspace_id)
+        reset.append("flow_state")
+    except Exception as e:
+        print(f"DEBUG_RESET_LEAD clear_flow failed wa_id={wa_id} error={repr(e)}")
+    try:
+        clear_handoff(wa_id, workspace_id=workspace_id)
+        set_handoff_pending(wa_id, False, workspace_id=workspace_id)
+        upsert_user(
+            wa_id,
+            workspace_id=workspace_id,
+            bot_enabled=True,
+            automation_paused=False,
+            handoff_active=False,
+            handoff_pending=False,
+            attendance_mode="bot",
+        )
+        reset.append("handoff_flags")
+    except Exception as e:
+        print(f"DEBUG_RESET_LEAD handoff flags failed wa_id={wa_id} error={repr(e)}")
+    return {"ok": True, "wa_id": wa_id, "reset": reset}
 
 
 @app.post("/api/debug/simulate-incoming/{wa_id}")
@@ -1710,16 +1833,26 @@ async def api_debug_simulate_incoming(
         except Exception:
             pass
         current_state = await get_ai_state(wa_id, workspace_id=workspace_id) or {}
+        brain_updates = sales_brain.service_choice_update(selected_choice)
+        brain_state = sales_brain.merge_state(current_state, brain_updates)
         await upsert_ai_state(
             wa_id,
             {
-                **current_state,
+                **brain_state,
                 "selected_service_id": service_ctx.get("id"),
                 "selected_service": service_ctx.get("service_interest"),
-                "intent": service_ctx.get("intent") or current_state.get("intent") or "",
+                "service_interest": service_ctx.get("service_interest"),
+                "intent": service_ctx.get("intent") or brain_state.get("intent") or "",
                 "lead_fields": _merge_lead_fields(
-                    current_state.get("lead_fields"),
-                    {"service_interest": service_ctx.get("service_interest")},
+                    brain_state.get("lead_fields"),
+                    {
+                        "service_interest": service_ctx.get("service_interest"),
+                        "intent": service_ctx.get("intent"),
+                        "funnel_stage": "qualificacao",
+                        "last_question_asked": brain_updates.get("last_question_asked"),
+                        "last_question_category": brain_updates.get("last_question_category"),
+                        "next_best_question": brain_updates.get("next_best_question"),
+                    },
                 ),
             },
             workspace_id=workspace_id,
@@ -1744,6 +1877,13 @@ async def api_debug_simulate_incoming(
 
     recent_messages = get_recent_messages(wa_id, limit=12, workspace_id=workspace_id) or []
     lead_context = await get_ai_state(wa_id, workspace_id=workspace_id) or {}
+    lead_context = await _prepare_sales_brain_state(
+        wa_id,
+        ai_state=lead_context,
+        user_text=text,
+        workspace_id=workspace_id,
+        cid=cid,
+    )
 
     result = await generate_reply(
         wa_id=wa_id,
@@ -2894,16 +3034,26 @@ async def _process_webhook_payload(data: dict, cid: str):
             except Exception:
                 pass
             ai_state = await get_ai_state(wa_id, workspace_id=workspace_id) or {}
+            brain_updates = sales_brain.service_choice_update(selected_choice)
+            brain_state = sales_brain.merge_state(ai_state, brain_updates)
             await upsert_ai_state(
                 wa_id,
                 {
-                    **ai_state,
+                    **brain_state,
                     "selected_service_id": service_context.get("id"),
                     "selected_service": service_context.get("service_interest"),
-                    "intent": service_context.get("intent") or ai_state.get("intent") or "",
+                    "service_interest": service_context.get("service_interest"),
+                    "intent": service_context.get("intent") or brain_state.get("intent") or "",
                     "lead_fields": _merge_lead_fields(
-                        ai_state.get("lead_fields"),
-                        {"service_interest": service_context.get("service_interest")},
+                        brain_state.get("lead_fields"),
+                        {
+                            "service_interest": service_context.get("service_interest"),
+                            "intent": service_context.get("intent"),
+                            "funnel_stage": "qualificacao",
+                            "last_question_asked": brain_updates.get("last_question_asked"),
+                            "last_question_category": brain_updates.get("last_question_category"),
+                            "next_best_question": brain_updates.get("next_best_question"),
+                        },
                     ),
                 },
                 workspace_id=workspace_id,
@@ -3045,6 +3195,13 @@ async def _process_webhook_payload(data: dict, cid: str):
         flow_data = _flow_data(wa_id, workspace_id=workspace_id)
         recent_messages = get_recent_messages(wa_id, limit=12, workspace_id=workspace_id) or []
         lead_context = await get_ai_state(wa_id, workspace_id=workspace_id) or {}
+        lead_context = await _prepare_sales_brain_state(
+            wa_id,
+            ai_state=lead_context,
+            user_text=user_text,
+            workspace_id=workspace_id,
+            cid=cid,
+        )
         print(
             f"[{cid}] WEBHOOK:enter_ai wa_id={wa_id} text_len={len(user_text)} "
             f"recent_messages={len(recent_messages)} selected_service={lead_context.get('selected_service') or '-'}"

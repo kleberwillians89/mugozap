@@ -297,10 +297,13 @@ def _j(obj: Any) -> str:
 
 def _menu_fallback_text() -> str:
     return (
-        "Escolhe uma opção:\n"
-        "1) Automação\n"
-        "2) Site / E-commerce\n"
-        "3) Social / Tráfego"
+        "Oi! Sou a IA da Mugô. Para te ajudar melhor, me diz o que você procura?\n"
+        "1. Criar site ou landing page\n"
+        "2. Automatizar WhatsApp/atendimento\n"
+        "3. Usar IA no meu negócio\n"
+        "4. Tráfego pago/performance\n"
+        "5. Branding/conteúdo/redes sociais\n"
+        "6. Falar com a equipe"
     )
 
 
@@ -703,8 +706,10 @@ async def _handle_ai_operational_decision(
     state = await get_ai_state(wa_id, workspace_id=workspace_id) or {}
     wants_handoff = bool(result.get("handoff") or result.get("next_action") == "handoff")
     if wants_handoff and state.get("handoff_sent_at"):
+        print(f"[{cid}] HANDOFF:skip_duplicate wa_id={wa_id} handoff_sent_at={state.get('handoff_sent_at')}")
         return True
     if not wants_handoff and state.get("briefing_sent_at"):
+        print(f"[{cid}] BRIEFING:skip_duplicate wa_id={wa_id} briefing_sent_at={state.get('briefing_sent_at')}")
         return True
 
     fields = result.get("lead_fields") or {}
@@ -724,6 +729,7 @@ async def _handle_ai_operational_decision(
     now = _now_iso()
 
     if wants_handoff:
+        print(f"[{cid}] HANDOFF:start wa_id={wa_id} topic={topic} summary_len={len(summary)}")
         start_handoff_now(
             wa_id=wa_id,
             cid=cid,
@@ -748,6 +754,7 @@ async def _handle_ai_operational_decision(
         )
         return True
 
+    print(f"[{cid}] BRIEFING:send_internal wa_id={wa_id} topic={topic} summary_len={len(summary)}")
     julia_ok = safe_send(
         HUMAN_NUMBER,
         internal_briefing,
@@ -948,6 +955,8 @@ def safe_send(
     log_text = _extract_log_text(payload)
     if not log_text:
         return False
+    ptype = (payload.get("type") or "text").strip().lower() if isinstance(payload, dict) else "text"
+    print(f"[{cid}] SAFE_SEND:attempt to={to_wa_id} type={ptype} text_len={len(log_text)} meta_event={(meta or {}).get('event') or (meta or {}).get('src') or '-'}")
 
     try:
         send_message(to_wa_id, payload)
@@ -957,12 +966,28 @@ def safe_send(
         except Exception as e:
             print(f"[{cid}] log_message(out) failed:", repr(e))
 
-        if DEBUG_WEBHOOK:
-            print(f"[{cid}] SEND OK -> {to_wa_id}: {log_text[:160]}")
+        print(f"[{cid}] SAFE_SEND:ok to={to_wa_id} type={ptype} text_preview={log_text[:160]!r}")
         return True
 
     except Exception as e:
-        print(f"[{cid}] SEND FAIL -> {to_wa_id}:", repr(e))
+        print(f"[{cid}] SAFE_SEND:fail to={to_wa_id} type={ptype} error={repr(e)}")
+
+        if isinstance(payload, dict) and ptype in {"buttons", "list"}:
+            fallback_text = _menu_fallback_text()
+            try:
+                print(f"[{cid}] SAFE_SEND:fallback_text_attempt to={to_wa_id} original_type={ptype}")
+                send_message(to_wa_id, fallback_text)
+                log_message(
+                    to_wa_id,
+                    "out",
+                    fallback_text,
+                    meta={"event": "interactive_fallback_text", "cid": cid, "original_type": ptype, **(meta or {})},
+                    workspace_id=workspace_id,
+                )
+                print(f"[{cid}] SAFE_SEND:fallback_text_ok to={to_wa_id}")
+                return True
+            except Exception as fallback_error:
+                print(f"[{cid}] SAFE_SEND:fallback_text_fail to={to_wa_id} error={repr(fallback_error)}")
 
         try:
             log_message(
@@ -2167,13 +2192,20 @@ async def _process_webhook_payload(data: dict, cid: str):
             choice_id = (br.get("id") or lr.get("id") or "").strip()
             user_text = (br.get("title") or lr.get("title") or "").strip()
         else:
+            print(f"[{cid}] WEBHOOK:unsupported_message_type wa_id={wa_id} msg_type={msg_type}")
             return
 
         if not user_text and choice_id:
             user_text = choice_id
 
         if not user_text:
+            print(f"[{cid}] WEBHOOK:empty_user_text wa_id={wa_id} msg_type={msg_type} choice_id={choice_id or '-'}")
             return
+
+        print(
+            f"[{cid}] WEBHOOK:message wa_id={wa_id} msg_type={msg_type} "
+            f"choice_id={choice_id or '-'} text={user_text[:240]!r}"
+        )
 
         tracking = _extract_source_campaign_from_message(msg, user_text)
         entry_type = _infer_entry_type(tracking.get("source"), tracking.get("campaign"), msg_type)
@@ -2215,6 +2247,7 @@ async def _process_webhook_payload(data: dict, cid: str):
             },
             workspace_id=workspace_id,
         )
+        print(f"[{cid}] WEBHOOK:supabase_message_saved wa_id={wa_id} direction=in text_len={len(user_text)}")
         print(f"INBOUND_WA_ID_SAVED: {wa_id}")
         _apply_operational_state(
             wa_id,
@@ -2322,8 +2355,7 @@ async def _process_webhook_payload(data: dict, cid: str):
             return
 
         if handoff_active:
-            if DEBUG_WEBHOOK:
-                print(f"[{cid}] HANDOFF ACTIVE FOR {wa_id}; apenas registrando histórico.")
+            print(f"[{cid}] WEBHOOK:handoff_active_skip_bot wa_id={wa_id}")
             _apply_operational_state(
                 wa_id,
                 workspace_id=workspace_id,
@@ -2380,8 +2412,10 @@ async def _process_webhook_payload(data: dict, cid: str):
             return
 
         if automation_paused or not bot_enabled or current_attendance_mode == "human":
-            if DEBUG_WEBHOOK:
-                print(f"[{cid}] AUTOMATION PAUSED FOR {wa_id}")
+            print(
+                f"[{cid}] WEBHOOK:automation_paused wa_id={wa_id} "
+                f"automation_paused={automation_paused} bot_enabled={bot_enabled} attendance_mode={current_attendance_mode}"
+            )
             _apply_operational_state(
                 wa_id,
                 workspace_id=workspace_id,
@@ -2397,6 +2431,7 @@ async def _process_webhook_payload(data: dict, cid: str):
         service_context = {}
 
         if choice_id and is_service_choice(choice_id):
+            print(f"[{cid}] WEBHOOK:service_choice_to_ai wa_id={wa_id} choice_id={choice_id}")
             service_context = apply_service_choice(wa_id, choice_id, workspace_id=workspace_id)
             try:
                 mark_first_message_sent(wa_id, workspace_id=workspace_id)
@@ -2418,10 +2453,12 @@ async def _process_webhook_payload(data: dict, cid: str):
                 workspace_id=workspace_id,
             )
         elif choice_id and not post_handoff_mode:
+            print(f"[{cid}] WEBHOOK:enter_mugo_flow wa_id={wa_id} choice_id={choice_id}")
             flow_resp = handle_mugo_flow(wa_id, choice_id, choice_id=choice_id, workspace_id=workspace_id)
 
         if flow_resp:
             ftype = (flow_resp.get("type") or "").lower().strip()
+            print(f"[{cid}] WEBHOOK:mugo_flow_response wa_id={wa_id} type={ftype} step={flow_resp.get('step_key') or '-'}")
 
             if ftype == "ai_context":
                 service_context = flow_resp.get("service_context") or {}
@@ -2448,6 +2485,7 @@ async def _process_webhook_payload(data: dict, cid: str):
                     cid=cid,
                 )
                 if not ok and ftype in ("buttons", "list"):
+                    print(f"[{cid}] WEBHOOK:mugo_flow_interactive_failed_manual_fallback wa_id={wa_id} type={ftype}")
                     safe_send(wa_id, _menu_fallback_text(), meta={"event": "flow_menu_fallback", "cid": cid}, workspace_id=workspace_id, cid=cid)
                 if ok:
                     _remember_bot_message(wa_id, step_key, bot_text, workspace_id=workspace_id)
@@ -2463,6 +2501,7 @@ async def _process_webhook_payload(data: dict, cid: str):
                 return
 
             if ftype == "handoff":
+                print(f"[{cid}] WEBHOOK:mugo_flow_handoff wa_id={wa_id}")
                 topic = (flow_resp.get("topic") or "").strip() or "Atendimento Mugô"
                 summary = (flow_resp.get("summary") or "").strip()
 
@@ -2503,7 +2542,8 @@ async def _process_webhook_payload(data: dict, cid: str):
             safe_send(wa_id, _menu_fallback_text(), meta={"event": "interactive_fallback_text", "cid": cid}, workspace_id=workspace_id, cid=cid)
             return
 
-        if not bool(user.get("first_message_sent")) and not post_handoff_mode and not choice_id and lower in {"oi", "olá", "ola", "opa", "start", "menu", "quero saber mais"}:
+        if not bool(user.get("first_message_sent")) and not post_handoff_mode and not choice_id and lower in {"oi", "oie", "olá", "ola", "opa", "start", "menu", "quero saber mais"}:
+            print(f"[{cid}] WEBHOOK:first_interaction_menu wa_id={wa_id} text={lower!r}")
             flow_start = handle_mugo_flow(wa_id, "start", choice_id="", workspace_id=workspace_id)
             if flow_start:
                 try:
@@ -2531,6 +2571,10 @@ async def _process_webhook_payload(data: dict, cid: str):
         flow_data = _flow_data(wa_id, workspace_id=workspace_id)
         recent_messages = get_recent_messages(wa_id, limit=12, workspace_id=workspace_id) or []
         lead_context = await get_ai_state(wa_id, workspace_id=workspace_id) or {}
+        print(
+            f"[{cid}] WEBHOOK:enter_ai wa_id={wa_id} text_len={len(user_text)} "
+            f"recent_messages={len(recent_messages)} selected_service={lead_context.get('selected_service') or '-'}"
+        )
 
         result = await generate_reply(
             wa_id=wa_id,
@@ -2540,6 +2584,13 @@ async def _process_webhook_payload(data: dict, cid: str):
             telefone=telefone,
             recent_messages=recent_messages,
             lead_context=lead_context,
+        )
+        print(
+            f"[{cid}] WEBHOOK:ai_result wa_id={wa_id} "
+            f"intent={result.get('intent')} next_action={result.get('next_action')} "
+            f"lead_temperature={result.get('lead_temperature')} handoff={result.get('handoff')} "
+            f"meeting_suggested={result.get('meeting_suggested')} briefing_ready={result.get('briefing_ready')} "
+            f"reply_len={len((result.get('reply') or '').strip())}"
         )
 
         try:
@@ -2572,6 +2623,7 @@ async def _process_webhook_payload(data: dict, cid: str):
 
         reply_text = (result.get("reply") or "").strip() or "Em uma frase: qual é o foco agora?"
 
+        print(f"[{cid}] WEBHOOK:send_ai_reply wa_id={wa_id} reply_len={len(reply_text)}")
         ai_sent = safe_send(wa_id, reply_text, meta={"src": "ai", "cid": cid, "message_id": message_id}, workspace_id=workspace_id, cid=cid)
         if ai_sent:
             _remember_bot_message(wa_id, "ai_reply", reply_text, workspace_id=workspace_id)
@@ -2587,6 +2639,12 @@ async def _process_webhook_payload(data: dict, cid: str):
                     "context_summary": _trim_text(result.get("memory_summary") or flow_data.get("context_summary") or "", 900),
                 },
                 event="state_change",
+            )
+
+        if _should_trigger_internal_briefing(result):
+            print(
+                f"[{cid}] WEBHOOK:ai_operational_decision wa_id={wa_id} "
+                f"handoff={result.get('handoff')} briefing_ready={result.get('briefing_ready')} next_action={result.get('next_action')}"
             )
 
         await _handle_ai_operational_decision(

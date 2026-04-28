@@ -1,10 +1,14 @@
 import os
 import re
+import json
+from typing import Any, Dict, List, Union
+
 import requests
-from typing import Any, Dict, List, Union, Optional
+
 
 def _clean_number(n: str) -> str:
     return re.sub(r"\D+", "", n or "")
+
 
 WHATSAPP_TOKEN = (
     os.getenv("WHATSAPP_TOKEN")
@@ -20,40 +24,83 @@ PHONE_NUMBER_ID = (
     or ""
 ).strip()
 
+GRAPH_API_VERSION = (os.getenv("WHATSAPP_GRAPH_VERSION") or "v20.0").strip()
+BASE_URL = f"https://graph.facebook.com/{GRAPH_API_VERSION}/{PHONE_NUMBER_ID}/messages"
 
-# ============================================================
-# Builders (Cloud API)
-# ============================================================
+
+def _short(value: Any, limit: int = 500) -> str:
+    try:
+        text = json.dumps(value, ensure_ascii=False) if isinstance(value, (dict, list)) else str(value or "")
+    except Exception:
+        text = str(value or "")
+    if WHATSAPP_TOKEN:
+        text = text.replace(WHATSAPP_TOKEN, "[redacted]")
+    return text[:limit]
+
+
+def _payload_stats(body: Dict[str, Any]) -> Dict[str, Any]:
+    ptype = (body.get("type") or "").strip()
+    stats: Dict[str, Any] = {"type": ptype}
+
+    if ptype == "text":
+        stats["text_len"] = len(((body.get("text") or {}).get("body") or ""))
+    elif ptype == "interactive":
+        inter = body.get("interactive") or {}
+        itype = (inter.get("type") or "").strip()
+        stats["interactive_type"] = itype
+        body_text = ((inter.get("body") or {}).get("text") or "")
+        stats["text_len"] = len(body_text)
+        action = inter.get("action") or {}
+        if itype == "button":
+            stats["buttons"] = len(action.get("buttons") or [])
+        if itype == "list":
+            stats["sections"] = len(action.get("sections") or [])
+            stats["rows"] = sum(len((section or {}).get("rows") or []) for section in action.get("sections") or [])
+
+    return stats
+
+
 def _build_text_payload(to_wa_id: str, text: str) -> Dict[str, Any]:
     return {
         "messaging_product": "whatsapp",
+        "recipient_type": "individual",
         "to": to_wa_id,
         "type": "text",
-        "text": {"body": text.strip()[:4096]},
+        "text": {
+            "preview_url": False,
+            "body": text.strip()[:4096],
+        },
     }
 
 
 def _clip_button_title(title: str) -> str:
-    # Cloud API: botão "reply.title" ~ até 20 chars (senão falha)
     t = (title or "").strip()
     return t[:20] if len(t) > 20 else t
 
 
 def _build_buttons_payload(to_wa_id: str, text: str, buttons: List[Dict[str, str]]) -> Dict[str, Any]:
-    # Cloud API: máximo 3 botões por mensagem
     safe_buttons = []
     for b in (buttons or [])[:3]:
         bid = (b.get("id") or "").strip()[:256]
         ttl = _clip_button_title(b.get("title") or "")
         if not bid or not ttl:
             continue
-        safe_buttons.append({"type": "reply", "reply": {"id": bid, "title": ttl}})
+        safe_buttons.append(
+            {
+                "type": "reply",
+                "reply": {
+                    "id": bid,
+                    "title": ttl,
+                },
+            }
+        )
 
     if not safe_buttons:
         return _build_text_payload(to_wa_id, text)
 
     return {
         "messaging_product": "whatsapp",
+        "recipient_type": "individual",
         "to": to_wa_id,
         "type": "interactive",
         "interactive": {
@@ -65,25 +112,21 @@ def _build_buttons_payload(to_wa_id: str, text: str, buttons: List[Dict[str, str
 
 
 def _clip_list_button_text(s: str) -> str:
-    # Texto do botão que abre a lista (ex.: "Selecionar") ~ até 20 chars
     t = (s or "").strip()
     return t[:20] if len(t) > 20 else t
 
 
 def _clip_list_section_title(s: str) -> str:
-    # Título da seção ~ até 24 chars
     t = (s or "").strip()
     return t[:24] if len(t) > 24 else t
 
 
 def _clip_list_row_title(s: str) -> str:
-    # Título de cada opção ~ até 24 chars
     t = (s or "").strip()
     return t[:24] if len(t) > 24 else t
 
 
 def _clip_list_row_desc(s: str) -> str:
-    # Descrição opcional ~ até 72 chars (bom pra UX)
     t = (s or "").strip()
     return t[:72] if len(t) > 72 else t
 
@@ -94,43 +137,43 @@ def _build_list_payload(
     button_text: str,
     sections: List[Dict[str, Any]],
 ) -> Dict[str, Any]:
-    """
-    sections = [
-      {
-        "title": "Serviços",
-        "rows": [
-          {"id":"SVC_AUTOMACAO","title":"Automação","description":"Atendimento, CRM, processos"},
-          ...
-        ]
-      }
-    ]
-    """
     safe_sections: List[Dict[str, Any]] = []
 
-    for s in (sections or [])[:10]:  # Cloud API: normalmente até 10 seções
+    for s in (sections or [])[:10]:
         stitle = _clip_list_section_title(s.get("title") or "Opções")
         rows_in = s.get("rows") or []
         safe_rows = []
 
-        for r in rows_in[:10]:  # Cloud API: até 10 rows por seção
+        for r in rows_in[:10]:
             rid = (r.get("id") or "").strip()[:256]
             rtitle = _clip_list_row_title(r.get("title") or "")
             rdesc = _clip_list_row_desc(r.get("description") or "")
             if not rid or not rtitle:
                 continue
-            row_obj: Dict[str, Any] = {"id": rid, "title": rtitle}
+
+            row_obj: Dict[str, Any] = {
+                "id": rid,
+                "title": rtitle,
+            }
             if rdesc:
                 row_obj["description"] = rdesc
+
             safe_rows.append(row_obj)
 
         if safe_rows:
-            safe_sections.append({"title": stitle, "rows": safe_rows})
+            safe_sections.append(
+                {
+                    "title": stitle,
+                    "rows": safe_rows,
+                }
+            )
 
     if not safe_sections:
         return _build_text_payload(to_wa_id, text)
 
     return {
         "messaging_product": "whatsapp",
+        "recipient_type": "individual",
         "to": to_wa_id,
         "type": "interactive",
         "interactive": {
@@ -144,19 +187,39 @@ def _build_list_payload(
     }
 
 
-# ============================================================
-# Public API
-# ============================================================
-def send_message(to_wa_id: str, payload: Union[str, Dict[str, Any]]):
-    """
-    Aceita:
-      - string: envia mensagem de texto simples
+def _normalize_payload(to_wa_id: str, payload: Union[str, Dict[str, Any]]) -> Dict[str, Any]:
+    if isinstance(payload, str):
+        if not payload.strip():
+            raise RuntimeError("Texto vazio")
+        return _build_text_payload(to_wa_id, payload)
 
-      - dict (compatível com teu app.py/safe_send):
-          {"type":"text","text":"..."}
-          {"type":"buttons","text":"...","buttons":[{id,title}]}
-          {"type":"list","text":"...","button":"Selecionar","sections":[{title,rows:[{id,title,description}]}]}
-    """
+    if not isinstance(payload, dict):
+        raise RuntimeError("Payload inválido: esperado str ou dict")
+
+    ptype = (payload.get("type") or "").strip().lower()
+
+    if ptype == "buttons":
+        text = (payload.get("text") or "").strip()
+        buttons = payload.get("buttons") or []
+        if not text or not isinstance(buttons, list) or not buttons:
+            raise RuntimeError("Payload buttons inválido")
+        return _build_buttons_payload(to_wa_id, text, buttons)
+
+    if ptype == "list":
+        text = (payload.get("text") or "").strip()
+        button_text = (payload.get("button") or "Selecionar").strip()
+        sections = payload.get("sections") or []
+        if not text or not isinstance(sections, list) or not sections:
+            raise RuntimeError("Payload list inválido")
+        return _build_list_payload(to_wa_id, text, button_text, sections)
+
+    text = (payload.get("text") or "").strip()
+    if not text:
+        raise RuntimeError("Texto vazio")
+    return _build_text_payload(to_wa_id, text)
+
+
+def send_message(to_wa_id: str, payload: Union[str, Dict[str, Any]]):
     to_wa_id = _clean_number(to_wa_id)
 
     if not WHATSAPP_TOKEN:
@@ -166,63 +229,27 @@ def send_message(to_wa_id: str, payload: Union[str, Dict[str, Any]]):
     if not to_wa_id:
         raise RuntimeError("Número de destino inválido")
 
-    url = f"https://graph.facebook.com/v20.0/{PHONE_NUMBER_ID}/messages"
+    body = _normalize_payload(to_wa_id, payload)
+    print(f"WA_SEND:prepare to={to_wa_id} stats={_payload_stats(body)}")
+
     headers = {
         "Authorization": f"Bearer {WHATSAPP_TOKEN}",
         "Content-Type": "application/json",
     }
 
-    # ------------------------------------------------------------
-    # payload string => text
-    # ------------------------------------------------------------
-    if isinstance(payload, str):
-        if not payload.strip():
-            raise RuntimeError("Texto vazio")
-        body = _build_text_payload(to_wa_id, payload)
-
-    # ------------------------------------------------------------
-    # payload dict
-    # ------------------------------------------------------------
-    elif isinstance(payload, dict):
-        ptype = (payload.get("type") or "").strip().lower()
-
-        # buttons
-        if ptype == "buttons":
-            text = (payload.get("text") or "").strip()
-            buttons = payload.get("buttons") or []
-            if not text or not isinstance(buttons, list) or not buttons:
-                raise RuntimeError("Payload buttons inválido")
-            body = _build_buttons_payload(to_wa_id, text, buttons)
-
-        # list (novo)
-        elif ptype == "list":
-            text = (payload.get("text") or "").strip()
-            button_text = (payload.get("button") or "Selecionar").strip()
-            sections = payload.get("sections") or []
-            if not text or not isinstance(sections, list) or not sections:
-                raise RuntimeError("Payload list inválido")
-            body = _build_list_payload(to_wa_id, text, button_text, sections)
-
-        # text default
-        else:
-            text = (payload.get("text") or "").strip()
-            if not text:
-                raise RuntimeError("Texto vazio")
-            body = _build_text_payload(to_wa_id, text)
-
-    else:
-        raise RuntimeError("Payload inválido: esperado str ou dict")
-
-    # ------------------------------------------------------------
-    # send
-    # ------------------------------------------------------------
     try:
-        r = requests.post(url, json=body, headers=headers, timeout=20)
+        r = requests.post(BASE_URL, json=body, headers=headers, timeout=20)
     except requests.RequestException as e:
+        print(f"WA_SEND:request_error to={to_wa_id} error={repr(e)}")
         raise RuntimeError(f"Erro de conexão com Meta: {e}")
 
+    print(f"WA_SEND:response to={to_wa_id} status_code={r.status_code} body={_short(r.text)}")
+
     if r.status_code >= 300:
-        # IMPORTANTÍSSIMO: isso te diz EXATAMENTE o motivo do botão/lista não aparecer
+        print(f"WA_SEND:http_error to={to_wa_id} status_code={r.status_code} body={_short(r.text)}")
         raise RuntimeError(f"WA send error {r.status_code}: {r.text}")
 
-    return r.json()
+    try:
+        return r.json()
+    except Exception:
+        return {"ok": True}

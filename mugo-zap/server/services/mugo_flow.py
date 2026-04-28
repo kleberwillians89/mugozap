@@ -146,6 +146,7 @@ MSG_ENCAMINHA_ALGUEM = (
 
 
 def _reopen_step_01(wa_id: str, workspace_id: str = "") -> Dict[str, Any]:
+    print(f"MUGO_FLOW:show_initial_menu wa_id={wa_id} workspace_id={workspace_id or '-'}")
     set_flow_state(wa_id, "step_01", workspace_id=workspace_id)
     merge_flow_data(wa_id, {"current_step": "step_01", "bot_status": "bot_active", "waiting_for": "customer"}, workspace_id=workspace_id)
     return _list(
@@ -177,8 +178,13 @@ def service_choice_context(choice_id: str) -> Dict[str, Any]:
 def apply_service_choice(wa_id: str, choice_id: str, workspace_id: str = "") -> Dict[str, Any]:
     ctx = service_choice_context(choice_id)
     if not ctx:
+        print(f"MUGO_FLOW:unknown_service_choice wa_id={wa_id} choice_id={choice_id}")
         return {}
 
+    print(
+        "MUGO_FLOW:service_choice "
+        f"wa_id={wa_id} choice_id={ctx.get('id')} service_interest={ctx.get('service_interest')} intent={ctx.get('intent')}"
+    )
     merge_flow_data(
         wa_id,
         {
@@ -330,6 +336,10 @@ def handle_mugo_flow(wa_id: str, user_text: str, *, choice_id: str = "", workspa
 
     raw = _norm(choice_id or user_text)
     picked = _choice(choice_id or user_text)
+    print(
+        "MUGO_FLOW:handle "
+        f"wa_id={wa_id} state={state or '-'} choice_id={choice_id or '-'} raw={raw[:120]!r}"
+    )
 
     if not state:
         return _reopen_step_01(wa_id, workspace_id=workspace_id)
@@ -337,6 +347,10 @@ def handle_mugo_flow(wa_id: str, user_text: str, *, choice_id: str = "", workspa
     if state == "step_01":
         if is_service_choice(choice_id or user_text):
             ctx = apply_service_choice(wa_id, choice_id or user_text, workspace_id=workspace_id)
+            print(
+                "MUGO_FLOW:release_to_ai "
+                f"wa_id={wa_id} service_interest={ctx.get('service_interest')} choice_id={choice_id or user_text}"
+            )
             return {
                 "type": "ai_context",
                 "step_key": "service_selected",
@@ -345,8 +359,10 @@ def handle_mugo_flow(wa_id: str, user_text: str, *, choice_id: str = "", workspa
 
         topic_key = _normalize_topic(picked, raw)
         if topic_key:
+            print(f"MUGO_FLOW:return_fixed_response wa_id={wa_id} state=step_01 topic_key={topic_key}")
             return _advance_to_problem_step(wa_id, topic_key, workspace_id=workspace_id)
 
+        print(f"MUGO_FLOW:return_clarify wa_id={wa_id} state=step_01")
         return _text(STEP1_CLARIFY_TEXT, "step_01_clarify")
 
     if state == "step_02_site":

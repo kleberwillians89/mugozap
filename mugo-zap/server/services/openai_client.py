@@ -18,6 +18,15 @@ PROMPT_PATH = Path(__file__).resolve().parents[1] / "prompts" / "atendimento_mug
 _PROMPT_CACHE = ""
 
 
+def _ai_log(event: str, **fields: Any) -> None:
+    safe_fields = []
+    for key, value in fields.items():
+        if key in {"prompt", "messages", "api_key", "token"}:
+            continue
+        safe_fields.append(f"{key}={str(value)[:220]}")
+    print(f"OPENAI_CLIENT:{event} " + " ".join(safe_fields))
+
+
 def load_mugo_prompt() -> str:
     global _PROMPT_CACHE
 
@@ -422,6 +431,7 @@ async def generate_reply(
         return _fallback(user_message)
 
     if not OPENAI_API_KEY:
+        _ai_log("fallback_no_api_key", wa_id=wa_id, text_len=len(msg), flow_context=bool(flow_context))
         out = _fallback(user_message)
 
         if flow_context:
@@ -493,6 +503,15 @@ async def generate_reply(
     }
 
     try:
+        _ai_log(
+            "request",
+            wa_id=wa_id,
+            model=OPENAI_MODEL,
+            text_len=len(msg),
+            recent_messages=len(recent_messages or []),
+            has_lead_context=bool(lead_context),
+            has_flow_context=bool(flow_context),
+        )
         async with httpx.AsyncClient(timeout=OPENAI_TIMEOUT) as client:
             r = await client.post(
                 "https://api.openai.com/v1/chat/completions",
@@ -504,6 +523,7 @@ async def generate_reply(
             )
 
         if r.status_code >= 300:
+            _ai_log("http_error", wa_id=wa_id, status_code=r.status_code, body=(r.text or "")[:500])
             return _fallback(user_message)
 
         content = (r.json().get("choices", [{}])[0].get("message", {}) or {}).get("content", "") or ""
@@ -511,9 +531,22 @@ async def generate_reply(
 
         out = _extract_json_object(content)
         if not out or not isinstance(out, dict):
+            _ai_log("json_error", wa_id=wa_id, content_preview=content[:500])
             return _fallback(user_message)
 
-        return _normalize_ai_output(out, user_message, flow_context=flow_context)
+        normalized = _normalize_ai_output(out, user_message, flow_context=flow_context)
+        _ai_log(
+            "response",
+            wa_id=wa_id,
+            intent=normalized.get("intent"),
+            next_action=normalized.get("next_action"),
+            lead_temperature=normalized.get("lead_temperature"),
+            handoff=normalized.get("handoff"),
+            meeting_suggested=normalized.get("meeting_suggested"),
+            briefing_ready=normalized.get("briefing_ready"),
+        )
+        return normalized
 
-    except Exception:
+    except Exception as e:
+        _ai_log("exception", wa_id=wa_id, error=repr(e))
         return _fallback(user_message)

@@ -658,10 +658,12 @@ def _infer_fields_from_text(user_text: str, ai_state: dict | None, result: dict 
         inferred["current_problem"] = inferred.get("current_problem") or "atendimento manual ou mensagens perdidas"
         inferred["funnel_stage"] = "qualificacao"
 
-    if any(k in text for k in ["organizar contatos", "crm", "funil", "acompanhar clientes"]):
+    if last_question_category != "current_tools" and any(k in text for k in ["organizar contatos", "crm", "funil", "acompanhar clientes"]):
         inferred["main_goal"] = inferred.get("main_goal") or "gestão/comercial"
         inferred["current_tools"] = "CRM/funil" if "crm" in text or "funil" in text else inferred.get("current_tools")
         inferred["funnel_stage"] = "qualificacao"
+    elif last_question_category == "current_tools" and any(k in text for k in ["crm", "funil"]):
+        inferred["current_tools"] = "CRM/funil" if "funil" in text else "CRM"
 
     if any(k in text for k in ["quero site", "landing", "página", "pagina"]):
         inferred["service_interest"] = "landing_page" if "landing" in text else "site"
@@ -752,7 +754,7 @@ def _has_answer_for_category(fields: dict, category: str) -> bool:
     if not field:
         return False
     if category == "current_tools":
-        return bool(fields.get("current_tools") or fields.get("current_problem"))
+        return bool(fields.get("current_tools"))
     return bool(fields.get(field))
 
 

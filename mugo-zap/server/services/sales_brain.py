@@ -80,6 +80,39 @@ def _append_source(current: Any, source: str) -> str:
     return " e ".join(parts)
 
 
+def _service_candidate_from_text(text: str) -> str:
+    if _has_any(text, ["landing", "pagina", "site"]):
+        return "site"
+    if _has_any(text, ["whatsapp", "whats", "zap", "automacao", "automatizar", "atendimento"]):
+        return "automacao_whatsapp"
+    if _has_any(text, ["ia", "inteligencia artificial", "agente"]):
+        return "inteligencia_artificial"
+    if _has_any(text, ["trafego", "anuncio", "ads", "performance"]):
+        return "trafego_pago"
+    if _has_any(text, ["branding", "marca", "conteudo", "redes sociais"]):
+        return "branding"
+    return ""
+
+
+def _explicit_service_switch(text: str) -> bool:
+    return _has_any(
+        text,
+        [
+            "na verdade quero falar de",
+            "muda para",
+            "mudar para",
+            "trocar para",
+            "quero trocar para",
+            "nao e ia e",
+            "nao e automacao e",
+            "nao e site e",
+            "quero falar de",
+            "agora quero",
+            "na verdade e",
+        ],
+    )
+
+
 def flatten_state(state: Dict[str, Any] | None) -> Dict[str, Any]:
     src = state or {}
     fields = src.get("lead_fields") if isinstance(src.get("lead_fields"), dict) else {}
@@ -148,17 +181,17 @@ def extract_signal_from_message(text: str, current_state: Dict[str, Any]) -> Dic
             }
         )
 
-    if not service:
-        if _has_any(norm, ["landing", "pagina", "site"]):
-            updates.update({"service_interest": "site", "intent": "site", "funnel_stage": "qualificacao"})
-        elif _has_any(norm, ["whatsapp", "automacao", "automatizar", "atendimento"]):
-            updates.update({"service_interest": "automacao_whatsapp", "intent": "automacao_whatsapp", "funnel_stage": "qualificacao"})
-        elif _has_any(norm, ["ia", "inteligencia artificial", "agente"]):
-            updates.update({"service_interest": "inteligencia_artificial", "intent": "inteligencia_artificial", "funnel_stage": "qualificacao"})
-        elif _has_any(norm, ["trafego", "anuncio", "ads", "performance"]):
-            updates.update({"service_interest": "trafego_pago", "intent": "trafego_pago", "funnel_stage": "qualificacao"})
-        elif _has_any(norm, ["branding", "marca", "conteudo", "redes sociais"]):
-            updates.update({"service_interest": "branding", "intent": "branding", "funnel_stage": "qualificacao"})
+    candidate_service = _service_candidate_from_text(norm)
+    if not service and candidate_service:
+        updates.update({"service_interest": candidate_service, "intent": candidate_service, "funnel_stage": "qualificacao"})
+    elif service and candidate_service and candidate_service != service:
+        if _explicit_service_switch(norm):
+            updates.update({"service_interest": candidate_service, "intent": candidate_service, "funnel_stage": "qualificacao"})
+            print(f"SALES_BRAIN_SERVICE_SWITCH from={service} to={candidate_service} text={text[:160]!r}")
+        else:
+            print(f"SALES_BRAIN_SERVICE_LOCKED service={service} ignored_candidate={candidate_service} text={text[:160]!r}")
+    elif service and candidate_service:
+        print(f"SALES_BRAIN_SERVICE_LOCKED service={service} contextual_candidate={candidate_service} text={text[:160]!r}")
 
     service = updates.get("service_interest") or service
 
@@ -175,7 +208,19 @@ def extract_signal_from_message(text: str, current_state: Dict[str, Any]) -> Dic
         elif _has_any(norm, ["do zero", "comecar do zero", "nunca anunciei", "nao anuncio"]):
             updates["current_status"] = "começar do zero"
 
-    if _has_any(norm, ["vendas", "vender", "vender mais", "mais clientes", "leads", "gerar leads", "converter mais"]):
+    if (
+        service == "inteligencia_artificial"
+        and last_category in {"main_goal", "current_problem"}
+        and _has_any(norm, ["atendimento", "redes sociais", "rede social", "conteudo", "processo", "vendas"])
+    ):
+        updates["current_problem"] = text.strip()[:180]
+        if _has_any(norm, ["redes sociais", "rede social", "conteudo"]):
+            updates["main_goal"] = "atendimento/conteúdo"
+        elif "atendimento" in norm:
+            updates["main_goal"] = "atendimento/processos internos"
+        updates["funnel_stage"] = "qualificacao"
+        print(f"SALES_BRAIN_CONTEXT_SIGNAL category={last_category} field=current_problem text={text[:160]!r}")
+    elif _has_any(norm, ["vendas", "vender", "vender mais", "mais clientes", "leads", "gerar leads", "converter mais"]):
         updates["main_goal"] = "vendas/leads"
         updates["desired_result"] = "vender mais / gerar mais oportunidades"
         updates["funnel_stage"] = "qualificacao"
@@ -192,7 +237,7 @@ def extract_signal_from_message(text: str, current_state: Dict[str, Any]) -> Dic
     source = state.get("lead_source") or ""
     if "instagram" in norm or "insta" in norm:
         source = _append_source(source, "Instagram")
-    if "whatsapp" in norm or "zap" in norm:
+    if "whatsapp" in norm or "whats" in norm or "zap" in norm:
         source = _append_source(source, "WhatsApp")
     if "site" in norm and (last_category == "lead_source" or source):
         source = _append_source(source, "Site")
@@ -200,15 +245,22 @@ def extract_signal_from_message(text: str, current_state: Dict[str, Any]) -> Dic
         source = _append_source(source, "Indicação")
     if source:
         updates["lead_source"] = source
+        if last_category == "lead_source":
+            print(f"SALES_BRAIN_CONTEXT_SIGNAL category=lead_source field=lead_source value={source!r} text={text[:160]!r}")
 
     if _has_any(norm, ["manual", "na mao", "sem crm", "planilha", "caderno"]):
         updates["current_tools"] = "manual"
-        updates["current_problem"] = "processo manual"
+        if not state.get("current_problem"):
+            updates["current_problem"] = "processo manual"
         updates["funnel_stage"] = "qualificacao"
+        if last_category == "current_tools":
+            print(f"SALES_BRAIN_CONTEXT_SIGNAL category=current_tools field=current_tools value='manual' text={text[:160]!r}")
     else:
         for tool in ["hubspot", "pipedrive", "rd station", "kommo", "crm"]:
             if tool in norm:
                 updates["current_tools"] = tool.upper() if tool == "crm" else tool
+                if last_category == "current_tools":
+                    print(f"SALES_BRAIN_CONTEXT_SIGNAL category=current_tools field=current_tools value={updates['current_tools']!r} text={text[:160]!r}")
                 break
 
     if _has_any(norm, ["essa semana", "urgente", "pra ja", "o quanto antes", "hoje", "amanha"]):
@@ -272,6 +324,11 @@ def get_next_question(state: Dict[str, Any]) -> Dict[str, Any]:
             return {"category": "main_goal", "question": "Você imagina usar IA mais para atendimento, vendas, conteúdo ou processos internos?", "next_action": "ask_question"}
         if not state.get("current_problem"):
             return {"category": "current_problem", "question": "Qual processo hoje mais toma tempo da equipe?", "next_action": "ask_question"}
+        context_text = normalize_text(f"{state.get('main_goal') or ''} {state.get('current_problem') or ''}")
+        if not state.get("lead_source") and _has_any(context_text, ["atendimento", "vendas", "lead", "cliente"]):
+            return {"category": "lead_source", "question": "Hoje esses contatos chegam mais pelo WhatsApp, Instagram ou site?", "next_action": "ask_question"}
+        if not state.get("current_tools"):
+            return {"category": "current_tools", "question": "Hoje vocês fazem isso manualmente ou já usam alguma ferramenta/CRM?", "next_action": "ask_question"}
         if not state.get("urgency"):
             return {"category": "urgency", "question": "Isso é prioridade para agora ou vocês ainda estão explorando possibilidades?", "next_action": "ask_question"}
         return offer
@@ -332,7 +389,7 @@ def is_duplicate_question(reply: str, last_question: str) -> bool:
 def _category_answered(state: Dict[str, Any], category: str) -> bool:
     state = flatten_state(state)
     if category == "current_tools":
-        return bool(state.get("current_tools") or state.get("current_problem"))
+        return bool(state.get("current_tools"))
     if category == "current_status":
         return bool(state.get("current_status") or state.get("current_tools"))
     if category == "offer_meeting":

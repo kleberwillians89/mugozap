@@ -253,6 +253,10 @@ def detect_explicit_service_switch(text: str) -> bool:
     return _explicit_service_switch(normalize_text(text))
 
 
+def _is_pure_menu_number(text: str) -> bool:
+    return normalize_text(text) in {"1", "2", "3", "4", "5", "6", "01", "02", "03", "04", "05", "06"}
+
+
 def normalize_inbound_choice(
     text: str | None = None,
     button_id: str | None = None,
@@ -264,6 +268,7 @@ def normalize_inbound_choice(
 ) -> Dict[str, Any]:
     state = flatten_state(current_state or {})
     locked_service = state.get("service_interest") or state.get("selected_service") or ""
+    active_question = bool(state.get("last_question_category"))
     candidates = [
         ("list_id", list_id),
         ("button_id", button_id),
@@ -287,6 +292,12 @@ def normalize_inbound_choice(
             continue
         service, confidence = _match_menu_service(value)
         if not service:
+            continue
+        if source == "text" and locked_service and active_question and not detect_explicit_service_switch(value) and not _is_pure_menu_number(value):
+            print(
+                f"SALES_BRAIN_SERVICE_LOCKED service={locked_service} "
+                f"ignored_contextual_menu_candidate={service} source=text text={value[:160]!r}"
+            )
             continue
         if source == "text" and locked_service and service != locked_service and not detect_explicit_service_switch(value):
             print(f"SALES_BRAIN_SERVICE_LOCKED service={locked_service} ignored_candidate={service} source=text text={value[:160]!r}")

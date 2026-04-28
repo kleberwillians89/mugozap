@@ -60,16 +60,37 @@ def test_menu_site():
 
 def test_site_melhorar():
     state = state_with_choice("service_site")
+    choice = sales_brain.normalize_inbound_choice(text="melhorar", current_state=state)
+    assert_equal("contextual text is not menu", choice["is_menu_choice"], False)
     state = apply_message(state, "melhorar")
     flat = sales_brain.flatten_state(state)
     assert_equal("site_scope", flat["site_scope"], "melhorar existente")
     assert_equal("next category", sales_brain.get_next_question(flat)["category"], "main_goal")
+    assert_equal("next question", sales_brain.get_next_question(flat)["question"], "O foco dessa página é gerar leads, vender mais ou apresentar melhor a marca?")
 
 
 def test_site_do_zero():
     state = state_with_choice("service_site")
     state = apply_message(state, "criar do zero")
     assert_equal("site_scope", sales_brain.flatten_state(state)["site_scope"], "criar do zero")
+
+
+def test_site_melhorar_frase():
+    state = state_with_choice("service_site")
+    state = apply_message(state, "melhorar uma página que já existe")
+    assert_equal("site_scope", sales_brain.flatten_state(state)["site_scope"], "melhorar existente")
+
+
+def test_text_site_without_state_is_menu():
+    choice = sales_brain.normalize_inbound_choice(text="site", current_state={})
+    assert_equal("choice_id", choice["choice_id"], "service_site")
+    assert_equal("is_menu_choice", choice["is_menu_choice"], True)
+
+
+def test_text_site_with_state_is_not_menu():
+    state = state_with_choice("service_site")
+    choice = sales_brain.normalize_inbound_choice(text="site", current_state=state)
+    assert_equal("is_menu_choice", choice["is_menu_choice"], False)
 
 
 def test_automation_choice():
@@ -134,6 +155,9 @@ def main():
         ("menu_site", test_menu_site),
         ("site_melhorar", test_site_melhorar),
         ("site_do_zero", test_site_do_zero),
+        ("site_melhorar_frase", test_site_melhorar_frase),
+        ("text_site_without_state_is_menu", test_text_site_without_state_is_menu),
+        ("text_site_with_state_is_not_menu", test_text_site_with_state_is_not_menu),
         ("automation_choice", test_automation_choice),
         ("automation_leads", test_automation_leads),
         ("manual", test_manual),

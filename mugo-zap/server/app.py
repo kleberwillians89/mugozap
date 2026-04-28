@@ -1160,6 +1160,14 @@ async def _prepare_sales_brain_state(
         f"service={state.get('service_interest') or '-'} next_category={next_q.get('category') or '-'} "
         f"updates={json.dumps(updates, ensure_ascii=False)[:700]}"
     )
+    print(
+        f"SALES_BRAIN_NEXT_QUESTION cid={cid} wa_id={wa_id} "
+        f"category={next_q.get('category') or '-'} question={(next_q.get('question') or '')[:240]!r}"
+    )
+    print(
+        f"SALES_BRAIN_STATE_AFTER cid={cid} wa_id={wa_id} "
+        f"state={json.dumps(sales_brain.flatten_state(state), ensure_ascii=False)[:1200]}"
+    )
     return await upsert_ai_state(wa_id, state, workspace_id=workspace_id)
 
 

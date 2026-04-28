@@ -35,6 +35,35 @@ FIELD_KEYS = [
 ]
 
 
+def default_lead_state() -> Dict[str, Any]:
+    return {
+        "service_interest": None,
+        "intent": None,
+        "main_goal": None,
+        "desired_result": None,
+        "site_scope": None,
+        "lead_source": None,
+        "current_tools": None,
+        "current_status": None,
+        "current_problem": None,
+        "business_type": None,
+        "business_name": None,
+        "urgency": None,
+        "budget_signal": None,
+        "funnel_stage": None,
+        "last_question_asked": None,
+        "last_question_category": None,
+        "next_best_question": None,
+        "meeting_suggested": False,
+        "briefing_ready": False,
+        "briefing_sent_at": None,
+        "handoff": False,
+        "handoff_reason": None,
+        "handoff_sent_at": None,
+        "lead_fields": {},
+    }
+
+
 SERVICE_CHOICES = {
     "1": ("site", "site", "site_scope", "Perfeito. Você quer criar uma página nova do zero ou melhorar uma página que já existe?"),
     "01": ("site", "site", "site_scope", "Perfeito. Você quer criar uma página nova do zero ou melhorar uma página que já existe?"),
@@ -192,7 +221,7 @@ def _service_candidate_from_text(text: str) -> str:
         return "site"
     if _has_any(text, ["whatsapp", "whats", "zap", "automacao", "automatizar", "atendimento"]):
         return "automacao_whatsapp"
-    if _has_any(text, ["ia", "inteligencia artificial", "agente"]):
+    if re.search(r"\bia\b", text) or _has_any(text, ["inteligencia artificial", "agente"]):
         return "inteligencia_artificial"
     if _has_any(text, ["trafego", "anuncio", "ads", "performance"]):
         return "trafego_pago"
@@ -304,8 +333,8 @@ def flatten_state(state: Dict[str, Any] | None) -> Dict[str, Any]:
 
 def service_choice_update(choice_id: str) -> Dict[str, Any]:
     key = normalize_text(choice_id)
-    service_from_text, _ = _match_menu_service(key)
-    if service_from_text:
+    service_from_text, confidence = _match_menu_service(key)
+    if service_from_text and confidence == "high":
         key = CHOICE_ID_BY_SERVICE.get(service_from_text, key)
     if key not in SERVICE_CHOICES:
         return {}
@@ -381,16 +410,18 @@ def extract_signal_from_message(text: str, current_state: Dict[str, Any]) -> Dic
             updates["desired_result"] = "usar WhatsApp como canal de conversão"
             updates["current_problem"] = updates.get("current_problem") or "página precisa levar as pessoas para o WhatsApp"
             print(f"SALES_BRAIN_CONTEXT_SIGNAL category=site_scope field=desired_result value='usar WhatsApp como canal de conversão' text={text[:160]!r}")
-        if _has_any(norm, ["do zero", "nova", "novo", "criar", "comecar"]):
+        if _has_any(norm, ["do zero", "nova", "novo", "nova pagina", "criar", "criar do zero", "comecar", "fazer uma nova"]):
             updates["site_scope"] = "criar do zero"
-        elif _has_any(norm, ["melhorar", "ja existe", "existe", "refazer", "otimizar"]):
+            print(f"SALES_BRAIN_CONTEXT_SIGNAL category=site_scope field=site_scope value='criar do zero' text={text[:160]!r}")
+        elif _has_any(norm, ["melhorar", "melhorar uma pagina", "ja existe", "existe", "existente", "refazer", "otimizar", "arrumar", "reformular"]):
             updates["site_scope"] = "melhorar existente"
+            print(f"SALES_BRAIN_CONTEXT_SIGNAL category=site_scope field=site_scope value='melhorar existente' text={text[:160]!r}")
 
     if service == "trafego_pago" or last_category == "current_status":
-        if _has_any(norm, ["ja anuncio", "ja anunciamos", "anuncio hoje", "anunciamos", "campanha ativa"]):
+        if _has_any(norm, ["ja anuncio", "ja anunciam", "ja anunciamos", "rodo anuncio", "tenho campanha", "anuncio hoje", "anunciamos", "campanha ativa"]):
             updates["current_status"] = "já anuncia"
             updates["current_tools"] = updates.get("current_tools") or "já anuncia"
-        elif _has_any(norm, ["do zero", "comecar do zero", "nunca anunciei", "nao anuncio"]):
+        elif _has_any(norm, ["do zero", "comecar do zero", "nunca anunciei", "ainda nao", "nao anuncio"]):
             updates["current_status"] = "começar do zero"
 
     if (
@@ -579,6 +610,10 @@ def is_forbidden_generic_reply(reply: str, state: Dict[str, Any] | None = None) 
     return any(item in norm for item in forbidden)
 
 
+def is_forbidden_generic_question(reply: str, state: Dict[str, Any] | None = None) -> bool:
+    return is_forbidden_generic_reply(reply, state)
+
+
 def is_duplicate_question(reply: str, last_question: str) -> bool:
     a = normalize_text(reply)
     b = normalize_text(last_question)
@@ -621,6 +656,10 @@ def validate_reply(reply: str, state: Dict[str, Any]) -> Dict[str, Any]:
     if blocked:
         return {**next_q, "reply": next_q["question"], "blocked": True, "reason": reason}
     return {**next_q, "reply": reply, "blocked": False, "reason": ""}
+
+
+def validate_final_reply(reply: str, state: Dict[str, Any]) -> Dict[str, Any]:
+    return validate_reply(reply, state)
 
 
 def should_handoff(state: Dict[str, Any], message: str) -> bool:

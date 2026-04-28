@@ -55,6 +55,21 @@ SERVICE_TRAFFIC = "service_traffic"
 SERVICE_BRANDING = "service_branding"
 SERVICE_HUMAN = "service_human"
 
+TEXT_OPTION_TO_SERVICE = {
+    "1": SERVICE_SITE,
+    "01": SERVICE_SITE,
+    "2": SERVICE_AUTOMATION,
+    "02": SERVICE_AUTOMATION,
+    "3": SERVICE_AI,
+    "03": SERVICE_AI,
+    "4": SERVICE_TRAFFIC,
+    "04": SERVICE_TRAFFIC,
+    "5": SERVICE_BRANDING,
+    "05": SERVICE_BRANDING,
+    "6": SERVICE_HUMAN,
+    "06": SERVICE_HUMAN,
+}
+
 SERVICE_CHOICES = {
     SERVICE_SITE: {
         "intent": "site",
@@ -147,6 +162,7 @@ MSG_ENCAMINHA_ALGUEM = (
 
 def _reopen_step_01(wa_id: str, workspace_id: str = "") -> Dict[str, Any]:
     print(f"MUGO_FLOW:show_initial_menu wa_id={wa_id} workspace_id={workspace_id or '-'}")
+    print(f"FLOW_MENU_SHOWN wa_id={wa_id} workspace_id={workspace_id or '-'}")
     set_flow_state(wa_id, "step_01", workspace_id=workspace_id)
     merge_flow_data(wa_id, {"current_step": "step_01", "bot_status": "bot_active", "waiting_for": "customer"}, workspace_id=workspace_id)
     return _list(
@@ -164,11 +180,13 @@ def _reopen_step_01(wa_id: str, workspace_id: str = "") -> Dict[str, Any]:
 
 
 def is_service_choice(choice_id: str) -> bool:
-    return _norm(choice_id).lower() in SERVICE_CHOICES
+    key = _norm(choice_id).lower()
+    return key in SERVICE_CHOICES or key in TEXT_OPTION_TO_SERVICE
 
 
 def service_choice_context(choice_id: str) -> Dict[str, Any]:
     key = _norm(choice_id).lower()
+    key = TEXT_OPTION_TO_SERVICE.get(key, key)
     data = SERVICE_CHOICES.get(key)
     if not data:
         return {}
@@ -184,6 +202,10 @@ def apply_service_choice(wa_id: str, choice_id: str, workspace_id: str = "") -> 
     print(
         "MUGO_FLOW:service_choice "
         f"wa_id={wa_id} choice_id={ctx.get('id')} service_interest={ctx.get('service_interest')} intent={ctx.get('intent')}"
+    )
+    print(
+        "FLOW_BUTTON_CLICKED "
+        f"wa_id={wa_id} choice_id={choice_id} normalized_id={ctx.get('id')} service_interest={ctx.get('service_interest')}"
     )
     merge_flow_data(
         wa_id,

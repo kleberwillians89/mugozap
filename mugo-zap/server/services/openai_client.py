@@ -25,6 +25,10 @@ def _ai_log(event: str, **fields: Any) -> None:
             continue
         safe_fields.append(f"{key}={str(value)[:220]}")
     print(f"OPENAI_CLIENT:{event} " + " ".join(safe_fields))
+    if event == "request":
+        print("AI_CALL_START " + " ".join(safe_fields))
+    if event == "response":
+        print("AI_CALL_RESULT " + " ".join(safe_fields))
 
 
 def load_mugo_prompt() -> str:
@@ -54,7 +58,7 @@ def _fallback(user_message: str) -> Dict[str, Any]:
     next_action = "handoff" if handoff and intent == "humano" else ("offer_meeting" if meeting_suggested else "ask_question")
 
     return {
-        "reply": "Perfeito. Me explica em uma frase o que você quer destravar agora.",
+        "reply": _fallback_reply(msg, intent, score),
         "intent": intent,
         "next_action": next_action,
         "question_key": "none",
@@ -74,7 +78,21 @@ def _fallback(user_message: str) -> Dict[str, Any]:
         "memory_summary": msg[:220],
         "memory_theme": intent,
         "memory_goal": msg[:180],
-    }
+}
+
+
+def _fallback_reply(msg: str, intent: str, score: int) -> str:
+    lower = (msg or "").lower()
+    if any(k in lower for k in ["preço", "preco", "valor", "orçamento", "orcamento", "quanto custa"]):
+        return (
+            "Depende do escopo. Pra eu te direcionar melhor: você quer resolver primeiro "
+            "site/landing, automação no WhatsApp ou os dois juntos?"
+        )
+    if intent == "humano":
+        return "Perfeito, vou encaminhar para alguém da equipe da Mugô continuar com você."
+    if score >= 70:
+        return "Entendi. Parece um caso com prioridade. Qual resultado você precisa alcançar primeiro?"
+    return "Perfeito. Pra eu te direcionar melhor: isso impacta mais vendas/leads ou operação/tempo?"
 
 
 def _score_from_text(t: str) -> int:

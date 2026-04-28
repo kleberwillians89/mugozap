@@ -711,6 +711,14 @@ def _should_trigger_internal_briefing(result: dict) -> bool:
     return bool(result.get("handoff") or result.get("briefing_ready") or result.get("next_action") == "handoff")
 
 
+def _is_human_service_choice(result: dict, user_text: str = "") -> bool:
+    text = (user_text or "").strip().lower()
+    return (
+        (result or {}).get("intent") == "humano"
+        or text in {"6", "06", "falar com equipe", "falar com a equipe"}
+    )
+
+
 async def _handle_ai_operational_decision(
     *,
     wa_id: str,
@@ -749,6 +757,10 @@ async def _handle_ai_operational_decision(
     now = _now_iso()
 
     if wants_handoff:
+        print(
+            "HANDOFF_TRIGGERED "
+            f"cid={cid} wa_id={wa_id} topic={topic} reason={result.get('handoff_reason') or result.get('next_action')}"
+        )
         print(f"[{cid}] HANDOFF:start wa_id={wa_id} topic={topic} summary_len={len(summary)}")
         start_handoff_now(
             wa_id=wa_id,
@@ -811,6 +823,10 @@ async def _handle_ai_operational_decision(
     except Exception as e:
         print(f"[{cid}] Falha ao criar task de briefing:", repr(e))
 
+    print(
+        "BRIEFING_SENT "
+        f"cid={cid} wa_id={wa_id} julia_ok={bool(julia_ok)} eduarda_ok={bool(eduarda_ok)} topic={topic}"
+    )
     return bool(julia_ok or eduarda_ok)
 
 
@@ -2531,9 +2547,10 @@ async def _process_webhook_payload(data: dict, cid: str):
         flow_resp = None
         service_context = {}
 
-        if choice_id and is_service_choice(choice_id):
-            print(f"[{cid}] WEBHOOK:service_choice_to_ai wa_id={wa_id} choice_id={choice_id}")
-            service_context = apply_service_choice(wa_id, choice_id, workspace_id=workspace_id)
+        selected_choice = choice_id or (user_text if is_service_choice(user_text) else "")
+        if selected_choice and is_service_choice(selected_choice):
+            print(f"[{cid}] WEBHOOK:service_choice_to_ai wa_id={wa_id} choice_id={selected_choice}")
+            service_context = apply_service_choice(wa_id, selected_choice, workspace_id=workspace_id)
             try:
                 mark_first_message_sent(wa_id, workspace_id=workspace_id)
             except Exception:
@@ -2553,6 +2570,8 @@ async def _process_webhook_payload(data: dict, cid: str):
                 },
                 workspace_id=workspace_id,
             )
+            user_text = service_context.get("label") or user_text
+            lower = user_text.lower().strip()
         elif choice_id and not post_handoff_mode:
             print(f"[{cid}] WEBHOOK:enter_mugo_flow wa_id={wa_id} choice_id={choice_id}")
             flow_resp = handle_mugo_flow(wa_id, choice_id, choice_id=choice_id, workspace_id=workspace_id)
@@ -2702,6 +2721,27 @@ async def _process_webhook_payload(data: dict, cid: str):
             recent_messages=recent_messages,
             lead_context=lead_context,
         )
+        if service_context:
+            result["intent"] = result.get("intent") or service_context.get("intent")
+            result["lead_theme"] = result.get("lead_theme") or service_context.get("intent")
+            result["lead_fields"] = _merge_lead_fields(
+                result.get("lead_fields"),
+                {"service_interest": service_context.get("service_interest")},
+            )
+            if service_context.get("intent") == "humano":
+                result["handoff"] = True
+                result["next_action"] = "handoff"
+                result["handoff_reason"] = result.get("handoff_reason") or "lead_pediu_humano"
+                result["lead_temperature"] = "hot"
+                result["briefing_ready"] = True
+
+        if _is_human_service_choice(result, user_text):
+            result["handoff"] = True
+            result["next_action"] = "handoff"
+            result["handoff_reason"] = result.get("handoff_reason") or "lead_pediu_humano"
+            result["lead_temperature"] = "hot"
+            result["briefing_ready"] = True
+
         print(
             f"[{cid}] WEBHOOK:ai_result wa_id={wa_id} "
             f"intent={result.get('intent')} next_action={result.get('next_action')} "

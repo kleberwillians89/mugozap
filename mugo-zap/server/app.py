@@ -1228,6 +1228,7 @@ async def process_inbound_sales_message(
     cid: str = "",
 ) -> dict:
     cid = cid or uuid.uuid4().hex[:10]
+    wa_id = normalize_wa_id(wa_id)
     user_text = (text or button_title or list_title or list_description or button_id or list_id or "").strip()
     print(f"SALES_PIPELINE_START cid={cid} wa_id={wa_id} source={source} text_len={len(user_text)}")
 
@@ -1907,6 +1908,7 @@ async def api_debug_ai_state(
     x_panel_key: str = Header(None, alias="X-Panel-Key"),
     x_workspace_id: str = Header(None, alias="X-Workspace-Id"),
 ):
+    wa_id = normalize_wa_id(wa_id)
     user = await get_current_user(
         authorization=authorization,
         x_panel_key=x_panel_key,
@@ -1975,6 +1977,7 @@ async def api_debug_lead_state(
     x_panel_key: str = Header(None, alias="X-Panel-Key"),
     x_workspace_id: str = Header(None, alias="X-Workspace-Id"),
 ):
+    wa_id = normalize_wa_id(wa_id)
     user = await get_current_user(
         authorization=authorization,
         x_panel_key=x_panel_key,
@@ -2030,6 +2033,7 @@ async def api_debug_reset_lead(
     x_panel_key: str = Header(None, alias="X-Panel-Key"),
     x_workspace_id: str = Header(None, alias="X-Workspace-Id"),
 ):
+    wa_id = normalize_wa_id(wa_id)
     user = await get_current_user(
         authorization=authorization,
         x_panel_key=x_panel_key,
@@ -2070,6 +2074,7 @@ async def api_debug_simulate_incoming(
     x_panel_key: str = Header(None, alias="X-Panel-Key"),
     x_workspace_id: str = Header(None, alias="X-Workspace-Id"),
 ):
+    wa_id = normalize_wa_id(wa_id)
     auth_user = await get_current_user(
         authorization=authorization,
         x_panel_key=x_panel_key,

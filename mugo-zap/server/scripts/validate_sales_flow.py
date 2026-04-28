@@ -84,6 +84,13 @@ def pipeline_step(
     }
 
 
+def persisted_pipeline_step(store: dict, wa_id: str, **kwargs) -> dict:
+    state = store.get(wa_id) or sales_brain.default_lead_state()
+    result = pipeline_step(state, **kwargs)
+    store[wa_id] = result["state_after"]
+    return result
+
+
 def apply_message(state: dict, message: str) -> dict:
     updates = sales_brain.extract_signal_from_message(message, state)
     state = sales_brain.merge_state(state, updates)
@@ -249,6 +256,28 @@ def test_pipeline_site_melhorar():
     assert_true("did not repeat site_scope", "página nova do zero" not in step2["reply"])
 
 
+def test_persisted_pipeline_site_state_between_messages():
+    store = {}
+    wa_id = "5511999990000"
+    first = persisted_pipeline_step(
+        store,
+        wa_id,
+        list_title="Site ou landing",
+        list_description="Criar ou melhorar páginas",
+    )
+    assert_equal("first state service", first["state_after"]["service_interest"], "site")
+    assert_equal("first state category", first["state_after"]["last_question_category"], "site_scope")
+
+    second = persisted_pipeline_step(store, wa_id, message="melhorar uma pagina que ja existe")
+    assert_equal("second loaded service", second["state_before"]["service_interest"], "site")
+    assert_equal("second loaded category", second["state_before"]["last_question_category"], "site_scope")
+    assert_equal("contextual answer is not menu", second["normalized_choice"]["is_menu_choice"], False)
+    assert_equal("signal site_scope", second["extracted_signals"]["site_scope"], "melhorar existente")
+    assert_equal("state site_scope", second["state_after"]["site_scope"], "melhorar existente")
+    assert_equal("next category", second["next_question"]["category"], "main_goal")
+    assert_equal("reply", second["reply"], "O foco dessa página é gerar leads, vender mais ou apresentar melhor a marca?")
+
+
 def test_human():
     state = state_with_choice("service_human")
     flat = sales_brain.flatten_state(state)
@@ -294,6 +323,7 @@ def main():
         ("traffic", test_traffic),
         ("pipeline_traffic_zero", test_pipeline_traffic_zero),
         ("pipeline_site_melhorar", test_pipeline_site_melhorar),
+        ("persisted_pipeline_site_state_between_messages", test_persisted_pipeline_site_state_between_messages),
         ("human", test_human),
         ("anti_loop", test_anti_loop),
         ("pipeline_anti_loop", test_pipeline_anti_loop),

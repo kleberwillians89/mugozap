@@ -24,6 +24,66 @@ def state_with_choice(choice_id: str) -> dict:
     return sales_brain.merge_state(sales_brain.default_lead_state(), sales_brain.service_choice_update(choice_id))
 
 
+def pipeline_step(
+    state: dict,
+    *,
+    message: str = "",
+    button_id: str = "",
+    button_title: str = "",
+    list_id: str = "",
+    list_title: str = "",
+    list_description: str = "",
+    forced_reply: str = "",
+) -> dict:
+    state_before = sales_brain.flatten_state(state)
+    text = message or button_title or list_title or list_description or button_id or list_id
+    choice = sales_brain.normalize_inbound_choice(
+        text=text,
+        button_id=button_id,
+        button_title=button_title,
+        list_id=list_id,
+        list_title=list_title,
+        list_description=list_description,
+        current_state=state_before,
+    )
+    signals = {}
+    state_after = state_before
+    if choice.get("is_menu_choice") and choice.get("choice_id"):
+        state_after = sales_brain.merge_state(state_after, sales_brain.service_choice_update(choice["choice_id"]))
+    else:
+        signals = sales_brain.extract_signal_from_message(text, state_after)
+        state_after = sales_brain.merge_state(state_after, signals)
+
+    next_q = sales_brain.get_next_question(state_after)
+    reply = forced_reply or next_q["question"]
+    validation = sales_brain.validate_final_reply(reply, state_after)
+    if validation.get("blocked"):
+        reply = validation["reply"]
+        next_q = {
+            "category": validation.get("category") or next_q.get("category"),
+            "question": validation.get("question") or reply,
+            "next_action": validation.get("next_action") or next_q.get("next_action"),
+        }
+
+    state_after = sales_brain.merge_state(
+        state_after,
+        {
+            "last_question_asked": reply,
+            "last_question_category": next_q["category"],
+            "next_best_question": reply,
+            "next_action": next_q["next_action"],
+        },
+    )
+    return {
+        "reply": reply,
+        "normalized_choice": choice,
+        "extracted_signals": signals,
+        "state_before": state_before,
+        "state_after": sales_brain.flatten_state(state_after),
+        "next_question": next_q,
+    }
+
+
 def apply_message(state: dict, message: str) -> dict:
     updates = sales_brain.extract_signal_from_message(message, state)
     state = sales_brain.merge_state(state, updates)
@@ -100,6 +160,28 @@ def test_automation_choice():
     assert_equal("next category", sales_brain.get_next_question(flat)["category"], "lead_source")
 
 
+def test_pipeline_automation_contextual_answers():
+    step1 = pipeline_step(
+        sales_brain.default_lead_state(),
+        list_title="Automatizar WhatsApp",
+        list_description="Atendimento, leads e CRM",
+    )
+    state = step1["state_after"]
+    assert_equal("service_interest", state["service_interest"], "automacao_whatsapp")
+    assert_equal("first category", step1["next_question"]["category"], "lead_source")
+
+    step2 = pipeline_step(state, message="WhatsApp")
+    state = step2["state_after"]
+    assert_equal("whatsapp is not menu", step2["normalized_choice"]["is_menu_choice"], False)
+    assert_equal("lead_source", state["lead_source"], "WhatsApp")
+    assert_equal("next category", step2["next_question"]["category"], "current_tools")
+
+    step3 = pipeline_step(state, message="manualmente")
+    state = step3["state_after"]
+    assert_equal("current_tools", state["current_tools"], "manual")
+    assert_equal("next category", step3["next_question"]["category"], "urgency")
+
+
 def test_automation_leads():
     state = state_with_choice("service_automation")
     state = sales_brain.merge_state(state, {"last_question_category": "lead_source"})
@@ -132,6 +214,41 @@ def test_traffic():
     assert_equal("current_status", sales_brain.flatten_state(state)["current_status"], "já anuncia")
 
 
+def test_pipeline_traffic_zero():
+    step1 = pipeline_step(
+        sales_brain.default_lead_state(),
+        list_title="Tráfego pago",
+        list_description="Performance e anúncios",
+    )
+    state = step1["state_after"]
+    assert_equal("service_interest", state["service_interest"], "trafego_pago")
+    assert_equal("first category", step1["next_question"]["category"], "current_status")
+
+    step2 = pipeline_step(state, message="começar do zero")
+    state = step2["state_after"]
+    assert_equal("current_status", state["current_status"], "começar do zero")
+    assert_equal("next category", step2["next_question"]["category"], "main_goal")
+    assert_true("no generic service question", "você procura site" not in step2["reply"].lower())
+
+
+def test_pipeline_site_melhorar():
+    step1 = pipeline_step(
+        sales_brain.default_lead_state(),
+        list_title="Site ou landing",
+        list_description="Criar ou melhorar páginas",
+    )
+    state = step1["state_after"]
+    assert_equal("service_interest", state["service_interest"], "site")
+    assert_equal("first category", step1["next_question"]["category"], "site_scope")
+
+    step2 = pipeline_step(state, message="melhorar uma pagina que ja existe")
+    state = step2["state_after"]
+    assert_equal("contextual answer is not menu", step2["normalized_choice"]["is_menu_choice"], False)
+    assert_equal("site_scope", state["site_scope"], "melhorar existente")
+    assert_equal("next category", step2["next_question"]["category"], "main_goal")
+    assert_true("did not repeat site_scope", "página nova do zero" not in step2["reply"])
+
+
 def test_human():
     state = state_with_choice("service_human")
     flat = sales_brain.flatten_state(state)
@@ -150,6 +267,17 @@ def test_anti_loop():
     assert_equal("replacement category", result["category"], "site_scope")
 
 
+def test_pipeline_anti_loop():
+    state = state_with_choice("service_site")
+    result = pipeline_step(
+        state,
+        message="site",
+        forced_reply="Pra eu te direcionar melhor: você procura site, automação, IA, tráfego ou branding?",
+    )
+    assert_true("blocked generic", result["reply"] != "Pra eu te direcionar melhor: você procura site, automação, IA, tráfego ou branding?")
+    assert_equal("replacement category", result["next_question"]["category"], "site_scope")
+
+
 def main():
     tests = [
         ("menu_site", test_menu_site),
@@ -159,12 +287,16 @@ def main():
         ("text_site_without_state_is_menu", test_text_site_without_state_is_menu),
         ("text_site_with_state_is_not_menu", test_text_site_with_state_is_not_menu),
         ("automation_choice", test_automation_choice),
+        ("pipeline_automation_contextual_answers", test_pipeline_automation_contextual_answers),
         ("automation_leads", test_automation_leads),
         ("manual", test_manual),
         ("ai_context", test_ai_context),
         ("traffic", test_traffic),
+        ("pipeline_traffic_zero", test_pipeline_traffic_zero),
+        ("pipeline_site_melhorar", test_pipeline_site_melhorar),
         ("human", test_human),
         ("anti_loop", test_anti_loop),
+        ("pipeline_anti_loop", test_pipeline_anti_loop),
     ]
     for name, fn in tests:
         run_test(name, fn)

@@ -1171,6 +1171,231 @@ async def _prepare_sales_brain_state(
     return await upsert_ai_state(wa_id, state, workspace_id=workspace_id)
 
 
+def _sales_pipeline_result_from_state(
+    *,
+    state: dict,
+    reply: str,
+    next_question: dict,
+    intent: str = "",
+) -> dict:
+    fields = sales_brain.flatten_state(state)
+    lead_fields = {
+        **(fields.get("lead_fields") or {}),
+        **{key: fields.get(key) for key in sales_brain.FIELD_KEYS if fields.get(key) not in (None, "", [], {})},
+        "last_question_asked": reply,
+        "last_question_category": next_question.get("category") or fields.get("last_question_category"),
+        "next_best_question": reply,
+    }
+    result = {
+        "reply": reply,
+        "lead_temperature": fields.get("lead_temperature") or ("hot" if fields.get("handoff") else "cold"),
+        "intent": intent or fields.get("intent") or "outro",
+        "next_action": fields.get("next_action") or next_question.get("next_action") or "ask_question",
+        "handoff": bool(fields.get("handoff")),
+        "handoff_reason": fields.get("handoff_reason"),
+        "meeting_suggested": bool(fields.get("meeting_suggested")),
+        "briefing_ready": bool(fields.get("briefing_ready")),
+        "suggested_tags": fields.get("suggested_tags") or [],
+        "lead_fields": lead_fields,
+        "briefing": fields.get("briefing") or {},
+        "follow_up": fields.get("follow_up") or {"needed": False, "when": None, "message": None},
+    }
+    if sales_brain.should_offer_meeting(fields):
+        result["lead_temperature"] = "hot" if fields.get("urgency") == "alta" or fields.get("handoff") else "warm"
+        result["meeting_suggested"] = True
+        result["briefing_ready"] = True
+        result["next_action"] = "handoff" if fields.get("handoff") else "offer_meeting"
+        result["briefing"] = _merge_briefing(result.get("briefing"), sales_brain.build_briefing(fields, []))
+    if fields.get("handoff"):
+        result["lead_temperature"] = "hot"
+        result["meeting_suggested"] = True
+        result["briefing_ready"] = True
+        result["next_action"] = "handoff"
+        result["briefing"] = _merge_briefing(result.get("briefing"), sales_brain.build_briefing(fields, []))
+    return result
+
+
+async def process_inbound_sales_message(
+    wa_id: str,
+    text: str | None = None,
+    button_id: str | None = None,
+    button_title: str | None = None,
+    list_id: str | None = None,
+    list_title: str | None = None,
+    list_description: str | None = None,
+    source: str = "webhook",
+    workspace_id: str = "",
+    cid: str = "",
+) -> dict:
+    cid = cid or uuid.uuid4().hex[:10]
+    user_text = (text or button_title or list_title or list_description or button_id or list_id or "").strip()
+    print(f"SALES_PIPELINE_START cid={cid} wa_id={wa_id} source={source} text_len={len(user_text)}")
+
+    raw_state = await get_ai_state(wa_id, workspace_id=workspace_id) or {}
+    state_before = sales_brain.flatten_state(raw_state)
+    print(f"SALES_STATE_BEFORE cid={cid} wa_id={wa_id} state={json.dumps(state_before, ensure_ascii=False)[:1400]}")
+
+    normalized_choice = sales_brain.normalize_inbound_choice(
+        text=user_text,
+        button_id=button_id or "",
+        button_title=button_title or "",
+        list_id=list_id or "",
+        list_title=list_title or "",
+        list_description=list_description or "",
+        current_state=state_before,
+    )
+    print(f"SALES_NORMALIZED_CHOICE cid={cid} wa_id={wa_id} choice={json.dumps(normalized_choice, ensure_ascii=False)[:900]}")
+
+    extracted_signals: dict = {}
+    state_after = state_before
+
+    if normalized_choice.get("is_menu_choice") and normalized_choice.get("choice_id"):
+        state_after = await _apply_menu_choice_state(
+            wa_id,
+            choice=normalized_choice,
+            current_state=state_before,
+            workspace_id=workspace_id,
+        )
+        state_after = sales_brain.flatten_state(state_after)
+        next_question = sales_brain.get_next_question(state_after)
+        reply = (next_question.get("question") or "").strip()
+        validation = sales_brain.validate_final_reply(reply, state_after)
+        if validation.get("blocked"):
+            reply = validation.get("reply") or reply
+            next_question = {
+                "category": validation.get("category") or next_question.get("category"),
+                "question": validation.get("question") or reply,
+                "next_action": validation.get("next_action") or next_question.get("next_action"),
+            }
+        state_after = sales_brain.merge_state(
+            state_after,
+            {
+                "last_question_asked": reply,
+                "last_question_category": next_question.get("category"),
+                "next_best_question": reply,
+                "next_action": next_question.get("next_action"),
+            },
+        )
+        if state_after.get("handoff"):
+            state_after = sales_brain.merge_state(
+                state_after,
+                {
+                    "lead_temperature": "hot",
+                    "meeting_suggested": True,
+                    "briefing_ready": True,
+                    "next_action": "handoff",
+                    "briefing": sales_brain.build_briefing(state_after, []),
+                },
+            )
+        result = _sales_pipeline_result_from_state(
+            state=state_after,
+            reply=reply,
+            next_question=next_question,
+            intent=normalized_choice.get("intent") or "",
+        )
+        saved_state = await _save_ai_result_state(
+            wa_id,
+            ai_state=raw_state,
+            result=result,
+            user_text=user_text,
+            workspace_id=workspace_id,
+        )
+        print(f"SALES_NEXT_QUESTION cid={cid} wa_id={wa_id} next={json.dumps(next_question, ensure_ascii=False)[:700]}")
+        print(f"SALES_REPLY_BEFORE_VALIDATION cid={cid} wa_id={wa_id} reply={reply[:240]!r}")
+        print(f"SALES_REPLY_AFTER_VALIDATION cid={cid} wa_id={wa_id} reply={(result.get('reply') or '')[:240]!r}")
+        print(f"SALES_STATE_SAVED cid={cid} wa_id={wa_id} state={json.dumps(sales_brain.flatten_state(saved_state), ensure_ascii=False)[:1400]}")
+        return {
+            "ok": True,
+            "wa_id": wa_id,
+            "reply": result.get("reply") or "",
+            "normalized_choice": normalized_choice,
+            "extracted_signals": extracted_signals,
+            "state_before": state_before,
+            "state_after": sales_brain.flatten_state(saved_state),
+            "next_question": next_question,
+            "result": result,
+        }
+
+    extracted_signals = sales_brain.extract_signal_from_message(user_text, state_before)
+    print(f"SALES_EXTRACTED_SIGNALS cid={cid} wa_id={wa_id} signals={json.dumps(extracted_signals, ensure_ascii=False)[:900]}")
+    state_after = sales_brain.merge_state(state_before, extracted_signals)
+    print(f"SALES_STATE_AFTER_MERGE cid={cid} wa_id={wa_id} state={json.dumps(state_after, ensure_ascii=False)[:1400]}")
+
+    if sales_brain.should_handoff(state_after, user_text):
+        state_after = sales_brain.merge_state(
+            state_after,
+            {
+                "handoff": True,
+                "handoff_reason": state_after.get("handoff_reason") or "lead_pediu_humano",
+                "lead_temperature": "hot",
+                "meeting_suggested": True,
+                "briefing_ready": True,
+                "next_action": "handoff",
+            },
+        )
+
+    next_question = sales_brain.get_next_question(state_after)
+    reply = (next_question.get("question") or "").strip()
+    if state_after.get("handoff"):
+        reply = "Claro. Vou te encaminhar para a Julia com um resumo do que você precisa."
+    validation = sales_brain.validate_final_reply(reply, state_after)
+    print(f"SALES_REPLY_BEFORE_VALIDATION cid={cid} wa_id={wa_id} reply={reply[:240]!r}")
+    if validation.get("blocked"):
+        reply = validation.get("reply") or reply
+        next_question = {
+            "category": validation.get("category") or next_question.get("category"),
+            "question": validation.get("question") or reply,
+            "next_action": validation.get("next_action") or next_question.get("next_action"),
+        }
+
+    state_after = sales_brain.merge_state(
+        state_after,
+        {
+            "last_question_asked": reply,
+            "last_question_category": next_question.get("category"),
+            "next_best_question": reply,
+            "next_action": "handoff" if state_after.get("handoff") else next_question.get("next_action"),
+        },
+    )
+    if sales_brain.should_offer_meeting(state_after):
+        state_after = sales_brain.merge_state(
+            state_after,
+            {
+                "lead_temperature": "hot" if state_after.get("urgency") == "alta" or state_after.get("handoff") else "warm",
+                "meeting_suggested": True,
+                "briefing_ready": True,
+                "next_action": "handoff" if state_after.get("handoff") else "offer_meeting",
+                "briefing": sales_brain.build_briefing(state_after, []),
+            },
+        )
+    result = _sales_pipeline_result_from_state(
+        state=state_after,
+        reply=reply,
+        next_question=next_question,
+    )
+    saved_state = await _save_ai_result_state(
+        wa_id,
+        ai_state=raw_state,
+        result=result,
+        user_text=user_text,
+        workspace_id=workspace_id,
+    )
+    print(f"SALES_NEXT_QUESTION cid={cid} wa_id={wa_id} next={json.dumps(next_question, ensure_ascii=False)[:700]}")
+    print(f"SALES_REPLY_AFTER_VALIDATION cid={cid} wa_id={wa_id} reply={(result.get('reply') or '')[:240]!r}")
+    print(f"SALES_STATE_SAVED cid={cid} wa_id={wa_id} state={json.dumps(sales_brain.flatten_state(saved_state), ensure_ascii=False)[:1400]}")
+    return {
+        "ok": True,
+        "wa_id": wa_id,
+        "reply": result.get("reply") or "",
+        "normalized_choice": normalized_choice,
+        "extracted_signals": extracted_signals,
+        "state_before": state_before,
+        "state_after": sales_brain.flatten_state(saved_state),
+        "next_question": next_question,
+        "result": result,
+    }
+
+
 def _should_trigger_internal_briefing(result: dict) -> bool:
     return bool(result.get("handoff") or result.get("briefing_ready") or result.get("next_action") == "handoff")
 
@@ -1895,32 +2120,11 @@ async def api_debug_simulate_incoming(
         workspace_id=workspace_id,
     )
 
-    current_state = await get_ai_state(wa_id, workspace_id=workspace_id) or {}
-    normalized_choice = sales_brain.normalize_inbound_choice(
-        text=text,
-        button_id=button_id,
-        button_title=button_title,
-        list_id=list_id,
-        list_title=list_title,
-        list_description=list_description,
-        current_state=current_state,
-    )
-    selected_choice = normalized_choice.get("choice_id") if normalized_choice.get("is_menu_choice") else ""
-    if selected_choice:
-        service_ctx = apply_service_choice(wa_id, selected_choice, workspace_id=workspace_id)
-        try:
-            mark_first_message_sent(wa_id, workspace_id=workspace_id)
-        except Exception:
-            pass
-        updated_state = await _apply_menu_choice_state(wa_id, choice=normalized_choice, current_state=current_state, workspace_id=workspace_id)
-        result = _deterministic_choice_result(normalized_choice, updated_state)
-        reply_text = (result.get("reply") or "").strip()
-        log_message(wa_id, "out", reply_text, meta={"src": "debug_menu_choice", "cid": cid, "normalized_choice": normalized_choice}, workspace_id=workspace_id)
-        await _save_ai_result_state(wa_id, ai_state=updated_state, result=result, user_text=text, workspace_id=workspace_id)
-        await _handle_ai_operational_decision(wa_id=wa_id, cid=cid, result=result, user_text=text, user=user, workspace_id=workspace_id)
-        return {"ok": True, "wa_id": wa_id, "reply": reply_text, "result": result, "normalized_choice": normalized_choice}
-
-    if not bool(user.get("first_message_sent")) and not selected_choice and text.lower() in {"oi", "oie", "olá", "ola", "opa", "start", "menu"}:
+    if (
+        not bool(user.get("first_message_sent"))
+        and not any([button_id, button_title, list_id, list_title, list_description])
+        and text.lower() in {"oi", "oie", "olá", "ola", "opa", "start", "menu"}
+    ):
         flow_start = handle_mugo_flow(wa_id, "start", choice_id="", workspace_id=workspace_id)
         if flow_start:
             try:
@@ -1936,56 +2140,39 @@ async def api_debug_simulate_incoming(
             )
             return {"ok": True, "wa_id": wa_id, "flow_response": flow_start}
 
-    recent_messages = get_recent_messages(wa_id, limit=12, workspace_id=workspace_id) or []
-    lead_context = await get_ai_state(wa_id, workspace_id=workspace_id) or {}
-    lead_context = await _prepare_sales_brain_state(
-        wa_id,
-        ai_state=lead_context,
-        user_text=text,
+    pipeline = await process_inbound_sales_message(
+        wa_id=wa_id,
+        text=text,
+        button_id=button_id,
+        button_title=button_title,
+        list_id=list_id,
+        list_title=list_title,
+        list_description=list_description,
+        source="debug_simulate",
         workspace_id=workspace_id,
         cid=cid,
     )
+    result = pipeline.get("result") or {}
+    reply_text = (pipeline.get("reply") or "").strip()
+    normalized_choice = pipeline.get("normalized_choice") or {}
 
-    result = await generate_reply(
-        wa_id=wa_id,
-        user_message=text,
-        first_message_sent=True,
-        name=resolved_name,
-        telefone=wa_id,
-        recent_messages=recent_messages,
-        lead_context=lead_context,
-    )
-    result = _postprocess_ai_result(
-        cid=cid,
-        wa_id=wa_id,
-        result=result,
-        ai_state=lead_context,
-        user_text=text,
-    )
+    if normalized_choice.get("is_menu_choice") and normalized_choice.get("choice_id"):
+        apply_service_choice(wa_id, normalized_choice.get("choice_id"), workspace_id=workspace_id)
+        try:
+            mark_first_message_sent(wa_id, workspace_id=workspace_id)
+        except Exception:
+            pass
 
     try:
         set_tags(wa_id, _extract_auto_tags(result), workspace_id=workspace_id)
     except Exception:
         pass
 
-    try:
-        ai_state = await get_ai_state(wa_id, workspace_id=workspace_id) or {}
-        await _save_ai_result_state(
-            wa_id,
-            ai_state=ai_state,
-            result=result,
-            user_text=text,
-            workspace_id=workspace_id,
-        )
-    except Exception as e:
-        print(f"[{cid}] Falha ao salvar memória da IA:", repr(e))
-
-    reply_text = (result.get("reply") or "").strip() or "Em uma frase: qual é o foco agora?"
     log_message(
         wa_id,
         "out",
         reply_text,
-        meta={"src": "debug_ai_reply", "cid": cid},
+        meta={"src": "debug_sales_pipeline_reply", "cid": cid, "normalized_choice": normalized_choice},
         workspace_id=workspace_id,
     )
 
@@ -2002,6 +2189,11 @@ async def api_debug_simulate_incoming(
         "ok": True,
         "wa_id": wa_id,
         "reply": reply_text,
+        "normalized_choice": normalized_choice,
+        "extracted_signals": pipeline.get("extracted_signals") or {},
+        "state_before": pipeline.get("state_before") or {},
+        "state_after": pipeline.get("state_after") or {},
+        "next_question": pipeline.get("next_question") or {},
         "result": result,
     }
 
@@ -3122,25 +3314,29 @@ async def _process_webhook_payload(data: dict, cid: str):
                 mark_first_message_sent(wa_id, workspace_id=workspace_id)
             except Exception:
                 pass
-            ai_state = await get_ai_state(wa_id, workspace_id=workspace_id) or {}
-            updated_state = await _apply_menu_choice_state(
-                wa_id,
-                choice=normalized_choice,
-                current_state=ai_state,
+            pipeline = await process_inbound_sales_message(
+                wa_id=wa_id,
+                text=user_text,
+                button_id=choice_id if button_title else "",
+                button_title=button_title,
+                list_id=list_id,
+                list_title=list_title,
+                list_description=list_description,
+                source="webhook",
                 workspace_id=workspace_id,
+                cid=cid,
             )
-            result = _deterministic_choice_result(normalized_choice, updated_state)
-            reply_text = (result.get("reply") or "").strip()
+            result = pipeline.get("result") or {}
+            reply_text = (pipeline.get("reply") or result.get("reply") or "").strip()
             _log_outbound_decision(cid, wa_id, "handoff" if result.get("handoff") else "menu", reply_text)
             ok = safe_send(
                 wa_id,
                 reply_text,
-                meta={"event": "deterministic_menu_choice", "cid": cid, "normalized_choice": normalized_choice},
+                meta={"event": "sales_pipeline_menu_choice", "cid": cid, "normalized_choice": pipeline.get("normalized_choice") or normalized_choice},
                 workspace_id=workspace_id,
                 cid=cid,
             )
             if ok:
-                await _save_ai_result_state(wa_id, ai_state=updated_state, result=result, user_text=user_text, workspace_id=workspace_id)
                 _remember_bot_message(wa_id, result.get("lead_fields", {}).get("last_question_category") or "menu_choice", reply_text, workspace_id=workspace_id)
                 await _handle_ai_operational_decision(
                     wa_id=wa_id,
@@ -3286,28 +3482,23 @@ async def _process_webhook_payload(data: dict, cid: str):
             return
 
         flow_data = _flow_data(wa_id, workspace_id=workspace_id)
-        recent_messages = get_recent_messages(wa_id, limit=12, workspace_id=workspace_id) or []
-        lead_context = await get_ai_state(wa_id, workspace_id=workspace_id) or {}
-        lead_context = await _prepare_sales_brain_state(
-            wa_id,
-            ai_state=lead_context,
-            user_text=user_text,
+        pipeline = await process_inbound_sales_message(
+            wa_id=wa_id,
+            text=user_text,
+            button_id=choice_id if button_title else "",
+            button_title=button_title,
+            list_id=list_id,
+            list_title=list_title,
+            list_description=list_description,
+            source="webhook",
             workspace_id=workspace_id,
             cid=cid,
         )
+        result = pipeline.get("result") or {}
         print(
-            f"[{cid}] WEBHOOK:enter_ai wa_id={wa_id} text_len={len(user_text)} "
-            f"recent_messages={len(recent_messages)} selected_service={lead_context.get('selected_service') or '-'}"
-        )
-
-        result = await generate_reply(
-            wa_id=wa_id,
-            user_message=user_text,
-            first_message_sent=True,
-            name=resolved_name,
-            telefone=telefone,
-            recent_messages=recent_messages,
-            lead_context=lead_context,
+            f"[{cid}] WEBHOOK:sales_pipeline_result wa_id={wa_id} text_len={len(user_text)} "
+            f"service={(pipeline.get('state_after') or {}).get('service_interest') or '-'} "
+            f"next_category={(pipeline.get('next_question') or {}).get('category') or '-'}"
         )
         if service_context:
             result["intent"] = result.get("intent") or service_context.get("intent")
@@ -3322,21 +3513,6 @@ async def _process_webhook_payload(data: dict, cid: str):
                 result["handoff_reason"] = result.get("handoff_reason") or "lead_pediu_humano"
                 result["lead_temperature"] = "hot"
                 result["briefing_ready"] = True
-
-        if _is_human_service_choice(result, user_text):
-            result["handoff"] = True
-            result["next_action"] = "handoff"
-            result["handoff_reason"] = result.get("handoff_reason") or "lead_pediu_humano"
-            result["lead_temperature"] = "hot"
-            result["briefing_ready"] = True
-
-        result = _postprocess_ai_result(
-            cid=cid,
-            wa_id=wa_id,
-            result=result,
-            ai_state=lead_context,
-            user_text=user_text,
-        )
 
         if _is_human_service_choice(result, user_text):
             result["handoff"] = True

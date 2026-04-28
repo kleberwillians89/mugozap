@@ -383,7 +383,12 @@ def extract_signal_from_message(text: str, current_state: Dict[str, Any]) -> Dic
     choice_updates = service_choice_update(norm)
     if choice_updates:
         choice_service = choice_updates.get("service_interest") or ""
-        if service and choice_service and choice_service != service and not detect_explicit_service_switch(text):
+        if service and last_category and not detect_explicit_service_switch(text) and not _is_pure_menu_number(text):
+            print(
+                f"SALES_BRAIN_SERVICE_LOCKED service={service} "
+                f"ignored_contextual_choice={choice_service} category={last_category} text={text[:160]!r}"
+            )
+        elif service and choice_service and choice_service != service and not detect_explicit_service_switch(text):
             print(f"SALES_BRAIN_SERVICE_LOCKED service={service} ignored_candidate={choice_service} source=text text={text[:160]!r}")
         else:
             updates.update(choice_updates)

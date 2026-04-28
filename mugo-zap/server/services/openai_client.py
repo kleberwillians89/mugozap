@@ -220,6 +220,7 @@ def _default_lead_fields(msg: str, intent: str) -> Dict[str, Any]:
         "team_context": None,
         "funnel_stage": None,
         "last_question_asked": None,
+        "last_question_category": None,
         "next_best_question": None,
     }
 
@@ -265,6 +266,7 @@ def _format_lead_context(lead_context: Optional[Dict[str, Any]]) -> str:
         "briefing": lead_context.get("briefing"),
         "follow_up": lead_context.get("follow_up"),
         "last_question_asked": lead_context.get("last_question_asked"),
+        "last_question_category": lead_context.get("last_question_category"),
         "selected_service": lead_context.get("selected_service"),
         "selected_service_id": lead_context.get("selected_service_id"),
         "intent": lead_context.get("intent"),

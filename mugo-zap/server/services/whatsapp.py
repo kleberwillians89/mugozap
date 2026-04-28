@@ -60,6 +60,20 @@ def _payload_stats(body: Dict[str, Any]) -> Dict[str, Any]:
     return stats
 
 
+def meta_env_status() -> Dict[str, Any]:
+    verify_token = (
+        os.getenv("WHATSAPP_VERIFY_TOKEN")
+        or os.getenv("VERIFY_TOKEN")
+        or ""
+    ).strip()
+    return {
+        "whatsapp_token_present": bool(WHATSAPP_TOKEN),
+        "whatsapp_phone_number_id": PHONE_NUMBER_ID or "",
+        "whatsapp_verify_token_present": bool(verify_token),
+        "meta_app_secret_present": bool((os.getenv("META_APP_SECRET") or "").strip()),
+    }
+
+
 def _build_text_payload(to_wa_id: str, text: str) -> Dict[str, Any]:
     return {
         "messaging_product": "whatsapp",
@@ -219,7 +233,7 @@ def _normalize_payload(to_wa_id: str, payload: Union[str, Dict[str, Any]]) -> Di
     return _build_text_payload(to_wa_id, text)
 
 
-def send_message(to_wa_id: str, payload: Union[str, Dict[str, Any]]):
+def send_message_detailed(to_wa_id: str, payload: Union[str, Dict[str, Any]], *, raise_for_status: bool = True) -> Dict[str, Any]:
     to_wa_id = _clean_number(to_wa_id)
 
     if not WHATSAPP_TOKEN:
@@ -230,7 +244,11 @@ def send_message(to_wa_id: str, payload: Union[str, Dict[str, Any]]):
         raise RuntimeError("Número de destino inválido")
 
     body = _normalize_payload(to_wa_id, payload)
-    print(f"WA_SEND:prepare to={to_wa_id} stats={_payload_stats(body)}")
+    stats = _payload_stats(body)
+    print(
+        "WHATSAPP_SEND_ATTEMPT "
+        f"wa_id={to_wa_id} message_type={stats.get('type')} phone_number_id={PHONE_NUMBER_ID or 'missing'} stats={stats}"
+    )
 
     headers = {
         "Authorization": f"Bearer {WHATSAPP_TOKEN}",
@@ -240,16 +258,39 @@ def send_message(to_wa_id: str, payload: Union[str, Dict[str, Any]]):
     try:
         r = requests.post(BASE_URL, json=body, headers=headers, timeout=20)
     except requests.RequestException as e:
-        print(f"WA_SEND:request_error to={to_wa_id} error={repr(e)}")
+        print(
+            "WHATSAPP_SEND_ERROR "
+            f"wa_id={to_wa_id} error_type={type(e).__name__} message={str(e)[:500]}"
+        )
         raise RuntimeError(f"Erro de conexão com Meta: {e}")
 
-    print(f"WA_SEND:response to={to_wa_id} status_code={r.status_code} body={_short(r.text)}")
+    body_preview = _short(r.text)
+    print(
+        "WHATSAPP_SEND_RESULT "
+        f"wa_id={to_wa_id} status_code={r.status_code} body={body_preview}"
+    )
 
     if r.status_code >= 300:
-        print(f"WA_SEND:http_error to={to_wa_id} status_code={r.status_code} body={_short(r.text)}")
-        raise RuntimeError(f"WA send error {r.status_code}: {r.text}")
+        print(
+            "WHATSAPP_SEND_ERROR "
+            f"wa_id={to_wa_id} error_type=HTTPStatusError message=status_code={r.status_code} body={body_preview}"
+        )
+        if raise_for_status:
+            raise RuntimeError(f"WA send error {r.status_code}: {r.text}")
 
     try:
-        return r.json()
+        parsed = r.json()
     except Exception:
-        return {"ok": True}
+        parsed = {"raw": r.text}
+
+    return {
+        "ok": r.status_code < 300,
+        "status_code": r.status_code,
+        "body": _short(parsed),
+        "raw_body": parsed,
+        "phone_number_id": PHONE_NUMBER_ID,
+    }
+
+
+def send_message(to_wa_id: str, payload: Union[str, Dict[str, Any]]):
+    return send_message_detailed(to_wa_id, payload).get("raw_body") or {"ok": True}

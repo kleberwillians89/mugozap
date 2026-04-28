@@ -30,7 +30,7 @@ def _load_env() -> Path:
 
 ENV_PATH = _load_env()
 
-VERIFY_TOKEN = (os.getenv("VERIFY_TOKEN") or "mugo_verify").strip()
+VERIFY_TOKEN = (os.getenv("WHATSAPP_VERIFY_TOKEN") or os.getenv("VERIFY_TOKEN") or "mugo_verify").strip()
 ALLOW_ORIGIN = (os.getenv("ALLOW_ORIGIN") or "").strip()
 PANEL_API_KEY = (os.getenv("PANEL_API_KEY") or "").strip()
 
@@ -109,7 +109,7 @@ from services.state import (
     set_tags,
     normalize_wa_id,
 )
-from services.whatsapp import send_message
+from services.whatsapp import meta_env_status, send_message, send_message_detailed
 from services.openai_client import generate_reply
 from services.mugo_flow import apply_service_choice, handle_mugo_flow, is_service_choice, service_choice_context
 from services.followup import process_followups
@@ -145,6 +145,11 @@ async def startup_check():
     print("SUPABASE_TABLE_TASKS:", SUPABASE_TABLE_TASKS)
     print("SUPABASE_TABLE_AI_STATE:", SUPABASE_TABLE_AI_STATE)
     print("SUPABASE_TABLE_FLOW_STATE:", SUPABASE_TABLE_FLOW_STATE)
+    meta_env = meta_env_status()
+    print("WHATSAPP_TOKEN:", "present" if meta_env["whatsapp_token_present"] else "missing")
+    print("WHATSAPP_PHONE_NUMBER_ID:", meta_env["whatsapp_phone_number_id"] or "missing")
+    print("WHATSAPP_VERIFY_TOKEN:", "present" if meta_env["whatsapp_verify_token_present"] else "missing")
+    print("META_APP_SECRET:", "present" if meta_env["meta_app_secret_present"] else "missing")
     print("DEFAULT_WORKSPACE:", build_default_workspace())
 
     if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
@@ -305,6 +310,21 @@ def _menu_fallback_text() -> str:
         "5. Branding/conteúdo/redes sociais\n"
         "6. Falar com a equipe"
     )
+
+
+def _outbound_preview(payload: Union[str, Dict[str, Any]]) -> str:
+    return _extract_log_text(payload)[:220] if isinstance(payload, dict) else str(payload or "")[:220]
+
+
+def _log_outbound_decision(cid: str, wa_id: str, kind: str, reply: Union[str, Dict[str, Any]]) -> None:
+    print(
+        "OUTBOUND_DECISION "
+        f"cid={cid} wa_id={wa_id} kind={kind} reply_preview={_outbound_preview(reply)!r}"
+    )
+
+
+def _log_outbound_skipped(cid: str, wa_id: str, reason: str) -> None:
+    print(f"OUTBOUND_SKIPPED cid={cid} wa_id={wa_id} reason={reason}")
 
 
 def _extract_inbound_wa_id(msg: dict, contacts: list | None = None) -> tuple[str, str]:
@@ -1189,6 +1209,58 @@ async def api_debug_ai_state(
     )
     state = await get_ai_state(wa_id, workspace_id=user.get("workspace_id"))
     return {"ok": True, "wa_id": wa_id, "state": state}
+
+
+@app.get("/api/debug/meta-env")
+async def api_debug_meta_env(
+    authorization: str = Header(None),
+    x_panel_key: str = Header(None, alias="X-Panel-Key"),
+    x_workspace_id: str = Header(None, alias="X-Workspace-Id"),
+):
+    await get_current_user(
+        authorization=authorization,
+        x_panel_key=x_panel_key,
+        x_workspace_id=x_workspace_id,
+    )
+    env = meta_env_status()
+    return {
+        "whatsapp_token_present": env["whatsapp_token_present"],
+        "whatsapp_phone_number_id": env["whatsapp_phone_number_id"] or "missing",
+        "whatsapp_verify_token_present": env["whatsapp_verify_token_present"],
+    }
+
+
+@app.post("/api/debug/send-test-whatsapp/{wa_id}")
+async def api_debug_send_test_whatsapp(
+    wa_id: str,
+    request: Request,
+    authorization: str = Header(None),
+    x_panel_key: str = Header(None, alias="X-Panel-Key"),
+    x_workspace_id: str = Header(None, alias="X-Workspace-Id"),
+):
+    await get_current_user(
+        authorization=authorization,
+        x_panel_key=x_panel_key,
+        x_workspace_id=x_workspace_id,
+    )
+    payload = await request.json()
+    message = (payload.get("message") or "teste").strip() or "teste"
+    try:
+        result = send_message_detailed(wa_id, message, raise_for_status=False)
+        return {
+            "ok": bool(result.get("ok")),
+            "status_code": result.get("status_code"),
+            "body": result.get("body"),
+            "phone_number_id": result.get("phone_number_id"),
+        }
+    except Exception as e:
+        env = meta_env_status()
+        return {
+            "ok": False,
+            "status_code": None,
+            "body": f"{type(e).__name__}: {str(e)[:500]}",
+            "phone_number_id": env.get("whatsapp_phone_number_id") or "missing",
+        }
 
 
 @app.get("/api/debug/lead-state/{wa_id}")
@@ -2173,6 +2245,7 @@ async def _process_webhook_payload(data: dict, cid: str):
         message_id = (msg.get("id") or "").strip()
 
         if await _dedupe_incoming(wa_id, message_id, cid):
+            _log_outbound_skipped(cid, wa_id, "duplicate_inbound_message")
             return
 
         profile = (contacts[0].get("profile") or {}) if contacts else {}
@@ -2193,6 +2266,11 @@ async def _process_webhook_payload(data: dict, cid: str):
             user_text = (br.get("title") or lr.get("title") or "").strip()
         else:
             print(f"[{cid}] WEBHOOK:unsupported_message_type wa_id={wa_id} msg_type={msg_type}")
+            print(
+                "WEBHOOK_MESSAGE_RECEIVED "
+                f"cid={cid} wa_id={wa_id} message_type={msg_type} body='' button_id=''"
+            )
+            _log_outbound_skipped(cid, wa_id, f"unsupported_message_type:{msg_type}")
             return
 
         if not user_text and choice_id:
@@ -2200,8 +2278,17 @@ async def _process_webhook_payload(data: dict, cid: str):
 
         if not user_text:
             print(f"[{cid}] WEBHOOK:empty_user_text wa_id={wa_id} msg_type={msg_type} choice_id={choice_id or '-'}")
+            print(
+                "WEBHOOK_MESSAGE_RECEIVED "
+                f"cid={cid} wa_id={wa_id} message_type={msg_type} body='' button_id={choice_id or ''!r}"
+            )
+            _log_outbound_skipped(cid, wa_id, "empty_user_text")
             return
 
+        print(
+            "WEBHOOK_MESSAGE_RECEIVED "
+            f"cid={cid} wa_id={wa_id} message_type={msg_type} body={user_text[:240]!r} button_id={choice_id or ''!r}"
+        )
         print(
             f"[{cid}] WEBHOOK:message wa_id={wa_id} msg_type={msg_type} "
             f"choice_id={choice_id or '-'} text={user_text[:240]!r}"
@@ -2271,6 +2358,7 @@ async def _process_webhook_payload(data: dict, cid: str):
 
         if _is_back_trigger(lower):
             if post_handoff_mode:
+                _log_outbound_decision(cid, wa_id, "fallback", "Já encaminhei seu briefing para o time da Mugô.")
                 safe_send(
                     wa_id,
                     "Já encaminhei seu briefing para o time da Mugô. Se quiser, me manda sua dúvida por aqui que eu te ajudo e, se necessário, encaminho novamente. ✅",
@@ -2294,6 +2382,7 @@ async def _process_webhook_payload(data: dict, cid: str):
 
             flow_resp = handle_mugo_flow(wa_id, "start", choice_id="", workspace_id=workspace_id)
             if flow_resp:
+                _log_outbound_decision(cid, wa_id, "menu", flow_resp)
                 ok = safe_send(wa_id, flow_resp, meta={"event": "back_to_flow_start", "cid": cid}, workspace_id=workspace_id, cid=cid)
                 if ok:
                     _remember_bot_message(
@@ -2302,8 +2391,11 @@ async def _process_webhook_payload(data: dict, cid: str):
                         _extract_log_text(flow_resp),
                         workspace_id=workspace_id,
                     )
+                else:
+                    _log_outbound_skipped(cid, wa_id, "send_failed:back_to_flow_start")
                 return
 
+            _log_outbound_decision(cid, wa_id, "fallback", _menu_fallback_text())
             safe_send(wa_id, _menu_fallback_text(), meta={"event": "back_to_menu_fallback", "cid": cid}, workspace_id=workspace_id, cid=cid)
             return
 
@@ -2315,6 +2407,7 @@ async def _process_webhook_payload(data: dict, cid: str):
 
             flow_resp = handle_mugo_flow(wa_id, "start", choice_id="", workspace_id=workspace_id)
             if flow_resp:
+                _log_outbound_decision(cid, wa_id, "menu", flow_resp)
                 ok = safe_send(wa_id, flow_resp, meta={"event": "brief_restart", "cid": cid}, workspace_id=workspace_id, cid=cid)
                 if ok:
                     _remember_bot_message(
@@ -2323,8 +2416,11 @@ async def _process_webhook_payload(data: dict, cid: str):
                         _extract_log_text(flow_resp),
                         workspace_id=workspace_id,
                     )
+                else:
+                    _log_outbound_skipped(cid, wa_id, "send_failed:brief_restart")
                 return
 
+            _log_outbound_decision(cid, wa_id, "fallback", _menu_fallback_text())
             safe_send(wa_id, _menu_fallback_text(), meta={"event": "brief_restart_fallback", "cid": cid}, workspace_id=workspace_id, cid=cid)
             return
 
@@ -2341,6 +2437,7 @@ async def _process_webhook_payload(data: dict, cid: str):
                 except Exception:
                     summary = ""
             resolved_summary = summary or user_text
+            _log_outbound_decision(cid, wa_id, "handoff", resolved_summary)
             start_handoff_now(
                 wa_id=wa_id,
                 cid=cid,
@@ -2356,6 +2453,7 @@ async def _process_webhook_payload(data: dict, cid: str):
 
         if handoff_active:
             print(f"[{cid}] WEBHOOK:handoff_active_skip_bot wa_id={wa_id}")
+            _log_outbound_skipped(cid, wa_id, "handoff_active")
             _apply_operational_state(
                 wa_id,
                 workspace_id=workspace_id,
@@ -2370,6 +2468,7 @@ async def _process_webhook_payload(data: dict, cid: str):
         if post_handoff_mode and resume_ready:
             resume_text = _build_resume_message(flow_data, ai_state)
             if _should_skip_duplicate_bot_message(wa_id, "resume_after_handoff", resume_text, workspace_id=workspace_id):
+                _log_outbound_skipped(cid, wa_id, "duplicate_resume_after_handoff")
                 _apply_operational_state(
                     wa_id,
                     workspace_id=workspace_id,
@@ -2386,6 +2485,7 @@ async def _process_webhook_payload(data: dict, cid: str):
                 )
                 return
 
+            _log_outbound_decision(cid, wa_id, "ai", resume_text)
             ok = safe_send(
                 wa_id,
                 resume_text,
@@ -2416,6 +2516,7 @@ async def _process_webhook_payload(data: dict, cid: str):
                 f"[{cid}] WEBHOOK:automation_paused wa_id={wa_id} "
                 f"automation_paused={automation_paused} bot_enabled={bot_enabled} attendance_mode={current_attendance_mode}"
             )
+            _log_outbound_skipped(cid, wa_id, "automation_paused_or_human_mode")
             _apply_operational_state(
                 wa_id,
                 workspace_id=workspace_id,
@@ -2469,6 +2570,7 @@ async def _process_webhook_payload(data: dict, cid: str):
 
                 if _should_skip_duplicate_bot_message(wa_id, step_key, bot_text, workspace_id=workspace_id):
                     print(f"[{cid}] DUPLICATE FLOW MESSAGE SKIPPED -> {wa_id} / {step_key}")
+                    _log_outbound_skipped(cid, wa_id, f"duplicate_flow_message:{step_key}")
                     return
 
                 if not bool(user.get("first_message_sent")):
@@ -2477,6 +2579,7 @@ async def _process_webhook_payload(data: dict, cid: str):
                     except Exception:
                         pass
 
+                _log_outbound_decision(cid, wa_id, "menu" if ftype in {"buttons", "list"} else "fallback", flow_resp)
                 ok = safe_send(
                     wa_id,
                     flow_resp,
@@ -2486,6 +2589,7 @@ async def _process_webhook_payload(data: dict, cid: str):
                 )
                 if not ok and ftype in ("buttons", "list"):
                     print(f"[{cid}] WEBHOOK:mugo_flow_interactive_failed_manual_fallback wa_id={wa_id} type={ftype}")
+                    _log_outbound_decision(cid, wa_id, "fallback", _menu_fallback_text())
                     safe_send(wa_id, _menu_fallback_text(), meta={"event": "flow_menu_fallback", "cid": cid}, workspace_id=workspace_id, cid=cid)
                 if ok:
                     _remember_bot_message(wa_id, step_key, bot_text, workspace_id=workspace_id)
@@ -2498,12 +2602,15 @@ async def _process_webhook_payload(data: dict, cid: str):
                         flow_patch={"last_bot_text": _trim_text(bot_text), "last_bot_at": _now_iso()},
                         event="state_change",
                     )
+                else:
+                    _log_outbound_skipped(cid, wa_id, f"send_failed:mugo_flow:{ftype}")
                 return
 
             if ftype == "handoff":
                 print(f"[{cid}] WEBHOOK:mugo_flow_handoff wa_id={wa_id}")
                 topic = (flow_resp.get("topic") or "").strip() or "Atendimento Mugô"
                 summary = (flow_resp.get("summary") or "").strip()
+                _log_outbound_decision(cid, wa_id, "handoff", summary)
 
                 start_handoff_now(
                     wa_id=wa_id,
@@ -2522,6 +2629,7 @@ async def _process_webhook_payload(data: dict, cid: str):
         if msg_type == "interactive" and choice_id and not post_handoff_mode and not service_context:
             flow_resp2 = handle_mugo_flow(wa_id, "start", choice_id="", workspace_id=workspace_id)
             if flow_resp2:
+                _log_outbound_decision(cid, wa_id, "menu", flow_resp2)
                 ok = safe_send(wa_id, flow_resp2, meta={"event": "interactive_flow_recover", "cid": cid}, workspace_id=workspace_id, cid=cid)
                 if ok:
                     _remember_bot_message(
@@ -2538,7 +2646,10 @@ async def _process_webhook_payload(data: dict, cid: str):
                         waiting_for="customer",
                         event="state_change",
                     )
+                else:
+                    _log_outbound_skipped(cid, wa_id, "send_failed:interactive_flow_recover")
                 return
+            _log_outbound_decision(cid, wa_id, "fallback", _menu_fallback_text())
             safe_send(wa_id, _menu_fallback_text(), meta={"event": "interactive_fallback_text", "cid": cid}, workspace_id=workspace_id, cid=cid)
             return
 
@@ -2550,6 +2661,7 @@ async def _process_webhook_payload(data: dict, cid: str):
                     mark_first_message_sent(wa_id, workspace_id=workspace_id)
                 except Exception:
                     pass
+                _log_outbound_decision(cid, wa_id, "menu", flow_start)
                 ok = safe_send(wa_id, flow_start, meta={"event": "auto_flow_start", "cid": cid}, workspace_id=workspace_id, cid=cid)
                 if ok:
                     _remember_bot_message(
@@ -2566,7 +2678,12 @@ async def _process_webhook_payload(data: dict, cid: str):
                         waiting_for="customer",
                         event="state_change",
                     )
+                else:
+                    _log_outbound_skipped(cid, wa_id, "send_failed:auto_flow_start")
                 return
+            _log_outbound_decision(cid, wa_id, "fallback", _menu_fallback_text())
+            safe_send(wa_id, _menu_fallback_text(), meta={"event": "auto_flow_start_fallback", "cid": cid}, workspace_id=workspace_id, cid=cid)
+            return
 
         flow_data = _flow_data(wa_id, workspace_id=workspace_id)
         recent_messages = get_recent_messages(wa_id, limit=12, workspace_id=workspace_id) or []
@@ -2624,6 +2741,7 @@ async def _process_webhook_payload(data: dict, cid: str):
         reply_text = (result.get("reply") or "").strip() or "Em uma frase: qual é o foco agora?"
 
         print(f"[{cid}] WEBHOOK:send_ai_reply wa_id={wa_id} reply_len={len(reply_text)}")
+        _log_outbound_decision(cid, wa_id, "ai", reply_text)
         ai_sent = safe_send(wa_id, reply_text, meta={"src": "ai", "cid": cid, "message_id": message_id}, workspace_id=workspace_id, cid=cid)
         if ai_sent:
             _remember_bot_message(wa_id, "ai_reply", reply_text, workspace_id=workspace_id)
@@ -2640,6 +2758,8 @@ async def _process_webhook_payload(data: dict, cid: str):
                 },
                 event="state_change",
             )
+        else:
+            _log_outbound_skipped(cid, wa_id, "send_failed:ai_reply")
 
         if _should_trigger_internal_briefing(result):
             print(

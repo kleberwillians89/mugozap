@@ -55,13 +55,18 @@ def pipeline_step(
         state_after = sales_brain.merge_state(state_after, signals)
 
     next_q = sales_brain.get_next_question(state_after)
-    reply = forced_reply or next_q["question"]
+    reply = forced_reply or sales_brain.build_contextual_reply(state_before, state_after, signals, next_q)
     validation = sales_brain.validate_final_reply(reply, state_after)
     if validation.get("blocked"):
-        reply = validation["reply"]
+        replacement = {
+            "category": validation.get("category") or next_q.get("category"),
+            "question": validation.get("question") or validation.get("reply") or next_q.get("question"),
+            "next_action": validation.get("next_action") or next_q.get("next_action"),
+        }
+        reply = sales_brain.build_contextual_reply(state_before, state_after, signals, replacement) or validation["reply"]
         next_q = {
             "category": validation.get("category") or next_q.get("category"),
-            "question": validation.get("question") or reply,
+            "question": validation.get("question") or next_q.get("question") or reply,
             "next_action": validation.get("next_action") or next_q.get("next_action"),
         }
 
@@ -81,6 +86,8 @@ def pipeline_step(
         "state_before": state_before,
         "state_after": sales_brain.flatten_state(state_after),
         "next_question": next_q,
+        "blocked_reason": validation.get("reason") or "",
+        "used_openai": False,
     }
 
 
@@ -214,6 +221,43 @@ def test_ai_context():
     assert_equal("current_problem", flat["current_problem"], "atendimento e redes sociais")
 
 
+def test_pipeline_ai_full_flow():
+    state = pipeline_step(
+        sales_brain.default_lead_state(),
+        list_title="IA no negócio",
+        list_description="Agentes, processos e escala",
+    )["state_after"]
+    assert_equal("service_interest", state["service_interest"], "inteligencia_artificial")
+
+    step2 = pipeline_step(state, message="atendimento")
+    state = step2["state_after"]
+    assert_equal("main_goal", state["main_goal"], "atendimento")
+    assert_equal("current_problem", state["current_problem"], "atendimento")
+    assert_equal("next category", step2["next_question"]["category"], "lead_source")
+    assert_true("microconfirmation atendimento", step2["reply"].startswith("Perfeito. Então faz sentido pensar em IA"))
+
+    step3 = pipeline_step(state, message="whatsapp")
+    state = step3["state_after"]
+    assert_equal("lead_source", state["lead_source"], "WhatsApp")
+    assert_equal("next category", step3["next_question"]["category"], "current_tools")
+    assert_true("did not repeat lead source", "Hoje os contatos chegam mais" not in step3["reply"])
+    assert_true("microconfirmation whatsapp", step3["reply"].startswith("Boa. Então o WhatsApp é o principal canal."))
+
+    step4 = pipeline_step(state, message="manualmente")
+    state = step4["state_after"]
+    assert_equal("current_tools", state["current_tools"], "manual")
+    assert_equal("next category", step4["next_question"]["category"], "urgency")
+    assert_true("microconfirmation manual", step4["reply"].startswith("Entendi. Aí a automação pode ajudar"))
+
+    step5 = pipeline_step(state, message="essa semana")
+    state = step5["state_after"]
+    if sales_brain.should_offer_meeting(state):
+        state = sales_brain.merge_state(state, {"meeting_suggested": True, "briefing_ready": True})
+    assert_equal("urgency", state["urgency"], "alta")
+    assert_equal("meeting_suggested", state["meeting_suggested"], True)
+    assert_equal("briefing_ready", state["briefing_ready"], True)
+
+
 def test_traffic():
     state = state_with_choice("service_traffic")
     state = sales_brain.merge_state(state, {"last_question_category": "current_status"})
@@ -275,7 +319,7 @@ def test_persisted_pipeline_site_state_between_messages():
     assert_equal("signal site_scope", second["extracted_signals"]["site_scope"], "melhorar existente")
     assert_equal("state site_scope", second["state_after"]["site_scope"], "melhorar existente")
     assert_equal("next category", second["next_question"]["category"], "main_goal")
-    assert_equal("reply", second["reply"], "O foco dessa página é gerar leads, vender mais ou apresentar melhor a marca?")
+    assert_equal("reply", second["reply"], "Perfeito. Então estamos falando de melhorar uma página que já existe. O foco dessa página é gerar leads, vender mais ou apresentar melhor a marca?")
 
 
 def test_human():
@@ -294,6 +338,24 @@ def test_anti_loop():
     assert_equal("blocked", result["blocked"], True)
     assert_equal("reason", result["reason"], "forbidden_generic_reply")
     assert_equal("replacement category", result["category"], "site_scope")
+
+
+def test_known_lead_source_blocks_repeat():
+    state = state_with_choice("service_ai")
+    state = sales_brain.merge_state(
+        state,
+        {
+            "main_goal": "atendimento",
+            "current_problem": "atendimento",
+            "lead_source": "WhatsApp",
+            "last_question_asked": "Hoje esses contatos chegam mais pelo WhatsApp, Instagram ou site?",
+            "last_question_category": "lead_source",
+        },
+    )
+    result = sales_brain.validate_final_reply("Hoje os contatos chegam mais pelo WhatsApp, Instagram ou site?", state)
+    assert_equal("blocked", result["blocked"], True)
+    assert_true("reason", result["reason"] in {"duplicate_last_question", "known_lead_source"})
+    assert_equal("replacement category", result["category"], "current_tools")
 
 
 def test_pipeline_anti_loop():
@@ -320,12 +382,14 @@ def main():
         ("automation_leads", test_automation_leads),
         ("manual", test_manual),
         ("ai_context", test_ai_context),
+        ("pipeline_ai_full_flow", test_pipeline_ai_full_flow),
         ("traffic", test_traffic),
         ("pipeline_traffic_zero", test_pipeline_traffic_zero),
         ("pipeline_site_melhorar", test_pipeline_site_melhorar),
         ("persisted_pipeline_site_state_between_messages", test_persisted_pipeline_site_state_between_messages),
         ("human", test_human),
         ("anti_loop", test_anti_loop),
+        ("known_lead_source_blocks_repeat", test_known_lead_source_blocks_repeat),
         ("pipeline_anti_loop", test_pipeline_anti_loop),
     ]
     for name, fn in tests:

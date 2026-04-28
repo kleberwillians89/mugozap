@@ -1261,6 +1261,7 @@ async def process_inbound_sales_message(
         next_question = sales_brain.get_next_question(state_after)
         reply = (next_question.get("question") or "").strip()
         validation = sales_brain.validate_final_reply(reply, state_after)
+        blocked_reason = validation.get("reason") or ""
         if validation.get("blocked"):
             reply = validation.get("reply") or reply
             next_question = {
@@ -1315,6 +1316,8 @@ async def process_inbound_sales_message(
             "state_after": sales_brain.flatten_state(saved_state),
             "next_question": next_question,
             "result": result,
+            "used_openai": False,
+            "blocked_reason": blocked_reason,
         }
 
     extracted_signals = sales_brain.extract_signal_from_message(user_text, state_before)
@@ -1336,16 +1339,24 @@ async def process_inbound_sales_message(
         )
 
     next_question = sales_brain.get_next_question(state_after)
-    reply = (next_question.get("question") or "").strip()
+    reply = sales_brain.build_contextual_reply(state_before, state_after, extracted_signals, next_question).strip()
     if state_after.get("handoff"):
         reply = "Claro. Vou te encaminhar para a Julia com um resumo do que você precisa."
     validation = sales_brain.validate_final_reply(reply, state_after)
+    blocked_reason = validation.get("reason") or ""
     print(f"SALES_REPLY_BEFORE_VALIDATION cid={cid} wa_id={wa_id} reply={reply[:240]!r}")
     if validation.get("blocked"):
-        reply = validation.get("reply") or reply
+        replacement_next = {
+            "category": validation.get("category") or next_question.get("category"),
+            "question": validation.get("question") or validation.get("reply") or next_question.get("question"),
+            "next_action": validation.get("next_action") or next_question.get("next_action"),
+        }
+        reply = sales_brain.build_contextual_reply(state_before, state_after, extracted_signals, replacement_next).strip()
+        if not reply:
+            reply = validation.get("reply") or next_question.get("question") or ""
         next_question = {
             "category": validation.get("category") or next_question.get("category"),
-            "question": validation.get("question") or reply,
+            "question": validation.get("question") or next_question.get("question") or reply,
             "next_action": validation.get("next_action") or next_question.get("next_action"),
         }
 
@@ -1394,6 +1405,8 @@ async def process_inbound_sales_message(
         "state_after": sales_brain.flatten_state(saved_state),
         "next_question": next_question,
         "result": result,
+        "used_openai": False,
+        "blocked_reason": blocked_reason,
     }
 
 
@@ -2199,6 +2212,8 @@ async def api_debug_simulate_incoming(
         "state_before": pipeline.get("state_before") or {},
         "state_after": pipeline.get("state_after") or {},
         "next_question": pipeline.get("next_question") or {},
+        "used_openai": bool(pipeline.get("used_openai")),
+        "blocked_reason": pipeline.get("blocked_reason") or "",
         "result": result,
     }
 

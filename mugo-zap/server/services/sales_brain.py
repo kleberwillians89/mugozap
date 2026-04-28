@@ -449,7 +449,7 @@ def extract_signal_from_message(text: str, current_state: Dict[str, Any]) -> Dic
         if _has_any(norm, ["redes sociais", "rede social", "conteudo"]):
             updates["main_goal"] = "atendimento/conteúdo"
         elif "atendimento" in norm:
-            updates["main_goal"] = "atendimento/processos internos"
+            updates["main_goal"] = "atendimento"
         updates["funnel_stage"] = "qualificacao"
         print(f"SALES_BRAIN_CONTEXT_SIGNAL category={last_category} field=current_problem text={text[:160]!r}")
     elif _has_any(norm, ["vendas", "vender", "vender mais", "mais clientes", "leads", "gerar leads", "converter mais"]):
@@ -467,15 +467,20 @@ def extract_signal_from_message(text: str, current_state: Dict[str, Any]) -> Dic
         updates["funnel_stage"] = "qualificacao"
 
     source = state.get("lead_source") or ""
+    source_changed = False
     if "instagram" in norm or "insta" in norm:
         source = _append_source(source, "Instagram")
+        source_changed = True
     if "whatsapp" in norm or "whats" in norm or "zap" in norm:
         source = _append_source(source, "WhatsApp")
+        source_changed = True
     if "site" in norm and (last_category == "lead_source" or source):
         source = _append_source(source, "Site")
+        source_changed = True
     if "indicacao" in norm:
         source = _append_source(source, "Indicação")
-    if source:
+        source_changed = True
+    if source and source_changed:
         updates["lead_source"] = source
         if last_category == "lead_source":
             print(f"SALES_BRAIN_CONTEXT_SIGNAL category=lead_source field=lead_source value={source!r} text={text[:160]!r}")
@@ -599,7 +604,7 @@ def question_category(text: str) -> str:
         return "site_scope"
     if "vendas/leads" in norm or "vender mais" in norm or "gerar leads" in norm or "foco e gerar" in norm:
         return "main_goal"
-    if "whatsapp" in norm and ("instagram" in norm or "site" in norm or "canal" in norm):
+    if "whatsapp" in norm and ("chegam" in norm or "chega" in norm or "por onde" in norm or ("instagram" in norm and "site" in norm)):
         return "lead_source"
     if "manual" in norm or "ferramenta" in norm or "crm" in norm or "ja anunciam" in norm:
         return "current_tools" if "anunciam" not in norm else "current_status"
@@ -646,6 +651,12 @@ def _category_answered(state: Dict[str, Any], category: str) -> bool:
         return bool(state.get("current_tools"))
     if category == "current_status":
         return bool(state.get("current_status") or state.get("current_tools"))
+    if category == "lead_source":
+        return bool(state.get("lead_source"))
+    if category == "site_scope":
+        return bool(state.get("site_scope"))
+    if category == "main_goal":
+        return bool(state.get("main_goal"))
     if category == "offer_meeting":
         return False
     return bool(state.get(category))
@@ -676,6 +687,54 @@ def validate_reply(reply: str, state: Dict[str, Any]) -> Dict[str, Any]:
 
 def validate_final_reply(reply: str, state: Dict[str, Any]) -> Dict[str, Any]:
     return validate_reply(reply, state)
+
+
+def build_contextual_reply(
+    state_before: Dict[str, Any],
+    state_after: Dict[str, Any],
+    extracted_signals: Dict[str, Any],
+    next_question: Dict[str, Any],
+) -> str:
+    before = flatten_state(state_before or {})
+    after = flatten_state(state_after or {})
+    signals = extracted_signals or {}
+    question = (next_question or {}).get("question") or ""
+    confirmation = ""
+
+    lead_source = signals.get("lead_source")
+    if lead_source:
+        if normalize_text(str(lead_source)) == "whatsapp":
+            confirmation = "Boa. Então o WhatsApp é o principal canal."
+        else:
+            confirmation = f"Boa. Então os contatos chegam principalmente por {lead_source}."
+    elif signals.get("current_tools") == "manual":
+        confirmation = "Entendi. Aí a automação pode ajudar bastante a organizar e acelerar o retorno."
+    elif signals.get("site_scope") == "melhorar existente":
+        confirmation = "Perfeito. Então estamos falando de melhorar uma página que já existe."
+    elif signals.get("site_scope") == "criar do zero":
+        confirmation = "Perfeito. Então estamos falando de criar uma página nova do zero."
+    elif signals.get("current_status") == "começar do zero":
+        confirmation = "Perfeito. Então a ideia é começar a mídia paga do jeito certo."
+    elif signals.get("current_status") == "já anuncia":
+        confirmation = "Boa. Então vocês já têm alguma experiência com anúncios."
+    elif signals.get("urgency") == "alta":
+        confirmation = "Perfeito, então faz sentido acelerar."
+    elif signals.get("main_goal") == "vendas/leads":
+        confirmation = "Perfeito, então o foco é gerar mais oportunidades."
+    elif signals.get("main_goal") == "atendimento" or normalize_text(str(signals.get("current_problem") or "")) == "atendimento":
+        confirmation = "Perfeito. Então faz sentido pensar em IA para acelerar o atendimento e não deixar lead esfriar."
+    elif signals.get("main_goal"):
+        confirmation = "Perfeito, entendi o foco."
+    elif signals.get("current_problem") and after.get("service_interest") == "inteligencia_artificial":
+        confirmation = "Perfeito. Esse é um bom ponto para a IA ajudar."
+
+    if not confirmation:
+        return question
+    if not question:
+        return confirmation
+    if normalize_text(confirmation) in normalize_text(question):
+        return question
+    return f"{confirmation} {question}".strip()
 
 
 def should_handoff(state: Dict[str, Any], message: str) -> bool:

@@ -68,6 +68,9 @@ SUPABASE_TABLE_FLOW_STATE = (
 ).strip()
 
 HUMAN_NUMBER = (os.getenv("HUMAN_NUMBER") or "5511973510549").strip()
+JULIA_DIRECT_LINK = f"https://wa.me/{HUMAN_NUMBER}"
+JULIA_HANDOFF_REPLY = "Perfeito, entendi a urgência. Já tenho contexto suficiente e vou encaminhar para a Julia agilizar o próximo passo com você."
+JULIA_LINK_REPLY = f"Claro. A Julia já recebeu seu contexto e também pode falar com você por aqui. Se preferir chamar direto: {JULIA_DIRECT_LINK}"
 DEBUG_WEBHOOK = (os.getenv("DEBUG_WEBHOOK") or "").strip().lower() in ("1", "true", "yes")
 
 WA_USERS_TABLE = SUPABASE_TABLE_USERS
@@ -350,6 +353,15 @@ def _is_back_trigger(lower: str) -> bool:
 
 def _is_post_handoff_mode(ai_state: dict) -> bool:
     return bool((ai_state or {}).get("handoff_done"))
+
+
+def _post_handoff_utility_reply(user_text: str) -> str:
+    norm = sales_brain.normalize_text(user_text)
+    if not norm or norm == "?":
+        return JULIA_LINK_REPLY
+    if any(term in norm for term in ["julia", "link", "contato", "telefone", "humano", "atendente", "falar com alguem", "falar com a equipe", "whatsapp dela", "zap dela"]):
+        return JULIA_LINK_REPLY
+    return ""
 
 
 def _flow_data(wa_id: str, workspace_id: str = "") -> Dict[str, Any]:
@@ -858,6 +870,8 @@ def _sanitize_ai_lead_fields(
 
     for key in list(fields.keys()):
         value = fields.get(key)
+        if key == "intent":
+            continue
         if key in signals:
             continue
         if key in protected_fields and before.get(key) not in (None, "", [], {}) and value not in (None, "", [], {}, before.get(key)):
@@ -892,6 +906,16 @@ def _sanitize_ai_lead_fields(
                     f"field={key} incoming={fields.get(key)!r} category={last_category} reason=post_qualification"
                 )
                 fields.pop(key, None)
+
+    locked_service = before.get("service_interest") or before.get("selected_service") or ""
+    expected_intent = sales_brain.INTENT_BY_SERVICE.get(locked_service)
+    incoming_intent = fields.get("intent")
+    if locked_service and expected_intent and incoming_intent and incoming_intent != expected_intent and not sales_brain.detect_explicit_service_switch(user_text):
+        print(
+            "AI_FIELD_CONTEXT_BLOCKED "
+            f"field=intent incoming={incoming_intent!r} expected={expected_intent!r} service={locked_service!r}"
+        )
+        fields["intent"] = expected_intent
 
     return fields
 
@@ -1467,6 +1491,14 @@ async def process_inbound_sales_message(
     )
     state_after = sales_brain.merge_state(state_after, ai_fields)
     state_after = sales_brain.merge_state(state_after, extracted_signals)
+    locked_service = state_after.get("service_interest") or state_after.get("selected_service") or ""
+    expected_intent = sales_brain.INTENT_BY_SERVICE.get(locked_service)
+    if locked_service and expected_intent and state_after.get("intent") != expected_intent and not sales_brain.detect_explicit_service_switch(user_text):
+        print(
+            "AI_INTENT_LOCKED "
+            f"service={locked_service} previous={state_after.get('intent')!r} expected={expected_intent!r}"
+        )
+        state_after = sales_brain.merge_state(state_after, {"intent": expected_intent})
     if (
         ai_result.get("handoff")
         or ai_result.get("next_action") == "handoff"
@@ -1486,7 +1518,7 @@ async def process_inbound_sales_message(
         )
     next_question = sales_brain.get_next_question(state_after)
     if state_after.get("handoff"):
-        reply = "Perfeito, vou encaminhar seu contexto para a Julia e ela continua com você por aqui."
+        reply = JULIA_HANDOFF_REPLY if state_after.get("urgency") == "alta" else "Perfeito, vou encaminhar seu contexto para a Julia e ela continua com você por aqui."
     else:
         reply = ((None if ai_result.get("fallback") else ai_result.get("reply")) or deterministic_reply or next_question.get("question") or "").strip()
 
@@ -1547,14 +1579,29 @@ async def process_inbound_sales_message(
     result["lead_fields"] = _merge_lead_fields(result.get("lead_fields"), {k: v for k, v in sales_brain.flatten_state(state_after).items() if k in sales_brain.FIELD_KEYS})
     result["briefing"] = _merge_briefing(ai_result.get("briefing"), result.get("briefing"))
     if state_after.get("handoff"):
-        result["reply"] = "Perfeito, vou encaminhar seu contexto para a Julia e ela continua com você por aqui."
+        result["reply"] = JULIA_HANDOFF_REPLY if state_after.get("urgency") == "alta" else "Perfeito, vou encaminhar seu contexto para a Julia e ela continua com você por aqui."
         result["handoff"] = True
         result["next_action"] = "handoff"
         result["lead_temperature"] = "hot"
         result["briefing_ready"] = True
+        result["lead_fields"] = _merge_lead_fields(
+            result.get("lead_fields"),
+            {
+                "last_question_asked": result["reply"],
+                "last_question_category": "handoff",
+                "next_best_question": result["reply"],
+                "next_action": "handoff",
+                "intent": sales_brain.INTENT_BY_SERVICE.get(state_after.get("service_interest")) or result.get("intent"),
+            },
+        )
     if ai_result.get("lead_temperature") in {"cold", "warm", "hot"} and not state_after.get("briefing_ready"):
         result["lead_temperature"] = ai_result.get("lead_temperature")
-    if ai_result.get("intent"):
+    if ai_result.get("intent") and not (
+        state_after.get("service_interest")
+        and sales_brain.INTENT_BY_SERVICE.get(state_after.get("service_interest"))
+        and ai_result.get("intent") != sales_brain.INTENT_BY_SERVICE.get(state_after.get("service_interest"))
+        and not sales_brain.detect_explicit_service_switch(user_text)
+    ):
         result["intent"] = ai_result.get("intent")
     if not state_after.get("handoff") and ai_result.get("next_action") in {"reply", "ask_question", "offer_meeting", "handoff", "create_task", "pause_bot", "follow_up"}:
         result["next_action"] = ai_result.get("next_action")
@@ -3486,6 +3533,28 @@ async def _process_webhook_payload(data: dict, cid: str):
             return
 
         if post_handoff_mode:
+            utility_reply = _post_handoff_utility_reply(user_text)
+            if utility_reply:
+                print(f"[{cid}] WEBHOOK:post_handoff_utility_reply wa_id={wa_id}")
+                _log_outbound_decision(cid, wa_id, "handoff", utility_reply)
+                safe_send(
+                    wa_id,
+                    utility_reply,
+                    meta={"event": "post_handoff_julia_link", "cid": cid},
+                    workspace_id=workspace_id,
+                    cid=cid,
+                )
+                _remember_bot_message(wa_id, "post_handoff_julia_link", utility_reply, workspace_id=workspace_id)
+                _apply_operational_state(
+                    wa_id,
+                    workspace_id=workspace_id,
+                    status="handoff_active",
+                    step=(flow_data.get("current_step") or "handoff_waiting"),
+                    waiting_for="human",
+                    flow_patch={"last_user_text": _trim_text(user_text), "last_user_at": _now_iso()},
+                    event="state_change",
+                )
+                return
             print(f"[{cid}] WEBHOOK:post_handoff_skip_bot wa_id={wa_id} handoff_sent_at={ai_state.get('handoff_sent_at') or '-'}")
             _log_outbound_skipped(cid, wa_id, "post_handoff_bot_paused")
             _apply_operational_state(

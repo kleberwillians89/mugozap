@@ -526,6 +526,47 @@ def test_openai_fallback_is_marked():
     assert_equal("fallback marker", result.get("fallback"), True)
 
 
+def test_deadline_urgency_triggers_handoff():
+    state = state_with_choice("service_automation")
+    state = sales_brain.merge_state(
+        state,
+        {
+            "lead_source": "WhatsApp",
+            "current_tools": "manual",
+            "current_problem": "processo manual",
+            "last_question_category": "urgency",
+        },
+    )
+    step = pipeline_step(state, message="Preciso disso rodando até dia 08/05")
+    assert_equal("urgency", step["state_after"]["urgency"], "alta")
+    assert_equal("handoff", step["state_after"]["handoff"], True)
+    assert_equal("next_action", step["state_after"]["next_action"], "handoff")
+    assert_equal("briefing_ready", step["state_after"]["briefing_ready"], True)
+
+
+def test_ai_intent_cannot_switch_locked_service():
+    from app import _sanitize_ai_lead_fields
+
+    state = state_with_choice("service_automation")
+    state = sales_brain.merge_state(state, {"last_question_category": "urgency"})
+    sanitized = _sanitize_ai_lead_fields(
+        {"intent": "inteligencia_artificial", "urgency": "alta"},
+        state_before=state,
+        extracted_signals={"urgency": "alta"},
+        user_text="Preciso disso rodando até dia 08/05",
+    )
+    assert_equal("intent locked", sanitized.get("intent"), "automacao_whatsapp")
+
+
+def test_post_handoff_julia_link_reply():
+    from app import JULIA_DIRECT_LINK, _post_handoff_utility_reply
+
+    reply = _post_handoff_utility_reply("Você vai me enviar o link para entrar em contato com Júlia?")
+    assert_true("has Julia link", JULIA_DIRECT_LINK in reply)
+    reply_question = _post_handoff_utility_reply("?")
+    assert_true("question mark gets link", JULIA_DIRECT_LINK in reply_question)
+
+
 def test_human():
     state = state_with_choice("service_human")
     flat = sales_brain.flatten_state(state)
@@ -599,6 +640,9 @@ def main():
         ("dedupe_patch_preserves_sales_state", test_dedupe_patch_preserves_sales_state),
         ("ai_fields_do_not_turn_lead_source_into_current_tools", test_ai_fields_do_not_turn_lead_source_into_current_tools),
         ("openai_fallback_is_marked", test_openai_fallback_is_marked),
+        ("deadline_urgency_triggers_handoff", test_deadline_urgency_triggers_handoff),
+        ("ai_intent_cannot_switch_locked_service", test_ai_intent_cannot_switch_locked_service),
+        ("post_handoff_julia_link_reply", test_post_handoff_julia_link_reply),
         ("human", test_human),
         ("anti_loop", test_anti_loop),
         ("known_lead_source_blocks_repeat", test_known_lead_source_blocks_repeat),

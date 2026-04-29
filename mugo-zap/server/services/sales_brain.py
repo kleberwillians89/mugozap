@@ -191,6 +191,19 @@ def _has_any(text: str, terms: List[str]) -> bool:
     return any(term in text for term in terms)
 
 
+def _has_deadline_urgency(text: str) -> bool:
+    if _has_any(text, ["essa semana", "urgente", "pra ja", "o quanto antes", "hoje", "amanha", "ate sexta", "até sexta"]):
+        return True
+    deadline_patterns = [
+        r"\bate\s+(?:dia\s+)?\d{1,2}(?:/\d{1,2})?\b",
+        r"\bpara\s+(?:dia\s+)?\d{1,2}(?:/\d{1,2})?\b",
+        r"\bpra\s+(?:dia\s+)?\d{1,2}(?:/\d{1,2})?\b",
+        r"\bdia\s+\d{1,2}\s+de\s+[a-z]+",
+        r"\brodando\s+(?:ate|para|pra)\s+(?:dia\s+)?\d{1,2}",
+    ]
+    return any(re.search(pattern, text) for pattern in deadline_patterns)
+
+
 def _match_menu_service(value: str) -> tuple[str, str]:
     norm = normalize_text(value)
     if not norm:
@@ -504,9 +517,15 @@ def extract_signal_from_message(text: str, current_state: Dict[str, Any]) -> Dic
                     print(f"SALES_BRAIN_CONTEXT_SIGNAL category=current_tools field=current_tools value={updates['current_tools']!r} text={text[:160]!r}")
                 break
 
-    if _has_any(norm, ["essa semana", "urgente", "pra ja", "o quanto antes", "hoje", "amanha"]):
+    if _has_deadline_urgency(norm):
         updates["urgency"] = "alta"
         updates["funnel_stage"] = "decisao"
+        updates["lead_temperature"] = "hot"
+        updates["meeting_suggested"] = True
+        updates["briefing_ready"] = True
+        updates["handoff"] = True
+        updates["handoff_reason"] = "urgencia_com_prazo"
+        updates["next_action"] = "handoff"
     elif _has_any(norm, ["esse mes", "este mes"]):
         updates["urgency"] = "media"
         updates["funnel_stage"] = "decisao"

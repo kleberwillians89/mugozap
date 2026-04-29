@@ -69,7 +69,17 @@ SUPABASE_TABLE_FLOW_STATE = (
 
 HUMAN_NUMBER = (os.getenv("HUMAN_NUMBER") or "5511973510549").strip()
 JULIA_DIRECT_LINK = f"https://wa.me/{HUMAN_NUMBER}"
-JULIA_HANDOFF_REPLY = f"Entendi. Já tenho contexto suficiente e vou encaminhar para a Julia.\n\nEla já recebeu o resumo por aqui. Para falar direto com ela, clique:\n{JULIA_DIRECT_LINK}"
+
+
+def build_handoff_lead_reply() -> str:
+    return (
+        "Entendi. Já tenho um bom contexto e vou encaminhar para a Julia.\n\n"
+        "Ela recebeu o resumo por aqui. Para falar direto com ela, clique:\n"
+        f"{JULIA_DIRECT_LINK}"
+    )
+
+
+JULIA_HANDOFF_REPLY = build_handoff_lead_reply()
 JULIA_LINK_REPLY = f"Claro. A Julia já recebeu seu contexto. Para falar direto com ela, clique:\n{JULIA_DIRECT_LINK}"
 DEBUG_WEBHOOK = (os.getenv("DEBUG_WEBHOOK") or "").strip().lower() in ("1", "true", "yes")
 
@@ -822,9 +832,20 @@ def _deterministic_choice_result(choice: dict, state: dict) -> dict:
         "follow_up": {"needed": False, "when": None, "message": None},
     }
     if result["handoff"]:
+        result["reply"] = build_handoff_lead_reply()
         result["briefing_ready"] = True
         result["meeting_suggested"] = True
         result["lead_temperature"] = "hot"
+        result["next_action"] = "handoff"
+        result["lead_fields"] = _merge_lead_fields(
+            result.get("lead_fields"),
+            {
+                "last_question_asked": result["reply"],
+                "last_question_category": "handoff",
+                "next_best_question": result["reply"],
+                "next_action": "handoff",
+            },
+        )
         result["briefing"] = sales_brain.build_briefing(state, [])
     return result
 
@@ -1034,7 +1055,7 @@ def _postprocess_ai_result(
         result["lead_temperature"] = "hot"
         result["meeting_suggested"] = True
         result["briefing_ready"] = True
-        result["reply"] = "Claro. Vou te encaminhar para a Julia com um resumo do que você precisa."
+        result["reply"] = build_handoff_lead_reply()
         briefing = result.get("briefing") if isinstance(result.get("briefing"), dict) else {}
         result["briefing"] = _merge_briefing(
             briefing,
@@ -1049,6 +1070,8 @@ def _postprocess_ai_result(
             },
         )
         print(f"HANDOFF_TRIGGERED cid={cid} wa_id={wa_id} reason=lead_pediu_humano")
+
+    result = _force_handoff_lead_reply(result)
 
     current_question = _extract_last_question(result.get("reply") or "")
     if current_question:
@@ -1318,6 +1341,37 @@ def _sales_pipeline_result_from_state(
     return result
 
 
+def _result_requires_handoff_link(result: dict | None) -> bool:
+    result = result or {}
+    return bool(result.get("next_action") == "handoff" or result.get("handoff") or result.get("briefing_ready"))
+
+
+def _force_handoff_lead_reply(result: dict | None) -> dict:
+    result = dict(result or {})
+    if not _result_requires_handoff_link(result):
+        return result
+    reply = result.get("reply") or ""
+    if JULIA_DIRECT_LINK not in reply:
+        result["reply"] = build_handoff_lead_reply()
+    result["handoff"] = True
+    result["next_action"] = "handoff"
+    result["briefing_ready"] = True
+    result["meeting_suggested"] = True
+    result["lead_temperature"] = "hot"
+    result["lead_fields"] = _merge_lead_fields(
+        result.get("lead_fields"),
+        {
+            "last_question_asked": result["reply"],
+            "last_question_category": "handoff",
+            "next_best_question": result["reply"],
+            "next_action": "handoff",
+            "handoff": True,
+            "briefing_ready": True,
+        },
+    )
+    return result
+
+
 async def process_inbound_sales_message(
     wa_id: str,
     text: str | None = None,
@@ -1398,6 +1452,7 @@ async def process_inbound_sales_message(
             next_question=next_question,
             intent=normalized_choice.get("intent") or "",
         )
+        result = _force_handoff_lead_reply(result)
         saved_state = await _save_ai_result_state(
             wa_id,
             ai_state=raw_state,
@@ -1444,7 +1499,7 @@ async def process_inbound_sales_message(
     next_question = sales_brain.get_next_question(state_after)
     deterministic_reply = sales_brain.build_contextual_reply(state_before, state_after, extracted_signals, next_question).strip()
     if state_after.get("handoff"):
-        deterministic_reply = "Perfeito, vou encaminhar seu contexto para a Julia e ela continua com você por aqui."
+        deterministic_reply = build_handoff_lead_reply()
 
     ai_result = {}
     used_openai = False
@@ -1518,7 +1573,7 @@ async def process_inbound_sales_message(
         )
     next_question = sales_brain.get_next_question(state_after)
     if state_after.get("handoff"):
-        reply = JULIA_HANDOFF_REPLY if state_after.get("urgency") == "alta" else "Perfeito, vou encaminhar seu contexto para a Julia e ela continua com você por aqui."
+        reply = build_handoff_lead_reply()
     else:
         reply = ((None if ai_result.get("fallback") else ai_result.get("reply")) or deterministic_reply or next_question.get("question") or "").strip()
 
@@ -1579,7 +1634,7 @@ async def process_inbound_sales_message(
     result["lead_fields"] = _merge_lead_fields(result.get("lead_fields"), {k: v for k, v in sales_brain.flatten_state(state_after).items() if k in sales_brain.FIELD_KEYS})
     result["briefing"] = _merge_briefing(ai_result.get("briefing"), result.get("briefing"))
     if state_after.get("handoff"):
-        result["reply"] = JULIA_HANDOFF_REPLY if state_after.get("urgency") == "alta" else "Perfeito, vou encaminhar seu contexto para a Julia e ela continua com você por aqui."
+        result["reply"] = build_handoff_lead_reply()
         result["handoff"] = True
         result["next_action"] = "handoff"
         result["lead_temperature"] = "hot"
@@ -1609,6 +1664,7 @@ async def process_inbound_sales_message(
         result["handoff"] = True
         result["lead_temperature"] = "hot"
         result["briefing_ready"] = True
+    result = _force_handoff_lead_reply(result)
     saved_state = await _save_ai_result_state(
         wa_id,
         ai_state=raw_state,
@@ -3140,7 +3196,7 @@ def start_handoff_now(
     if send_lead_message:
         safe_send(
             wa_id,
-            JULIA_HANDOFF_REPLY,
+            build_handoff_lead_reply(),
             meta={
                 "event": "handoff_link",
                 "cid": cid,
@@ -3159,7 +3215,7 @@ def start_handoff_now(
             "current_step": "handoff_waiting",
             "flow_step": "handoff_waiting",
             "last_bot_step": "handoff_link",
-            "last_bot_text": JULIA_HANDOFF_REPLY,
+            "last_bot_text": build_handoff_lead_reply(),
             "bot_status": "handoff_active",
             "bot_paused": True,
             "handoff_sent_at": _now_iso(),

@@ -81,6 +81,20 @@ def pipeline_step(
             )
         next_q = sales_brain.get_next_question(state_after)
 
+    if sales_brain.should_offer_meeting(state_after):
+        state_after = sales_brain.merge_state(
+            state_after,
+            {
+                "handoff": True,
+                "handoff_reason": state_after.get("handoff_reason") or "lead_qualificado_ou_urgente",
+                "lead_temperature": "hot" if state_after.get("urgency") == "alta" else "warm",
+                "meeting_suggested": True,
+                "briefing_ready": True,
+                "next_action": "handoff",
+            },
+        )
+        next_q = sales_brain.get_next_question(state_after)
+
     reply = forced_reply or (ai_result or {}).get("reply") or sales_brain.build_contextual_reply(state_before, state_after, signals, next_q)
     validation = sales_brain.validate_final_reply(reply, state_after)
     if validation.get("blocked"):
@@ -95,6 +109,28 @@ def pipeline_step(
             "question": validation.get("question") or next_q.get("question") or reply,
             "next_action": validation.get("next_action") or next_q.get("next_action"),
         }
+
+    if (
+        state_after.get("handoff")
+        or state_after.get("briefing_ready")
+        or next_q.get("next_action") == "handoff"
+        or (ai_result or {}).get("next_action") == "handoff"
+        or (ai_result or {}).get("briefing_ready")
+    ):
+        from app import build_handoff_lead_reply
+
+        reply = build_handoff_lead_reply()
+        state_after = sales_brain.merge_state(
+            state_after,
+            {
+                "handoff": True,
+                "lead_temperature": "hot",
+                "meeting_suggested": True,
+                "briefing_ready": True,
+                "next_action": "handoff",
+            },
+        )
+        next_q = {"category": "handoff", "question": reply, "next_action": "handoff"}
 
     state_after = sales_brain.merge_state(
         state_after,
@@ -596,6 +632,60 @@ def test_handoff_reply_includes_julia_link():
     assert_true("handoff has link", JULIA_DIRECT_LINK in JULIA_HANDOFF_REPLY)
 
 
+def test_traffic_budget_handoff_reply_has_julia_link():
+    from app import JULIA_DIRECT_LINK
+
+    state = state_with_choice("service_traffic")
+    state = sales_brain.merge_state(
+        state,
+        {
+            "current_status": "já anuncia",
+            "main_goal": "vendas/leads",
+            "last_question_category": "budget_signal",
+        },
+    )
+    step = pipeline_step(state, message="tenho verba")
+    assert_equal("budget_signal", step["state_after"]["budget_signal"], "tem verba")
+    assert_equal("handoff", step["state_after"]["handoff"], True)
+    assert_true("reply has Julia link", JULIA_DIRECT_LINK in step["reply"])
+
+
+def test_site_urgency_handoff_reply_has_julia_link():
+    from app import JULIA_DIRECT_LINK
+
+    state = state_with_choice("service_site")
+    state = sales_brain.merge_state(
+        state,
+        {
+            "site_scope": "melhorar existente",
+            "main_goal": "vendas/leads",
+            "last_question_category": "urgency",
+        },
+    )
+    step = pipeline_step(state, message="essa semana")
+    assert_equal("urgency", step["state_after"]["urgency"], "alta")
+    assert_equal("handoff", step["state_after"]["handoff"], True)
+    assert_true("reply has Julia link", JULIA_DIRECT_LINK in step["reply"])
+
+
+def test_any_handoff_reply_without_link_is_corrected():
+    from app import JULIA_DIRECT_LINK
+
+    state = state_with_choice("service_automation")
+    step = pipeline_step(
+        state,
+        message="quero falar com humano",
+        ai_result={
+            "reply": "Vou encaminhar para a Julia agora.",
+            "next_action": "handoff",
+            "handoff": True,
+            "briefing_ready": True,
+        },
+    )
+    assert_equal("handoff", step["state_after"]["handoff"], True)
+    assert_true("reply has Julia link", JULIA_DIRECT_LINK in step["reply"])
+
+
 def test_no_three_perfeito_replies_in_flow():
     state = pipeline_step(sales_brain.default_lead_state(), list_id="service_site")["state_after"]
     replies = []
@@ -686,6 +776,9 @@ def main():
         ("site_scope_not_overwritten_without_explicit_change", test_site_scope_not_overwritten_without_explicit_change),
         ("explicit_site_scope_change_allowed", test_explicit_site_scope_change_allowed),
         ("handoff_reply_includes_julia_link", test_handoff_reply_includes_julia_link),
+        ("traffic_budget_handoff_reply_has_julia_link", test_traffic_budget_handoff_reply_has_julia_link),
+        ("site_urgency_handoff_reply_has_julia_link", test_site_urgency_handoff_reply_has_julia_link),
+        ("any_handoff_reply_without_link_is_corrected", test_any_handoff_reply_without_link_is_corrected),
         ("no_three_perfeito_replies_in_flow", test_no_three_perfeito_replies_in_flow),
         ("human", test_human),
         ("anti_loop", test_anti_loop),

@@ -124,6 +124,16 @@ def persisted_pipeline_step(store: dict, wa_id: str, **kwargs) -> dict:
     return result
 
 
+def dedupe_patch_state(existing_state: dict, message_id: str) -> dict:
+    return sales_brain.merge_state(
+        existing_state,
+        {
+            "last_in_msg_id": message_id,
+            "last_in_at": "2026-04-29T19:42:39+00:00",
+        },
+    )
+
+
 def apply_message(state: dict, message: str) -> dict:
     updates = sales_brain.extract_signal_from_message(message, state)
     state = sales_brain.merge_state(state, updates)
@@ -467,6 +477,25 @@ def test_persisted_pipeline_site_state_between_messages():
     assert_equal("reply", second["reply"], "Perfeito. Então estamos falando de melhorar uma página que já existe. O foco dessa página é gerar leads, vender mais ou apresentar melhor a marca?")
 
 
+def test_dedupe_patch_preserves_sales_state():
+    store = {}
+    wa_id = "5511972769605"
+    first = persisted_pipeline_step(
+        store,
+        wa_id,
+        list_id="service_automation",
+        list_title="Automatizar WhatsApp",
+        list_description="Atendimento, leads e CRM",
+    )
+    store[wa_id] = dedupe_patch_state(first["state_after"], "wamid.test.1")
+    second = persisted_pipeline_step(store, wa_id, message="WhatsApp")
+    assert_equal("loaded service after dedupe", second["state_before"]["service_interest"], "automacao_whatsapp")
+    assert_equal("loaded category after dedupe", second["state_before"]["last_question_category"], "lead_source")
+    assert_equal("whatsapp is contextual", second["normalized_choice"]["is_menu_choice"], False)
+    assert_equal("lead_source", second["state_after"]["lead_source"], "WhatsApp")
+    assert_equal("next category", second["next_question"]["category"], "current_tools")
+
+
 def test_human():
     state = state_with_choice("service_human")
     flat = sales_brain.flatten_state(state)
@@ -537,6 +566,7 @@ def main():
         ("pipeline_traffic_zero", test_pipeline_traffic_zero),
         ("pipeline_site_melhorar", test_pipeline_site_melhorar),
         ("persisted_pipeline_site_state_between_messages", test_persisted_pipeline_site_state_between_messages),
+        ("dedupe_patch_preserves_sales_state", test_dedupe_patch_preserves_sales_state),
         ("human", test_human),
         ("anti_loop", test_anti_loop),
         ("known_lead_source_blocks_repeat", test_known_lead_source_blocks_repeat),

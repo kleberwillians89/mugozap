@@ -1726,12 +1726,12 @@ def _enrich_conversation_items(items: List[dict]) -> List[dict]:
     return [_enrich_conversation_item(item) for item in (items or [])]
 
 
-async def _dedupe_incoming(wa_id: str, message_id: str, cid: str) -> bool:
+async def _dedupe_incoming(wa_id: str, message_id: str, cid: str, workspace_id: str = "") -> bool:
     if not wa_id or not message_id:
         return False
 
     try:
-        ai_state = await get_ai_state(wa_id) or {}
+        ai_state = await get_ai_state(wa_id, workspace_id=workspace_id) or {}
         last_id = (ai_state.get("last_in_msg_id") or "").strip()
         if last_id and last_id == message_id:
             if DEBUG_WEBHOOK:
@@ -1740,7 +1740,12 @@ async def _dedupe_incoming(wa_id: str, message_id: str, cid: str) -> bool:
 
         await upsert_ai_state(
             wa_id,
-            {"last_in_msg_id": message_id, "last_in_at": datetime.now(timezone.utc).isoformat()},
+            {
+                **ai_state,
+                "last_in_msg_id": message_id,
+                "last_in_at": datetime.now(timezone.utc).isoformat(),
+            },
+            workspace_id=workspace_id,
         )
         return False
     except Exception as e:
@@ -3096,7 +3101,7 @@ async def _process_webhook_payload(data: dict, cid: str):
 
         message_id = (msg.get("id") or "").strip()
 
-        if await _dedupe_incoming(wa_id, message_id, cid):
+        if await _dedupe_incoming(wa_id, message_id, cid, workspace_id=workspace_id):
             _log_outbound_skipped(cid, wa_id, "duplicate_inbound_message")
             return
 

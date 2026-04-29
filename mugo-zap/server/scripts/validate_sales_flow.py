@@ -196,6 +196,34 @@ def test_pipeline_automation_contextual_answers():
     assert_equal("next category", step3["next_question"]["category"], "urgency")
 
 
+def test_real_meta_list_reply_automation_payload():
+    meta_payload = {
+        "type": "list_reply",
+        "list_reply": {
+            "id": "service_automation",
+            "title": "Automatizar WhatsApp",
+            "description": "Atendimento, leads e CRM",
+        },
+    }
+    list_reply = meta_payload["list_reply"]
+    step1 = pipeline_step(
+        sales_brain.default_lead_state(),
+        list_id=list_reply["id"],
+        list_title=list_reply["title"],
+        list_description=list_reply["description"],
+    )
+    state = step1["state_after"]
+    assert_equal("choice_id", step1["normalized_choice"]["choice_id"], "service_automation")
+    assert_equal("service_interest", state["service_interest"], "automacao_whatsapp")
+    assert_equal("reply", step1["reply"], "Hoje os contatos chegam mais pelo WhatsApp, Instagram ou site?")
+
+    step2 = pipeline_step(state, message="WhatsApp")
+    state = step2["state_after"]
+    assert_equal("lead_source", state["lead_source"], "WhatsApp")
+    assert_true("reply asks tools", "Hoje vocês atendem tudo manualmente ou já usam alguma ferramenta/CRM?" in step2["reply"])
+    assert_true("did not repeat source", "Hoje os contatos chegam mais pelo WhatsApp, Instagram ou site?" not in step2["reply"])
+
+
 def test_automation_leads():
     state = state_with_choice("service_automation")
     state = sales_brain.merge_state(state, {"last_question_category": "lead_source"})
@@ -379,6 +407,7 @@ def main():
         ("text_site_with_state_is_not_menu", test_text_site_with_state_is_not_menu),
         ("automation_choice", test_automation_choice),
         ("pipeline_automation_contextual_answers", test_pipeline_automation_contextual_answers),
+        ("real_meta_list_reply_automation_payload", test_real_meta_list_reply_automation_payload),
         ("automation_leads", test_automation_leads),
         ("manual", test_manual),
         ("ai_context", test_ai_context),

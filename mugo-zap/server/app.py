@@ -3323,152 +3323,6 @@ async def _process_webhook_payload(data: dict, cid: str):
             )
             return
 
-        flow_resp = None
-        service_context = {}
-
-        selected_choice = normalized_choice.get("choice_id") if normalized_choice.get("is_menu_choice") else ""
-        if selected_choice:
-            print(f"[{cid}] WEBHOOK:service_choice_to_ai wa_id={wa_id} choice_id={selected_choice}")
-            service_context = apply_service_choice(wa_id, selected_choice, workspace_id=workspace_id)
-            try:
-                mark_first_message_sent(wa_id, workspace_id=workspace_id)
-            except Exception:
-                pass
-            pipeline = await process_inbound_sales_message(
-                wa_id=wa_id,
-                text=user_text,
-                button_id=choice_id if button_title else "",
-                button_title=button_title,
-                list_id=list_id,
-                list_title=list_title,
-                list_description=list_description,
-                source="webhook",
-                workspace_id=workspace_id,
-                cid=cid,
-            )
-            result = pipeline.get("result") or {}
-            reply_text = (pipeline.get("reply") or result.get("reply") or "").strip()
-            _log_outbound_decision(cid, wa_id, "handoff" if result.get("handoff") else "menu", reply_text)
-            ok = safe_send(
-                wa_id,
-                reply_text,
-                meta={"event": "sales_pipeline_menu_choice", "cid": cid, "normalized_choice": pipeline.get("normalized_choice") or normalized_choice},
-                workspace_id=workspace_id,
-                cid=cid,
-            )
-            if ok:
-                _remember_bot_message(wa_id, result.get("lead_fields", {}).get("last_question_category") or "menu_choice", reply_text, workspace_id=workspace_id)
-                await _handle_ai_operational_decision(
-                    wa_id=wa_id,
-                    cid=cid,
-                    result=result,
-                    user_text=user_text,
-                    user=user,
-                    workspace_id=workspace_id,
-                )
-            else:
-                _log_outbound_skipped(cid, wa_id, "send_failed:deterministic_menu_choice")
-            return
-        elif choice_id and not post_handoff_mode:
-            print(f"[{cid}] WEBHOOK:enter_mugo_flow wa_id={wa_id} choice_id={choice_id}")
-            flow_resp = handle_mugo_flow(wa_id, choice_id, choice_id=choice_id, workspace_id=workspace_id)
-
-        if flow_resp:
-            ftype = (flow_resp.get("type") or "").lower().strip()
-            print(f"[{cid}] WEBHOOK:mugo_flow_response wa_id={wa_id} type={ftype} step={flow_resp.get('step_key') or '-'}")
-
-            if ftype == "ai_context":
-                service_context = flow_resp.get("service_context") or {}
-
-            if ftype in ("buttons", "text", "list"):
-                step_key = (flow_resp.get("step_key") or "").strip()
-                bot_text = _extract_log_text(flow_resp)
-
-                if _should_skip_duplicate_bot_message(wa_id, step_key, bot_text, workspace_id=workspace_id):
-                    print(f"[{cid}] DUPLICATE FLOW MESSAGE SKIPPED -> {wa_id} / {step_key}")
-                    _log_outbound_skipped(cid, wa_id, f"duplicate_flow_message:{step_key}")
-                    return
-
-                if not bool(user.get("first_message_sent")):
-                    try:
-                        mark_first_message_sent(wa_id, workspace_id=workspace_id)
-                    except Exception:
-                        pass
-
-                _log_outbound_decision(cid, wa_id, "menu" if ftype in {"buttons", "list"} else "fallback", flow_resp)
-                ok = safe_send(
-                    wa_id,
-                    flow_resp,
-                    meta={"src": "mugo_flow", "cid": cid, "choice_id": choice_id, "message_id": message_id},
-                    workspace_id=workspace_id,
-                    cid=cid,
-                )
-                if not ok and ftype in ("buttons", "list"):
-                    print(f"[{cid}] WEBHOOK:mugo_flow_interactive_failed_manual_fallback wa_id={wa_id} type={ftype}")
-                    _log_outbound_decision(cid, wa_id, "fallback", _menu_fallback_text())
-                    safe_send(wa_id, _menu_fallback_text(), meta={"event": "flow_menu_fallback", "cid": cid}, workspace_id=workspace_id, cid=cid)
-                if ok:
-                    _remember_bot_message(wa_id, step_key, bot_text, workspace_id=workspace_id)
-                    _apply_operational_state(
-                        wa_id,
-                        workspace_id=workspace_id,
-                        status="bot_active",
-                        step=step_key,
-                        waiting_for="customer",
-                        flow_patch={"last_bot_text": _trim_text(bot_text), "last_bot_at": _now_iso()},
-                        event="state_change",
-                    )
-                else:
-                    _log_outbound_skipped(cid, wa_id, f"send_failed:mugo_flow:{ftype}")
-                return
-
-            if ftype == "handoff":
-                print(f"[{cid}] WEBHOOK:mugo_flow_handoff wa_id={wa_id}")
-                topic = (flow_resp.get("topic") or "").strip() or "Atendimento Mugô"
-                summary = (flow_resp.get("summary") or "").strip()
-                _log_outbound_decision(cid, wa_id, "handoff", summary)
-
-                start_handoff_now(
-                    wa_id=wa_id,
-                    cid=cid,
-                    reason="flow_completed",
-                    topic=topic,
-                    summary=summary,
-                    last_text=user_text,
-                    user=user,
-                    workspace_id=workspace_id,
-                )
-
-                await mark_handoff_done(wa_id, topic=topic, summary=summary, workspace_id=workspace_id)
-                return
-
-        if msg_type == "interactive" and choice_id and not post_handoff_mode and not service_context:
-            flow_resp2 = handle_mugo_flow(wa_id, "start", choice_id="", workspace_id=workspace_id)
-            if flow_resp2:
-                _log_outbound_decision(cid, wa_id, "menu", flow_resp2)
-                ok = safe_send(wa_id, flow_resp2, meta={"event": "interactive_flow_recover", "cid": cid}, workspace_id=workspace_id, cid=cid)
-                if ok:
-                    _remember_bot_message(
-                        wa_id,
-                        (flow_resp2.get("step_key") or "").strip(),
-                        _extract_log_text(flow_resp2),
-                        workspace_id=workspace_id,
-                    )
-                    _apply_operational_state(
-                        wa_id,
-                        workspace_id=workspace_id,
-                        status="bot_active",
-                        step=(flow_resp2.get("step_key") or "").strip(),
-                        waiting_for="customer",
-                        event="state_change",
-                    )
-                else:
-                    _log_outbound_skipped(cid, wa_id, "send_failed:interactive_flow_recover")
-                return
-            _log_outbound_decision(cid, wa_id, "fallback", _menu_fallback_text())
-            safe_send(wa_id, _menu_fallback_text(), meta={"event": "interactive_fallback_text", "cid": cid}, workspace_id=workspace_id, cid=cid)
-            return
-
         if not bool(user.get("first_message_sent")) and not post_handoff_mode and not choice_id and lower in {"oi", "oie", "olá", "ola", "opa", "start", "menu", "quero saber mais"}:
             print(f"[{cid}] WEBHOOK:first_interaction_menu wa_id={wa_id} text={lower!r}")
             flow_start = handle_mugo_flow(wa_id, "start", choice_id="", workspace_id=workspace_id)
@@ -3515,24 +3369,20 @@ async def _process_webhook_payload(data: dict, cid: str):
             cid=cid,
         )
         result = pipeline.get("result") or {}
+        if msg_type == "interactive":
+            print(
+                "INTERACTIVE_PAYLOAD_PARSED_REAL "
+                f"cid={cid} wa_id={wa_id} interactive_type={interactive_type or '-'} "
+                f"button_id={(choice_id if button_title else '')!r} button_title={button_title[:120]!r} "
+                f"list_id={list_id!r} list_title={list_title[:120]!r} list_description={list_description[:160]!r} "
+                f"normalized_choice={json.dumps(pipeline.get('normalized_choice') or {}, ensure_ascii=False)[:700]} "
+                f"state_after={json.dumps({k: (pipeline.get('state_after') or {}).get(k) for k in ['service_interest', 'intent', 'main_goal', 'lead_source', 'current_tools', 'urgency', 'last_question_category', 'next_best_question']}, ensure_ascii=False)[:900]}"
+            )
         print(
             f"[{cid}] WEBHOOK:sales_pipeline_result wa_id={wa_id} text_len={len(user_text)} "
             f"service={(pipeline.get('state_after') or {}).get('service_interest') or '-'} "
             f"next_category={(pipeline.get('next_question') or {}).get('category') or '-'}"
         )
-        if service_context:
-            result["intent"] = result.get("intent") or service_context.get("intent")
-            result["lead_theme"] = result.get("lead_theme") or service_context.get("intent")
-            result["lead_fields"] = _merge_lead_fields(
-                result.get("lead_fields"),
-                {"service_interest": service_context.get("service_interest")},
-            )
-            if service_context.get("intent") == "humano":
-                result["handoff"] = True
-                result["next_action"] = "handoff"
-                result["handoff_reason"] = result.get("handoff_reason") or "lead_pediu_humano"
-                result["lead_temperature"] = "hot"
-                result["briefing_ready"] = True
 
         if _is_human_service_choice(result, user_text):
             result["handoff"] = True
@@ -3553,18 +3403,6 @@ async def _process_webhook_payload(data: dict, cid: str):
             set_tags(wa_id, _extract_auto_tags(result), workspace_id=workspace_id)
         except Exception:
             pass
-
-        try:
-            ai_state = await get_ai_state(wa_id, workspace_id=workspace_id) or {}
-            await _save_ai_result_state(
-                wa_id,
-                ai_state=ai_state,
-                result=result,
-                user_text=user_text,
-                workspace_id=workspace_id,
-            )
-        except Exception as e:
-            print(f"[{cid}] Falha ao salvar memória da IA:", repr(e))
 
         try:
             upsert_user(

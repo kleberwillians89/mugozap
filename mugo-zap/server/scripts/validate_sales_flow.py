@@ -389,7 +389,7 @@ def test_pipeline_ai_full_flow():
     assert_equal("main_goal", state["main_goal"], "atendimento")
     assert_equal("current_problem", state["current_problem"], "atendimento")
     assert_equal("next category", step2["next_question"]["category"], "lead_source")
-    assert_true("microconfirmation atendimento", step2["reply"].startswith("Perfeito. Então faz sentido pensar em IA"))
+    assert_true("microconfirmation atendimento", step2["reply"].startswith("Certo. Então faz sentido pensar em IA"))
 
     step3 = pipeline_step(state, message="whatsapp")
     state = step3["state_after"]
@@ -474,7 +474,7 @@ def test_persisted_pipeline_site_state_between_messages():
     assert_equal("signal site_scope", second["extracted_signals"]["site_scope"], "melhorar existente")
     assert_equal("state site_scope", second["state_after"]["site_scope"], "melhorar existente")
     assert_equal("next category", second["next_question"]["category"], "main_goal")
-    assert_equal("reply", second["reply"], "Perfeito. Então estamos falando de melhorar uma página que já existe. O foco dessa página é gerar leads, vender mais ou apresentar melhor a marca?")
+    assert_equal("reply", second["reply"], "Certo. Então estamos falando de melhorar uma página que já existe. O foco dessa página é gerar leads, vender mais ou apresentar melhor a marca?")
 
 
 def test_dedupe_patch_preserves_sales_state():
@@ -567,6 +567,46 @@ def test_post_handoff_julia_link_reply():
     assert_true("question mark gets link", JULIA_DIRECT_LINK in reply_question)
 
 
+def test_site_scope_not_overwritten_without_explicit_change():
+    state = state_with_choice("service_site")
+    state = sales_brain.merge_state(
+        state,
+        {
+            "site_scope": "melhorar existente",
+            "main_goal": "vendas/leads",
+            "last_question_category": "urgency",
+        },
+    )
+    step = pipeline_step(state, message="Preciso que vocês me ajudem a criar tudo, vocês conseguem?")
+    assert_equal("site_scope kept", step["state_after"]["site_scope"], "melhorar existente")
+    assert_equal("handoff", step["state_after"]["handoff"], True)
+    assert_equal("briefing_ready", step["state_after"]["briefing_ready"], True)
+
+
+def test_explicit_site_scope_change_allowed():
+    state = state_with_choice("service_site")
+    state = sales_brain.merge_state(state, {"site_scope": "melhorar existente", "last_question_category": "site_scope"})
+    step = pipeline_step(state, message="na verdade quero criar do zero")
+    assert_equal("site_scope changed", step["state_after"]["site_scope"], "criar do zero")
+
+
+def test_handoff_reply_includes_julia_link():
+    from app import JULIA_DIRECT_LINK, JULIA_HANDOFF_REPLY
+
+    assert_true("handoff has link", JULIA_DIRECT_LINK in JULIA_HANDOFF_REPLY)
+
+
+def test_no_three_perfeito_replies_in_flow():
+    state = pipeline_step(sales_brain.default_lead_state(), list_id="service_site")["state_after"]
+    replies = []
+    for message in ["melhorar", "vendas", "essa semana"]:
+        step = pipeline_step(state, message=message)
+        replies.append(step["reply"])
+        state = step["state_after"]
+    starts = [reply.strip().lower().startswith("perfeito") for reply in replies]
+    assert_true("not three perfeito starts", sum(starts) < 3)
+
+
 def test_human():
     state = state_with_choice("service_human")
     flat = sales_brain.flatten_state(state)
@@ -643,6 +683,10 @@ def main():
         ("deadline_urgency_triggers_handoff", test_deadline_urgency_triggers_handoff),
         ("ai_intent_cannot_switch_locked_service", test_ai_intent_cannot_switch_locked_service),
         ("post_handoff_julia_link_reply", test_post_handoff_julia_link_reply),
+        ("site_scope_not_overwritten_without_explicit_change", test_site_scope_not_overwritten_without_explicit_change),
+        ("explicit_site_scope_change_allowed", test_explicit_site_scope_change_allowed),
+        ("handoff_reply_includes_julia_link", test_handoff_reply_includes_julia_link),
+        ("no_three_perfeito_replies_in_flow", test_no_three_perfeito_replies_in_flow),
         ("human", test_human),
         ("anti_loop", test_anti_loop),
         ("known_lead_source_blocks_repeat", test_known_lead_source_blocks_repeat),

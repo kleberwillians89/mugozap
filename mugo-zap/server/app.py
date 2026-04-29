@@ -69,8 +69,8 @@ SUPABASE_TABLE_FLOW_STATE = (
 
 HUMAN_NUMBER = (os.getenv("HUMAN_NUMBER") or "5511973510549").strip()
 JULIA_DIRECT_LINK = f"https://wa.me/{HUMAN_NUMBER}"
-JULIA_HANDOFF_REPLY = "Perfeito, entendi a urgência. Já tenho contexto suficiente e vou encaminhar para a Julia agilizar o próximo passo com você."
-JULIA_LINK_REPLY = f"Claro. A Julia já recebeu seu contexto e também pode falar com você por aqui. Se preferir chamar direto: {JULIA_DIRECT_LINK}"
+JULIA_HANDOFF_REPLY = f"Entendi. Já tenho contexto suficiente e vou encaminhar para a Julia.\n\nEla já recebeu o resumo por aqui. Para falar direto com ela, clique:\n{JULIA_DIRECT_LINK}"
+JULIA_LINK_REPLY = f"Claro. A Julia já recebeu seu contexto. Para falar direto com ela, clique:\n{JULIA_DIRECT_LINK}"
 DEBUG_WEBHOOK = (os.getenv("DEBUG_WEBHOOK") or "").strip().lower() in ("1", "true", "yes")
 
 WA_USERS_TABLE = SUPABASE_TABLE_USERS
@@ -3140,7 +3140,7 @@ def start_handoff_now(
     if send_lead_message:
         safe_send(
             wa_id,
-            "Perfeito, vou encaminhar seu contexto para a Julia e ela continua com você por aqui.",
+            JULIA_HANDOFF_REPLY,
             meta={
                 "event": "handoff_link",
                 "cid": cid,
@@ -3159,7 +3159,7 @@ def start_handoff_now(
             "current_step": "handoff_waiting",
             "flow_step": "handoff_waiting",
             "last_bot_step": "handoff_link",
-            "last_bot_text": "Perfeito, vou encaminhar seu contexto para a Julia e ela continua com você por aqui.",
+            "last_bot_text": JULIA_HANDOFF_REPLY,
             "bot_status": "handoff_active",
             "bot_paused": True,
             "handoff_sent_at": _now_iso(),

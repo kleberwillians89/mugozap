@@ -65,18 +65,18 @@ def default_lead_state() -> Dict[str, Any]:
 
 
 SERVICE_CHOICES = {
-    "1": ("site", "site", "site_scope", "Perfeito. Você quer criar uma página nova do zero ou melhorar uma página que já existe?"),
-    "01": ("site", "site", "site_scope", "Perfeito. Você quer criar uma página nova do zero ou melhorar uma página que já existe?"),
-    "service_site": ("site", "site", "site_scope", "Perfeito. Você quer criar uma página nova do zero ou melhorar uma página que já existe?"),
-    "2": ("automacao_whatsapp", "automacao_whatsapp", "lead_source", "Perfeito. Hoje o atendimento de vocês acontece mais pelo WhatsApp, Instagram ou outro canal?"),
-    "02": ("automacao_whatsapp", "automacao_whatsapp", "lead_source", "Perfeito. Hoje o atendimento de vocês acontece mais pelo WhatsApp, Instagram ou outro canal?"),
-    "service_automation": ("automacao_whatsapp", "automacao_whatsapp", "lead_source", "Perfeito. Hoje o atendimento de vocês acontece mais pelo WhatsApp, Instagram ou outro canal?"),
+    "1": ("site", "site", "site_scope", "Certo. Você quer criar uma página nova do zero ou melhorar uma página que já existe?"),
+    "01": ("site", "site", "site_scope", "Certo. Você quer criar uma página nova do zero ou melhorar uma página que já existe?"),
+    "service_site": ("site", "site", "site_scope", "Certo. Você quer criar uma página nova do zero ou melhorar uma página que já existe?"),
+    "2": ("automacao_whatsapp", "automacao_whatsapp", "lead_source", "Boa. Hoje o atendimento de vocês acontece mais pelo WhatsApp, Instagram ou outro canal?"),
+    "02": ("automacao_whatsapp", "automacao_whatsapp", "lead_source", "Boa. Hoje o atendimento de vocês acontece mais pelo WhatsApp, Instagram ou outro canal?"),
+    "service_automation": ("automacao_whatsapp", "automacao_whatsapp", "lead_source", "Boa. Hoje o atendimento de vocês acontece mais pelo WhatsApp, Instagram ou outro canal?"),
     "3": ("inteligencia_artificial", "inteligencia_artificial", "main_goal", "Boa. Você imagina usar IA mais para atendimento, vendas, conteúdo ou processos internos?"),
     "03": ("inteligencia_artificial", "inteligencia_artificial", "main_goal", "Boa. Você imagina usar IA mais para atendimento, vendas, conteúdo ou processos internos?"),
     "service_ai": ("inteligencia_artificial", "inteligencia_artificial", "main_goal", "Boa. Você imagina usar IA mais para atendimento, vendas, conteúdo ou processos internos?"),
-    "4": ("trafego_pago", "trafego_pago", "current_status", "Perfeito. Hoje vocês já anunciam ou querem começar do zero?"),
-    "04": ("trafego_pago", "trafego_pago", "current_status", "Perfeito. Hoje vocês já anunciam ou querem começar do zero?"),
-    "service_traffic": ("trafego_pago", "trafego_pago", "current_status", "Perfeito. Hoje vocês já anunciam ou querem começar do zero?"),
+    "4": ("trafego_pago", "trafego_pago", "current_status", "Legal. Hoje vocês já anunciam ou querem começar do zero?"),
+    "04": ("trafego_pago", "trafego_pago", "current_status", "Legal. Hoje vocês já anunciam ou querem começar do zero?"),
+    "service_traffic": ("trafego_pago", "trafego_pago", "current_status", "Legal. Hoje vocês já anunciam ou querem começar do zero?"),
     "5": ("branding", "branding", "main_goal", "Legal. A ideia é melhorar posicionamento, conteúdo para redes sociais ou identidade da marca?"),
     "05": ("branding", "branding", "main_goal", "Legal. A ideia é melhorar posicionamento, conteúdo para redes sociais ou identidade da marca?"),
     "service_branding": ("branding", "branding", "main_goal", "Legal. A ideia é melhorar posicionamento, conteúdo para redes sociais ou identidade da marca?"),
@@ -202,6 +202,31 @@ def _has_deadline_urgency(text: str) -> bool:
         r"\brodando\s+(?:ate|para|pra)\s+(?:dia\s+)?\d{1,2}",
     ]
     return any(re.search(pattern, text) for pattern in deadline_patterns)
+
+
+def _explicit_field_change(text: str) -> bool:
+    norm = normalize_text(text)
+    return _has_any(norm, ["na verdade", "mudei de ideia", "trocar", "troca", "muda", "mudar", "nao e", "não é", "quero mudar"])
+
+
+def _can_update_known_field(state: Dict[str, Any], key: str, value: Any, text: str) -> bool:
+    current = flatten_state(state).get(key)
+    if current in (None, "", [], {}) or value in (None, "", [], {}) or current == value:
+        return True
+    if _explicit_field_change(text) or detect_explicit_service_switch(text):
+        return True
+    print(f"SALES_BRAIN_FIELD_LOCKED field={key} current={current!r} incoming={value!r} text={str(text or '')[:160]!r}")
+    return False
+
+
+def _lock_known_field_updates(updates: Dict[str, Any], state: Dict[str, Any], text: str) -> Dict[str, Any]:
+    locked = dict(updates or {})
+    for key in ["service_interest", "main_goal", "lead_source", "current_tools", "current_status", "site_scope"]:
+        if key in locked and not _can_update_known_field(state, key, locked.get(key), text):
+            locked.pop(key, None)
+    if locked.get("service_interest"):
+        locked["intent"] = INTENT_BY_SERVICE.get(locked.get("service_interest"), locked.get("intent"))
+    return locked
 
 
 def _match_menu_service(value: str) -> tuple[str, str]:
@@ -537,7 +562,22 @@ def extract_signal_from_message(text: str, current_state: Dict[str, Any]) -> Dic
     elif _has_any(norm, ["sem verba", "baixo custo", "barato"]):
         updates["budget_signal"] = "sensível a preço"
 
-    return updates
+    if _has_any(norm, ["voces conseguem", "vocês conseguem", "conseguem fazer", "conseguem me ajudar", "voces fazem", "vocês fazem"]):
+        commercial_count = sum(1 for key in ["main_goal", "desired_result", "site_scope", "lead_source", "current_tools", "current_problem", "urgency", "budget_signal", "current_status"] if state.get(key) or updates.get(key))
+        if (updates.get("service_interest") or service) and commercial_count >= 2:
+            updates.update(
+                {
+                    "handoff": True,
+                    "handoff_reason": "lead_perguntou_se_conseguimos",
+                    "lead_temperature": "hot" if updates.get("urgency") == "alta" or state.get("urgency") == "alta" else "warm",
+                    "meeting_suggested": True,
+                    "briefing_ready": True,
+                    "next_action": "handoff",
+                    "funnel_stage": "decisao",
+                }
+            )
+
+    return _lock_known_field_updates(updates, state, text)
 
 
 def merge_state(old_state: Dict[str, Any], updates: Dict[str, Any]) -> Dict[str, Any]:
@@ -565,7 +605,7 @@ def get_next_question(state: Dict[str, Any]) -> Dict[str, Any]:
         return {"category": "handoff", "question": "Claro. Vou te encaminhar para a Julia com um resumo do que você precisa.", "next_action": "handoff"}
     if service == "site":
         if not state.get("site_scope"):
-            return {"category": "site_scope", "question": "Perfeito. Você quer criar uma página nova do zero ou melhorar uma página que já existe?", "next_action": "ask_question"}
+            return {"category": "site_scope", "question": "Certo. Você quer criar uma página nova do zero ou melhorar uma página que já existe?", "next_action": "ask_question"}
         if not state.get("main_goal"):
             return {"category": "main_goal", "question": "O foco dessa página é gerar leads, vender mais ou apresentar melhor a marca?", "next_action": "ask_question"}
         if not state.get("urgency"):
@@ -594,7 +634,7 @@ def get_next_question(state: Dict[str, Any]) -> Dict[str, Any]:
         return offer
     if service == "trafego_pago":
         if not (state.get("current_status") or state.get("current_tools")):
-            return {"category": "current_status", "question": "Hoje vocês já anunciam ou querem começar do zero?", "next_action": "ask_question"}
+            return {"category": "current_status", "question": "Legal. Hoje vocês já anunciam ou querem começar do zero?", "next_action": "ask_question"}
         if not state.get("main_goal"):
             return {"category": "main_goal", "question": "O foco é gerar leads, vender no site ou fortalecer a marca?", "next_action": "ask_question"}
         if not state.get("budget_signal"):
@@ -729,23 +769,23 @@ def build_contextual_reply(
     elif signals.get("current_tools") == "manual":
         confirmation = "Entendi. Aí a automação pode ajudar bastante a organizar e acelerar o retorno."
     elif signals.get("site_scope") == "melhorar existente":
-        confirmation = "Perfeito. Então estamos falando de melhorar uma página que já existe."
+        confirmation = "Certo. Então estamos falando de melhorar uma página que já existe."
     elif signals.get("site_scope") == "criar do zero":
-        confirmation = "Perfeito. Então estamos falando de criar uma página nova do zero."
+        confirmation = "Legal. Então estamos falando de criar uma página nova do zero."
     elif signals.get("current_status") == "começar do zero":
-        confirmation = "Perfeito. Então a ideia é começar a mídia paga do jeito certo."
+        confirmation = "Ótimo. Então a ideia é começar a mídia paga do jeito certo."
     elif signals.get("current_status") == "já anuncia":
         confirmation = "Boa. Então vocês já têm alguma experiência com anúncios."
     elif signals.get("urgency") == "alta":
-        confirmation = "Perfeito, então faz sentido acelerar."
+        confirmation = "Entendi, então faz sentido acelerar."
     elif signals.get("main_goal") == "vendas/leads":
-        confirmation = "Perfeito, então o foco é gerar mais oportunidades."
+        confirmation = "Faz sentido, então o foco é gerar mais oportunidades."
     elif signals.get("main_goal") == "atendimento" or normalize_text(str(signals.get("current_problem") or "")) == "atendimento":
-        confirmation = "Perfeito. Então faz sentido pensar em IA para acelerar o atendimento e não deixar lead esfriar."
+        confirmation = "Certo. Então faz sentido pensar em IA para acelerar o atendimento e não deixar lead esfriar."
     elif signals.get("main_goal"):
-        confirmation = "Perfeito, entendi o foco."
+        confirmation = "Entendi o foco."
     elif signals.get("current_problem") and after.get("service_interest") == "inteligencia_artificial":
-        confirmation = "Perfeito. Esse é um bom ponto para a IA ajudar."
+        confirmation = "Boa. Esse é um bom ponto para a IA ajudar."
 
     if not confirmation:
         return question

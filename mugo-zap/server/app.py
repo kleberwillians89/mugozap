@@ -67,7 +67,14 @@ SUPABASE_TABLE_FLOW_STATE = (
     or "whatsapp_flow_state"
 ).strip()
 
-HUMAN_NUMBER = (os.getenv("HUMAN_NUMBER") or "5511973510549").strip()
+def _normalize_brazil_whatsapp_number(value: str, fallback: str = "") -> str:
+    digits = re.sub(r"\D+", "", value or fallback or "")
+    if len(digits) == 11:
+        return f"55{digits}"
+    return digits
+
+
+HUMAN_NUMBER = _normalize_brazil_whatsapp_number(os.getenv("HUMAN_NUMBER") or "5511973510549")
 JULIA_DIRECT_LINK = f"https://wa.me/{HUMAN_NUMBER}"
 
 
@@ -146,7 +153,7 @@ INTERNAL_ALLOWED_EMAILS = {
 
 DEFAULT_INTERNAL_ROLE = (os.getenv("DEFAULT_INTERNAL_ROLE") or "staff").strip()
 DEFAULT_ASSIGNEE = (os.getenv("DEFAULT_ASSIGNEE") or "Julia").strip()
-OPERATION_NUMBER = (os.getenv("OPERATION_NUMBER") or "5511972769605").strip()
+OPERATION_NUMBER = _normalize_brazil_whatsapp_number(os.getenv("OPERATION_NUMBER") or "11972769605")
 
 from services.ai_state import get_ai_state, upsert_ai_state, reset_ai_state
 from services.state import (

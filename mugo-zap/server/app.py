@@ -92,7 +92,7 @@ def build_julia_prefilled_link(context: dict | None = None) -> str:
     goal = _handoff_context_value(context, "main_goal") or _handoff_context_value(context, "desired_result")
     problem = _handoff_context_value(context, "current_problem")
     channel = _handoff_context_value(context, "lead_source")
-    tools = _handoff_context_value(context, "current_tools")
+    tools = _handoff_context_value(context, "current_tools") or _handoff_context_value(context, "current_status")
     urgency = _handoff_context_value(context, "urgency")
     budget = _handoff_context_value(context, "budget_signal")
     summary = _handoff_context_value(context, "summary")
@@ -104,7 +104,7 @@ def build_julia_prefilled_link(context: dict | None = None) -> str:
         f"Objetivo: {goal}\n"
         f"Problema: {problem}\n"
         f"Canal: {channel}\n"
-        f"Ferramenta atual: {tools}\n"
+        f"Ferramenta atual/status: {tools}\n"
         f"Prazo: {urgency}\n"
         f"Orçamento: {budget}\n\n"
         "Resumo:\n"
@@ -113,6 +113,7 @@ def build_julia_prefilled_link(context: dict | None = None) -> str:
     )
     encoded_text = urllib.parse.quote(link_text)
     link = f"{JULIA_DIRECT_LINK}?text={encoded_text}"
+    print(f"HANDOFF_PREFILLED_LINK_GENERATED has_text={bool(encoded_text)} link_len={len(link)}")
     print(f"HANDOFF_LINK_GENERATED has_text={bool(encoded_text)} link_len={len(link)}")
     return link
 
@@ -1509,6 +1510,12 @@ async def process_inbound_sales_message(
         )
         state_after = sales_brain.flatten_state(state_after)
         next_question = sales_brain.get_next_question(state_after)
+        print(
+            "BUTTON_FLOW_VALIDATED "
+            f"cid={cid} wa_id={wa_id} choice_id={normalized_choice.get('choice_id') or '-'} "
+            f"service={state_after.get('service_interest') or '-'} "
+            f"category={next_question.get('category') or '-'}"
+        )
         reply = (next_question.get("question") or "").strip()
         validation = sales_brain.validate_final_reply(reply, state_after)
         blocked_reason = validation.get("reason") or ""
@@ -1626,6 +1633,7 @@ async def process_inbound_sales_message(
         used_openai = openai_available and not bool(ai_result.get("fallback"))
         if ai_result.get("fallback"):
             print(f"SALES_PIPELINE_OPENAI_FALLBACK cid={cid} wa_id={wa_id} using=deterministic_reply")
+            print(f"OPENAI_TIMEOUT_SAFE_FALLBACK cid={cid} wa_id={wa_id} category={next_question.get('category') or '-'}")
     except Exception as e:
         print(f"SALES_PIPELINE_OPENAI_ERROR cid={cid} wa_id={wa_id} error={repr(e)}")
         ai_result = {}

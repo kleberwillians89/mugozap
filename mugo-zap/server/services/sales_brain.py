@@ -254,6 +254,15 @@ def _append_source(current: Any, source: str) -> str:
     return " e ".join(parts)
 
 
+def _multi_short_answer(text: str) -> str:
+    norm = normalize_text(text)
+    if _has_any(norm, ["pelos 3", "pelos tres", "os 3", "os tres", "todos", "tudo"]):
+        return "all"
+    if _has_any(norm, ["os dois", "ambos", "quero fazer os dois", "fazer os dois"]):
+        return "two"
+    return ""
+
+
 def _service_candidate_from_text(text: str) -> str:
     if _has_any(text, ["landing", "pagina", "site"]):
         return "site"
@@ -459,6 +468,32 @@ def extract_signal_from_message(text: str, current_state: Dict[str, Any]) -> Dic
 
     service = updates.get("service_interest") or service
 
+    multi_answer = _multi_short_answer(norm)
+
+    if last_category == "main_goal" and service == "branding":
+        if multi_answer == "two":
+            updates["main_goal"] = "posicionamento e conteúdo/redes sociais"
+            updates["funnel_stage"] = "qualificacao"
+            print(f"CONTEXTUAL_SHORT_ANSWER_PARSED category=main_goal service=branding value={updates['main_goal']!r} text={text[:160]!r}")
+        elif multi_answer == "all":
+            updates["main_goal"] = "posicionamento, conteúdo/redes sociais e identidade visual"
+            updates["funnel_stage"] = "qualificacao"
+            print(f"CONTEXTUAL_SHORT_ANSWER_PARSED category=main_goal service=branding value={updates['main_goal']!r} text={text[:160]!r}")
+        elif _has_any(norm, ["conteudo", "redes", "social media"]):
+            updates["main_goal"] = "conteúdo/redes sociais"
+            updates["funnel_stage"] = "qualificacao"
+        elif _has_any(norm, ["identidade", "visual"]):
+            updates["main_goal"] = "identidade visual"
+            updates["funnel_stage"] = "qualificacao"
+        elif "posicionamento" in norm:
+            updates["main_goal"] = "posicionamento"
+            updates["funnel_stage"] = "qualificacao"
+
+    if last_category == "main_goal" and service == "trafego_pago" and multi_answer == "all":
+        updates["main_goal"] = "gerar leads, vender no site e fortalecer marca"
+        updates["funnel_stage"] = "qualificacao"
+        print(f"CONTEXTUAL_SHORT_ANSWER_PARSED category=main_goal service=trafego_pago value={updates['main_goal']!r} text={text[:160]!r}")
+
     if service == "site" or last_category == "site_scope":
         if service == "site" and last_category == "site_scope" and _has_any(norm, ["whatsapp", "whats", "zap"]):
             updates["desired_result"] = "usar WhatsApp como canal de conversão"
@@ -506,6 +541,19 @@ def extract_signal_from_message(text: str, current_state: Dict[str, Any]) -> Dic
 
     source = state.get("lead_source") or ""
     source_changed = False
+    if last_category == "lead_source" and multi_answer == "all":
+        source = "WhatsApp, Instagram e site"
+        source_changed = True
+        print(f"CONTEXTUAL_SHORT_ANSWER_PARSED category=lead_source value={source!r} text={text[:160]!r}")
+    elif last_category == "lead_source" and _has_any(norm, ["whatsapp e instagram", "whats e insta", "zap e insta"]):
+        source = "WhatsApp e Instagram"
+        source_changed = True
+    elif last_category == "lead_source" and _has_any(norm, ["whatsapp e site", "whats e site", "zap e site"]):
+        source = "WhatsApp e site"
+        source_changed = True
+    elif last_category == "lead_source" and _has_any(norm, ["instagram e site", "insta e site"]):
+        source = "Instagram e site"
+        source_changed = True
     if "instagram" in norm or "insta" in norm:
         source = _append_source(source, "Instagram")
         source_changed = True
@@ -541,6 +589,14 @@ def extract_signal_from_message(text: str, current_state: Dict[str, Any]) -> Dic
                 if last_category == "current_tools":
                     print(f"SALES_BRAIN_CONTEXT_SIGNAL category=current_tools field=current_tools value={updates['current_tools']!r} text={text[:160]!r}")
                 break
+
+    if service == "branding" and last_category == "current_status":
+        if _has_any(norm, ["do zero", "comecar do zero", "começar do zero", "nao temos", "ainda nao", "sem identidade"]):
+            updates["current_status"] = "começar do zero"
+            print(f"SALES_BRAIN_CONTEXT_SIGNAL category=current_status field=current_status value='começar do zero' text={text[:160]!r}")
+        elif _has_any(norm, ["ja temos", "já temos", "temos", "presenca ativa", "presença ativa", "ja existe", "redes ativas"]):
+            updates["current_status"] = "já tem presença/identidade"
+            print(f"SALES_BRAIN_CONTEXT_SIGNAL category=current_status field=current_status value='já tem presença/identidade' text={text[:160]!r}")
 
     if _has_deadline_urgency(norm):
         updates["urgency"] = "alta"
@@ -643,6 +699,8 @@ def get_next_question(state: Dict[str, Any]) -> Dict[str, Any]:
     if service == "branding":
         if not state.get("main_goal"):
             return {"category": "main_goal", "question": "A ideia é melhorar posicionamento, conteúdo para redes sociais ou identidade da marca?", "next_action": "ask_question"}
+        if not state.get("current_status"):
+            return {"category": "current_status", "question": "Hoje vocês já têm uma presença ativa nas redes ou querem estruturar isso do zero?", "next_action": "ask_question"}
         if not state.get("current_problem"):
             return {"category": "current_problem", "question": "Hoje o maior incômodo é falta de clareza na marca, falta de conteúdo ou pouca conversão?", "next_action": "ask_question"}
         if not state.get("urgency"):
@@ -780,6 +838,12 @@ def build_contextual_reply(
         confirmation = "Entendi, então faz sentido acelerar."
     elif signals.get("main_goal") == "vendas/leads":
         confirmation = "Faz sentido, então o foco é gerar mais oportunidades."
+    elif after.get("service_interest") == "branding" and signals.get("main_goal") == "posicionamento e conteúdo/redes sociais":
+        confirmation = "Legal, então vamos considerar posicionamento e conteúdo."
+    elif after.get("service_interest") == "branding" and signals.get("main_goal"):
+        confirmation = "Legal, entendi o foco da marca."
+    elif signals.get("main_goal") == "gerar leads, vender no site e fortalecer marca":
+        confirmation = "Certo, então o objetivo é cobrir os três pontos."
     elif signals.get("main_goal") == "atendimento" or normalize_text(str(signals.get("current_problem") or "")) == "atendimento":
         confirmation = "Certo. Então faz sentido pensar em IA para acelerar o atendimento e não deixar lead esfriar."
     elif signals.get("main_goal"):
@@ -809,6 +873,8 @@ def _commercial_field_count(state: Dict[str, Any]) -> int:
 
 def should_offer_meeting(state: Dict[str, Any]) -> bool:
     state = flatten_state(state)
+    if has_enough_briefing_for_handoff(state):
+        return True
     if get_next_question(state).get("next_action") == "offer_meeting":
         return True
     if state.get("urgency") == "alta" and state.get("service_interest") and _commercial_field_count(state) >= 2:
@@ -816,6 +882,23 @@ def should_offer_meeting(state: Dict[str, Any]) -> bool:
     if state.get("budget_signal") == "tem verba" and state.get("service_interest") and _commercial_field_count(state) >= 2:
         return True
     return False
+
+
+def has_enough_briefing_for_handoff(state: Dict[str, Any]) -> bool:
+    state = flatten_state(state)
+    service = state.get("service_interest")
+    if not service or not state.get("main_goal"):
+        print(f"BRIEFING_COMPLETENESS_CHECK service={service or '-'} enough=false reason=missing_service_or_goal")
+        return False
+    has_context = bool(state.get("current_problem") or state.get("current_status") or state.get("current_tools") or state.get("site_scope"))
+    has_decision_signal = bool(state.get("urgency") or state.get("budget_signal") or state.get("handoff_reason") == "lead_perguntou_se_conseguimos")
+    enough = bool(has_context and has_decision_signal)
+    print(
+        "BRIEFING_COMPLETENESS_CHECK "
+        f"service={service} enough={str(enough).lower()} has_context={str(has_context).lower()} "
+        f"has_decision_signal={str(has_decision_signal).lower()}"
+    )
+    return enough
 
 
 def build_briefing(state: Dict[str, Any], recent_messages: list) -> Dict[str, Any]:

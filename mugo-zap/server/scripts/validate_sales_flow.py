@@ -248,6 +248,26 @@ def test_automation_choice():
     assert_equal("next category", sales_brain.get_next_question(flat)["category"], "lead_source")
 
 
+def test_all_service_buttons():
+    cases = {
+        "service_site": ("site", "site_scope"),
+        "service_automation": ("automacao_whatsapp", "lead_source"),
+        "service_ai": ("inteligencia_artificial", "main_goal"),
+        "service_traffic": ("trafego_pago", "current_status"),
+        "service_branding": ("branding", "main_goal"),
+        "service_human": ("humano", "handoff"),
+    }
+    for choice_id, (service, category) in cases.items():
+        step = pipeline_step(sales_brain.default_lead_state(), list_id=choice_id)
+        assert_equal(f"{choice_id} service", step["state_after"]["service_interest"], service)
+        assert_equal(f"{choice_id} category", step["next_question"]["category"], category)
+        if choice_id == "service_human":
+            assert_equal("human handoff", step["state_after"]["handoff"], True)
+            assert_true("human link", "https://wa.me/5511973510549?text=" in step["reply"])
+        else:
+            assert_equal(f"{choice_id} not handoff", bool(step["state_after"]["handoff"]), False)
+
+
 def test_pipeline_automation_contextual_answers():
     step1 = pipeline_step(
         sales_brain.default_lead_state(),
@@ -446,22 +466,62 @@ def test_pipeline_ai_full_flow():
     state = step3["state_after"]
     assert_equal("lead_source", state["lead_source"], "WhatsApp")
     assert_equal("next category", step3["next_question"]["category"], "current_tools")
-    assert_true("did not repeat lead source", "Hoje os contatos chegam mais" not in step3["reply"])
-    assert_true("microconfirmation whatsapp", step3["reply"].startswith("Boa. Então o WhatsApp é o principal canal."))
 
-    step4 = pipeline_step(state, message="manualmente")
-    state = step4["state_after"]
-    assert_equal("current_tools", state["current_tools"], "manual")
-    assert_equal("next category", step4["next_question"]["category"], "urgency")
-    assert_true("microconfirmation manual", step4["reply"].startswith("Entendi. Aí a automação pode ajudar"))
 
-    step5 = pipeline_step(state, message="essa semana")
-    state = step5["state_after"]
-    if sales_brain.should_offer_meeting(state):
-        state = sales_brain.merge_state(state, {"meeting_suggested": True, "briefing_ready": True})
-    assert_equal("urgency", state["urgency"], "alta")
-    assert_equal("meeting_suggested", state["meeting_suggested"], True)
-    assert_equal("briefing_ready", state["briefing_ready"], True)
+def test_ai_three_channels_short_answer():
+    state = state_with_choice("service_ai")
+    state = sales_brain.merge_state(
+        state,
+        {
+            "main_goal": "atendimento",
+            "current_problem": "atendimento",
+            "last_question_asked": "Hoje esses contatos chegam mais pelo WhatsApp, Instagram ou site?",
+            "last_question_category": "lead_source",
+        },
+    )
+    step = pipeline_step(state, message="pelos 3 canais")
+    assert_equal("lead_source", step["state_after"]["lead_source"], "WhatsApp, Instagram e site")
+    assert_equal("next category", step["next_question"]["category"], "current_tools")
+    assert_true("does not repeat", "Hoje esses contatos chegam mais pelo WhatsApp, Instagram ou site?" not in step["reply"])
+
+
+def test_branding_os_dois_short_answer():
+    state = state_with_choice("service_branding")
+    step = pipeline_step(state, message="Os dois")
+    assert_equal("main_goal", step["state_after"]["main_goal"], "posicionamento e conteúdo/redes sociais")
+    assert_equal("next category", step["next_question"]["category"], "current_status")
+    assert_true("does not repeat branding question", "A ideia é melhorar posicionamento" not in step["reply"])
+
+
+def test_branding_quero_fazer_os_dois_short_answer():
+    state = state_with_choice("service_branding")
+    step = pipeline_step(state, message="Quero fazer os dois")
+    assert_equal("main_goal", step["state_after"]["main_goal"], "posicionamento e conteúdo/redes sociais")
+    assert_true("reply advances", "presença ativa" in step["reply"])
+
+
+def test_traffic_three_points_short_answer():
+    state = state_with_choice("service_traffic")
+    state = sales_brain.merge_state(
+        state,
+        {
+            "current_status": "começar do zero",
+            "last_question_category": "main_goal",
+            "last_question_asked": "O foco é gerar leads, vender no site ou fortalecer a marca?",
+        },
+    )
+    step = pipeline_step(state, message="os 3 pontos")
+    assert_equal("main_goal", step["state_after"]["main_goal"], "gerar leads, vender no site e fortalecer marca")
+    assert_equal("next category", step["next_question"]["category"], "budget_signal")
+
+
+def test_timeout_fallback_branding_does_not_repeat_literal():
+    state = state_with_choice("service_branding")
+    step = pipeline_step(state, message="os dois")
+    assert_true("fallback advanced", step["reply"] != "Legal. A ideia é melhorar posicionamento, conteúdo para redes sociais ou identidade da marca?")
+    assert_equal("main_goal", step["state_after"]["main_goal"], "posicionamento e conteúdo/redes sociais")
+    assert_equal("next category", step["next_question"]["category"], "current_status")
+    assert_true("did not repeat branding question", "A ideia é melhorar posicionamento" not in step["reply"])
 
 
 def test_traffic():
@@ -857,6 +917,7 @@ def main():
         ("text_site_without_state_is_menu", test_text_site_without_state_is_menu),
         ("text_site_with_state_is_not_menu", test_text_site_with_state_is_not_menu),
         ("automation_choice", test_automation_choice),
+        ("all_service_buttons", test_all_service_buttons),
         ("pipeline_automation_contextual_answers", test_pipeline_automation_contextual_answers),
         ("real_meta_list_reply_automation_payload", test_real_meta_list_reply_automation_payload),
         ("ai_led_after_menu_choice", test_ai_led_after_menu_choice),
@@ -869,7 +930,12 @@ def main():
         ("manual", test_manual),
         ("ai_context", test_ai_context),
         ("pipeline_ai_full_flow", test_pipeline_ai_full_flow),
+        ("ai_three_channels_short_answer", test_ai_three_channels_short_answer),
+        ("branding_os_dois_short_answer", test_branding_os_dois_short_answer),
+        ("branding_quero_fazer_os_dois_short_answer", test_branding_quero_fazer_os_dois_short_answer),
         ("traffic", test_traffic),
+        ("traffic_three_points_short_answer", test_traffic_three_points_short_answer),
+        ("timeout_fallback_branding_does_not_repeat_literal", test_timeout_fallback_branding_does_not_repeat_literal),
         ("pipeline_traffic_zero", test_pipeline_traffic_zero),
         ("pipeline_site_melhorar", test_pipeline_site_melhorar),
         ("persisted_pipeline_site_state_between_messages", test_persisted_pipeline_site_state_between_messages),

@@ -7,7 +7,7 @@ import traceback
 import asyncio
 from pathlib import Path
 from typing import Any, Optional, List, Dict, Union
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 import httpx
 from dotenv import load_dotenv
@@ -94,16 +94,21 @@ def build_julia_prefilled_link(context: dict | None = None) -> str:
     channel = _handoff_context_value(context, "lead_source")
     tools = _handoff_context_value(context, "current_tools")
     urgency = _handoff_context_value(context, "urgency")
+    budget = _handoff_context_value(context, "budget_signal")
+    summary = _handoff_context_value(context, "summary")
 
     link_text = (
         "Oi Julia, vim pelo atendimento da Mugô.\n\n"
-        "Resumo rápido:\n"
+        "Meu contexto:\n"
         f"Serviço: {service}\n"
         f"Objetivo: {goal}\n"
         f"Problema: {problem}\n"
         f"Canal: {channel}\n"
         f"Ferramenta atual: {tools}\n"
-        f"Prazo: {urgency}\n\n"
+        f"Prazo: {urgency}\n"
+        f"Orçamento: {budget}\n\n"
+        "Resumo:\n"
+        f"{summary}\n\n"
         "Podemos seguir por aqui?"
     )
     encoded_text = urllib.parse.quote(link_text)
@@ -131,8 +136,18 @@ def build_handoff_lead_reply(context: dict | None = None) -> str:
     )
 
 
+def build_handoff_follow_up(now: datetime | None = None) -> dict:
+    base = now or datetime.now(timezone.utc)
+    return {
+        "needed": True,
+        "when": (base + timedelta(hours=1)).isoformat(),
+        "message": HANDOFF_FOLLOWUP_MESSAGE,
+    }
+
+
 JULIA_HANDOFF_REPLY = build_handoff_lead_reply()
 JULIA_LINK_REPLY = f"Claro. A Julia já recebeu seu contexto. Para falar direto com ela, clique:\n{JULIA_DIRECT_LINK}"
+HANDOFF_FOLLOWUP_MESSAGE = "Oi, passando só para confirmar se você conseguiu falar com a Julia. Se quiser, posso reenviar o link por aqui."
 DEBUG_WEBHOOK = (os.getenv("DEBUG_WEBHOOK") or "").strip().lower() in ("1", "true", "yes")
 
 WA_USERS_TABLE = SUPABASE_TABLE_USERS
@@ -1433,6 +1448,9 @@ def _force_handoff_lead_reply(result: dict | None) -> dict:
     result["briefing_ready"] = True
     result["meeting_suggested"] = True
     result["lead_temperature"] = "hot"
+    follow_up = result.get("follow_up") if isinstance(result.get("follow_up"), dict) else {}
+    if not follow_up.get("needed") and not result.get("handoff_followup_sent_at"):
+        result["follow_up"] = build_handoff_follow_up()
     result["lead_fields"] = _merge_lead_fields(
         result.get("lead_fields"),
         {
@@ -2204,6 +2222,61 @@ async def _supabase_exists(table: str, column: str, value: str, workspace_id: st
         return False
 
 
+def _parse_iso_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+def _followup_is_due(state: dict, now: datetime) -> bool:
+    follow_up = state.get("follow_up") if isinstance(state.get("follow_up"), dict) else {}
+    when = _parse_iso_datetime(follow_up.get("when"))
+    if when and when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return bool(
+        follow_up.get("needed")
+        and when
+        and when <= now
+        and not state.get("handoff_followup_sent_at")
+    )
+
+
+async def _fetch_followup_candidates(workspace_id: str = "") -> list[dict]:
+    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+        raise HTTPException(status_code=500, detail="Supabase env not configured")
+
+    resolved_workspace_id = resolve_workspace_id(explicit_workspace_id=workspace_id)
+    headers = {
+        "apikey": SUPABASE_SERVICE_ROLE_KEY,
+        "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+    }
+    base_params = {
+        "select": "wa_id,state",
+        "workspace_id": f"eq.{resolved_workspace_id}",
+        "limit": "500",
+    }
+    filtered_params = {
+        **base_params,
+        "state->follow_up->>needed": "eq.true",
+    }
+    async with httpx.AsyncClient(timeout=20) as client:
+        resp = await client.get(f"{SUPABASE_URL}/rest/v1/{SUPABASE_TABLE_AI_STATE}", params=filtered_params, headers=headers)
+        if resp.status_code >= 300:
+            resp = await client.get(f"{SUPABASE_URL}/rest/v1/{SUPABASE_TABLE_AI_STATE}", params=base_params, headers=headers)
+        if resp.status_code >= 300 and "workspace_id" in (resp.text or "").lower():
+            resp = await client.get(
+                f"{SUPABASE_URL}/rest/v1/{SUPABASE_TABLE_AI_STATE}",
+                params={"select": "wa_id,state", "limit": "500"},
+                headers=headers,
+            )
+    if resp.status_code >= 300:
+        raise Exception(f"followups fetch -> {resp.status_code} :: {resp.text}")
+    return resp.json() or []
+
+
 async def delete_conversation_bundle(wa_id: str, deleted_by: str = "", workspace_id: str = "") -> dict:
     wa_id = (wa_id or "").strip()
     workspace_id = resolve_workspace_id(explicit_workspace_id=workspace_id)
@@ -2335,6 +2408,65 @@ async def api_debug_send_test_whatsapp(
             "body": f"{type(e).__name__}: {str(e)[:500]}",
             "phone_number_id": env.get("whatsapp_phone_number_id") or "missing",
         }
+
+
+@app.post("/api/jobs/run-followups")
+async def api_jobs_run_followups(
+    authorization: str = Header(None),
+    x_panel_key: str = Header(None, alias="X-Panel-Key"),
+    x_workspace_id: str = Header(None, alias="X-Workspace-Id"),
+):
+    user = await get_current_user(
+        authorization=authorization,
+        x_panel_key=x_panel_key,
+        x_workspace_id=x_workspace_id,
+    )
+    workspace_id = user.get("workspace_id") or resolve_workspace_id()
+    now = datetime.now(timezone.utc)
+    rows = await _fetch_followup_candidates(workspace_id=workspace_id)
+    sent = []
+    skipped = []
+
+    for row in rows:
+        wa_id = normalize_wa_id(row.get("wa_id") or "")
+        state = row.get("state") if isinstance(row.get("state"), dict) else {}
+        if not wa_id:
+            skipped.append({"wa_id": "", "reason": "missing_wa_id"})
+            continue
+        if not _followup_is_due(state, now):
+            skipped.append({"wa_id": wa_id, "reason": "not_due_or_already_sent"})
+            continue
+
+        follow_up = state.get("follow_up") if isinstance(state.get("follow_up"), dict) else {}
+        message = (follow_up.get("message") or HANDOFF_FOLLOWUP_MESSAGE).strip()
+        ok = safe_send(
+            wa_id,
+            message,
+            meta={"event": "handoff_followup", "job": "run-followups"},
+            workspace_id=workspace_id,
+            cid="followup-job",
+        )
+        if not ok:
+            skipped.append({"wa_id": wa_id, "reason": "send_failed"})
+            continue
+
+        await upsert_ai_state(
+            wa_id,
+            {
+                **state,
+                "handoff_followup_sent_at": now.isoformat(),
+                "follow_up": {
+                    **follow_up,
+                    "needed": False,
+                    "sent_at": now.isoformat(),
+                },
+            },
+            workspace_id=workspace_id,
+        )
+        sent.append({"wa_id": wa_id})
+        print(f"HANDOFF_FOLLOWUP_SENT wa_id={wa_id} workspace_id={workspace_id}")
+
+    return {"ok": True, "checked": len(rows), "sent": sent, "skipped": skipped}
 
 
 @app.get("/api/debug/lead-state/{wa_id}")
@@ -3092,6 +3224,7 @@ async def mark_handoff_done(wa_id: str, topic: str = "", summary: str = "", work
                 "handoff_topic": (topic or "").strip()[:120],
                 "handoff_summary": (summary or "").strip()[:900],
                 "handoff_sent_at": existing_state.get("handoff_sent_at") or datetime.now(timezone.utc).isoformat(),
+                "follow_up": existing_state.get("follow_up") or build_handoff_follow_up(),
             },
             workspace_id=workspace_id,
         )

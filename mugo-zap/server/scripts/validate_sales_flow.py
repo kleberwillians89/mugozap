@@ -4,6 +4,7 @@ import re
 import sys
 import urllib.parse
 from pathlib import Path
+from datetime import datetime, timezone, timedelta
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -657,6 +658,7 @@ def test_prefilled_julia_link_contains_encoded_context():
         "lead_source": "WhatsApp",
         "current_tools": "planilha",
         "urgency": "alta",
+        "budget_signal": "tem verba",
         "briefing": {"summary": "Lead quer automatizar atendimento até maio."},
     }
     link = build_julia_prefilled_link(context)
@@ -665,6 +667,8 @@ def test_prefilled_julia_link_contains_encoded_context():
     assert_true("decoded service", "Serviço: automacao_whatsapp" in decoded)
     assert_true("decoded goal", "Objetivo: responder leads mais rápido" in decoded)
     assert_true("decoded problem", "Problema: processo manual" in decoded)
+    assert_true("decoded budget", "Orçamento: tem verba" in decoded)
+    assert_true("decoded summary", "Resumo:\nLead quer automatizar atendimento até maio." in decoded)
 
 
 def test_internal_operation_briefing_without_link():
@@ -704,6 +708,32 @@ def test_handoff_opening_varies_from_last_reply():
     third = build_handoff_lead_reply({"last_question_asked": second})
     openings = [reply.split(".", 1)[0] for reply in [first, second, third]]
     assert_true("no same opening three times", len(set(openings)) > 1)
+
+
+def test_followup_created_for_handoff():
+    from app import HANDOFF_FOLLOWUP_MESSAGE, build_handoff_follow_up
+
+    now = datetime(2026, 4, 29, 12, 0, tzinfo=timezone.utc)
+    follow_up = build_handoff_follow_up(now)
+    assert_equal("follow up needed", follow_up["needed"], True)
+    assert_equal("follow up when", follow_up["when"], "2026-04-29T13:00:00+00:00")
+    assert_equal("follow up message", follow_up["message"], HANDOFF_FOLLOWUP_MESSAGE)
+
+
+def test_followup_due_once_only():
+    from app import _followup_is_due
+
+    now = datetime(2026, 4, 29, 13, 1, tzinfo=timezone.utc)
+    state = {
+        "follow_up": {
+            "needed": True,
+            "when": (now - timedelta(minutes=1)).isoformat(),
+            "message": "follow",
+        }
+    }
+    assert_equal("due before sent", _followup_is_due(state, now), True)
+    state["handoff_followup_sent_at"] = now.isoformat()
+    assert_equal("not due after sent", _followup_is_due(state, now), False)
 
 
 def test_traffic_budget_handoff_reply_has_julia_link():
@@ -856,6 +886,8 @@ def main():
         ("internal_operation_briefing_without_link", test_internal_operation_briefing_without_link),
         ("no_legacy_eduarda_routing", test_no_legacy_eduarda_routing),
         ("handoff_opening_varies_from_last_reply", test_handoff_opening_varies_from_last_reply),
+        ("followup_created_for_handoff", test_followup_created_for_handoff),
+        ("followup_due_once_only", test_followup_due_once_only),
         ("traffic_budget_handoff_reply_has_julia_link", test_traffic_budget_handoff_reply_has_julia_link),
         ("site_urgency_handoff_reply_has_julia_link", test_site_urgency_handoff_reply_has_julia_link),
         ("any_handoff_reply_without_link_is_corrected", test_any_handoff_reply_without_link_is_corrected),

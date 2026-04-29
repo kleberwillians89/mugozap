@@ -1339,9 +1339,71 @@ async def process_inbound_sales_message(
         )
 
     next_question = sales_brain.get_next_question(state_after)
-    reply = sales_brain.build_contextual_reply(state_before, state_after, extracted_signals, next_question).strip()
+    deterministic_reply = sales_brain.build_contextual_reply(state_before, state_after, extracted_signals, next_question).strip()
     if state_after.get("handoff"):
-        reply = "Claro. Vou te encaminhar para a Julia com um resumo do que você precisa."
+        deterministic_reply = "Perfeito, vou encaminhar seu contexto para a Julia e ela continua com você por aqui."
+
+    ai_result = {}
+    used_openai = False
+    openai_available = bool((os.getenv("OPENAI_API_KEY") or os.getenv("OPENAI_KEY") or "").strip())
+    ai_context = sales_brain.merge_state(
+        state_after,
+        {
+            "next_best_question": next_question.get("question"),
+            "backend_next_question_category": next_question.get("category"),
+            "already_answered_fields": [
+                key
+                for key in ["service_interest", "main_goal", "site_scope", "lead_source", "current_tools", "current_status", "current_problem", "urgency", "budget_signal"]
+                if sales_brain.flatten_state(state_after).get(key) not in (None, "", [], {})
+            ],
+            "forbidden_questions": [
+                "não perguntar serviço se service_interest existe",
+                "não repetir last_question_asked",
+                "não perguntar campos já preenchidos",
+            ],
+        },
+    )
+    try:
+        recent_messages = get_recent_messages(wa_id, limit=12, workspace_id=workspace_id) or []
+        ai_result = await generate_reply(
+            wa_id=wa_id,
+            user_message=user_text,
+            first_message_sent=True,
+            recent_messages=recent_messages,
+            lead_context=ai_context,
+        )
+        used_openai = openai_available
+    except Exception as e:
+        print(f"SALES_PIPELINE_OPENAI_ERROR cid={cid} wa_id={wa_id} error={repr(e)}")
+        ai_result = {}
+        used_openai = False
+
+    ai_fields = ai_result.get("lead_fields") if isinstance(ai_result.get("lead_fields"), dict) else {}
+    state_after = sales_brain.merge_state(state_after, ai_fields)
+    state_after = sales_brain.merge_state(state_after, extracted_signals)
+    if (
+        ai_result.get("handoff")
+        or ai_result.get("next_action") == "handoff"
+        or ai_result.get("briefing_ready")
+        or ai_result.get("lead_temperature") == "hot"
+    ):
+        state_after = sales_brain.merge_state(
+            state_after,
+            {
+                "handoff": True,
+                "handoff_reason": ai_result.get("handoff_reason") or "ai_handoff",
+                "lead_temperature": "hot",
+                "meeting_suggested": True,
+                "briefing_ready": True,
+                "next_action": "handoff",
+            },
+        )
+    next_question = sales_brain.get_next_question(state_after)
+    if state_after.get("handoff"):
+        reply = "Perfeito, vou encaminhar seu contexto para a Julia e ela continua com você por aqui."
+    else:
+        reply = (ai_result.get("reply") or deterministic_reply or next_question.get("question") or "").strip()
+
     validation = sales_brain.validate_final_reply(reply, state_after)
     blocked_reason = validation.get("reason") or ""
     print(f"SALES_REPLY_BEFORE_VALIDATION cid={cid} wa_id={wa_id} reply={reply[:240]!r}")
@@ -1376,7 +1438,9 @@ async def process_inbound_sales_message(
                 "lead_temperature": "hot" if state_after.get("urgency") == "alta" or state_after.get("handoff") else "warm",
                 "meeting_suggested": True,
                 "briefing_ready": True,
-                "next_action": "handoff" if state_after.get("handoff") else "offer_meeting",
+                "handoff": True,
+                "handoff_reason": state_after.get("handoff_reason") or "lead_qualificado_ou_urgente",
+                "next_action": "handoff",
                 "briefing": sales_brain.build_briefing(state_after, []),
             },
         )
@@ -1385,6 +1449,33 @@ async def process_inbound_sales_message(
         reply=reply,
         next_question=next_question,
     )
+    result.update(
+        {
+            key: ai_result.get(key)
+            for key in ["suggested_tags", "follow_up", "memory_summary", "memory_theme", "memory_goal", "lead_theme", "lead_score"]
+            if ai_result.get(key) not in (None, "", [], {})
+        }
+    )
+    result["reply"] = reply
+    result["lead_fields"] = _merge_lead_fields(result.get("lead_fields"), ai_fields)
+    result["lead_fields"] = _merge_lead_fields(result.get("lead_fields"), {k: v for k, v in sales_brain.flatten_state(state_after).items() if k in sales_brain.FIELD_KEYS})
+    result["briefing"] = _merge_briefing(ai_result.get("briefing"), result.get("briefing"))
+    if state_after.get("handoff"):
+        result["reply"] = "Perfeito, vou encaminhar seu contexto para a Julia e ela continua com você por aqui."
+        result["handoff"] = True
+        result["next_action"] = "handoff"
+        result["lead_temperature"] = "hot"
+        result["briefing_ready"] = True
+    if ai_result.get("lead_temperature") in {"cold", "warm", "hot"} and not state_after.get("briefing_ready"):
+        result["lead_temperature"] = ai_result.get("lead_temperature")
+    if ai_result.get("intent"):
+        result["intent"] = ai_result.get("intent")
+    if not state_after.get("handoff") and ai_result.get("next_action") in {"reply", "ask_question", "offer_meeting", "handoff", "create_task", "pause_bot", "follow_up"}:
+        result["next_action"] = ai_result.get("next_action")
+    if result.get("next_action") == "handoff":
+        result["handoff"] = True
+        result["lead_temperature"] = "hot"
+        result["briefing_ready"] = True
     saved_state = await _save_ai_result_state(
         wa_id,
         ai_state=raw_state,
@@ -1405,7 +1496,7 @@ async def process_inbound_sales_message(
         "state_after": sales_brain.flatten_state(saved_state),
         "next_question": next_question,
         "result": result,
-        "used_openai": False,
+        "used_openai": used_openai,
         "blocked_reason": blocked_reason,
     }
 
@@ -2908,10 +2999,7 @@ def start_handoff_now(
 
     safe_send(
         wa_id,
-        (
-            "Perfeito. Encaminhei seu atendimento para o time da Mugô.\n\n"
-            f"Se quiser adiantar agora, fale direto por aqui:\n{link}"
-        ),
+        "Perfeito, vou encaminhar seu contexto para a Julia e ela continua com você por aqui.",
         meta={
             "event": "handoff_link",
             "cid": cid,
@@ -2930,10 +3018,7 @@ def start_handoff_now(
             "current_step": "handoff_waiting",
             "flow_step": "handoff_waiting",
             "last_bot_step": "handoff_link",
-            "last_bot_text": (
-                "Perfeito. Encaminhei seu atendimento para o time da Mugô.\n\n"
-                f"Se quiser adiantar agora, fale direto por aqui:\n{link}"
-            )[:900],
+            "last_bot_text": "Perfeito, vou encaminhar seu contexto para a Julia e ela continua com você por aqui.",
             "bot_status": "handoff_active",
             "bot_paused": True,
             "handoff_sent_at": _now_iso(),

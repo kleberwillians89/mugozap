@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -34,6 +35,7 @@ def pipeline_step(
     list_title: str = "",
     list_description: str = "",
     forced_reply: str = "",
+    ai_result: dict | None = None,
 ) -> dict:
     state_before = sales_brain.flatten_state(state)
     text = message or button_title or list_title or list_description or button_id or list_id
@@ -55,7 +57,31 @@ def pipeline_step(
         state_after = sales_brain.merge_state(state_after, signals)
 
     next_q = sales_brain.get_next_question(state_after)
-    reply = forced_reply or sales_brain.build_contextual_reply(state_before, state_after, signals, next_q)
+    used_openai = bool(ai_result)
+    if ai_result:
+        ai_fields = ai_result.get("lead_fields") if isinstance(ai_result.get("lead_fields"), dict) else {}
+        state_after = sales_brain.merge_state(state_after, ai_fields)
+        state_after = sales_brain.merge_state(state_after, signals)
+        if (
+            ai_result.get("handoff")
+            or ai_result.get("next_action") == "handoff"
+            or ai_result.get("briefing_ready")
+            or ai_result.get("lead_temperature") == "hot"
+        ):
+            state_after = sales_brain.merge_state(
+                state_after,
+                {
+                    "handoff": True,
+                    "handoff_reason": ai_result.get("handoff_reason") or "ai_handoff",
+                    "lead_temperature": "hot",
+                    "meeting_suggested": True,
+                    "briefing_ready": True,
+                    "next_action": "handoff",
+                },
+            )
+        next_q = sales_brain.get_next_question(state_after)
+
+    reply = forced_reply or (ai_result or {}).get("reply") or sales_brain.build_contextual_reply(state_before, state_after, signals, next_q)
     validation = sales_brain.validate_final_reply(reply, state_after)
     if validation.get("blocked"):
         replacement = {
@@ -87,7 +113,7 @@ def pipeline_step(
         "state_after": sales_brain.flatten_state(state_after),
         "next_question": next_q,
         "blocked_reason": validation.get("reason") or "",
-        "used_openai": False,
+        "used_openai": used_openai,
     }
 
 
@@ -222,6 +248,97 @@ def test_real_meta_list_reply_automation_payload():
     assert_equal("lead_source", state["lead_source"], "WhatsApp")
     assert_true("reply asks tools", "Hoje vocês atendem tudo manualmente ou já usam alguma ferramenta/CRM?" in step2["reply"])
     assert_true("did not repeat source", "Hoje os contatos chegam mais pelo WhatsApp, Instagram ou site?" not in step2["reply"])
+
+
+def test_ai_led_after_menu_choice():
+    state = pipeline_step(
+        sales_brain.default_lead_state(),
+        list_id="service_automation",
+        list_title="Automatizar WhatsApp",
+        list_description="Atendimento, leads e CRM",
+    )["state_after"]
+    step = pipeline_step(
+        state,
+        message="quero vender mais pelo WhatsApp",
+        ai_result={
+            "reply": "Boa, então o foco é transformar o WhatsApp em um canal mais forte de vendas. Hoje vocês atendem tudo manualmente ou já usam algum CRM?",
+            "intent": "automacao_whatsapp",
+            "lead_temperature": "warm",
+            "next_action": "ask_question",
+            "handoff": False,
+            "briefing_ready": False,
+            "lead_fields": {
+                "main_goal": "vendas/leads",
+                "desired_result": "vender mais pelo WhatsApp",
+                "service_interest": "automacao_whatsapp",
+                "last_question_category": "current_tools",
+            },
+        },
+    )
+    assert_equal("used_openai", step["used_openai"], True)
+    assert_equal("service kept", step["state_after"]["service_interest"], "automacao_whatsapp")
+    assert_equal("main_goal", step["state_after"]["main_goal"], "vendas/leads")
+    assert_true("ai phrasing kept", step["reply"].startswith("Boa, então o foco"))
+
+
+def test_ai_repeat_is_blocked():
+    state = state_with_choice("service_automation")
+    state = sales_brain.merge_state(
+        state,
+        {
+            "lead_source": "WhatsApp",
+            "last_question_asked": "Hoje os contatos chegam mais pelo WhatsApp, Instagram ou site?",
+            "last_question_category": "lead_source",
+        },
+    )
+    step = pipeline_step(
+        state,
+        message="whatsapp",
+        ai_result={
+            "reply": "Hoje os contatos chegam mais pelo WhatsApp, Instagram ou site?",
+            "intent": "automacao_whatsapp",
+            "next_action": "ask_question",
+            "lead_fields": {"lead_source": "WhatsApp"},
+        },
+    )
+    assert_equal("used_openai", step["used_openai"], True)
+    assert_true("blocked repeat", step["blocked_reason"] in {"duplicate_last_question", "known_lead_source"})
+    assert_true("replacement asks tools", "ferramenta/CRM" in step["reply"] or "CRM" in step["reply"])
+
+
+def test_urgency_triggers_julia_handoff():
+    state = state_with_choice("service_automation")
+    state = sales_brain.merge_state(
+        state,
+        {
+            "main_goal": "vendas/leads",
+            "lead_source": "WhatsApp",
+            "current_tools": "manual",
+            "last_question_category": "urgency",
+        },
+    )
+    step = pipeline_step(
+        state,
+        message="essa semana",
+        ai_result={
+            "reply": "Perfeito, vou encaminhar seu contexto para a Julia e ela continua com você por aqui.",
+            "intent": "automacao_whatsapp",
+            "lead_temperature": "hot",
+            "next_action": "handoff",
+            "handoff": True,
+            "briefing_ready": True,
+            "lead_fields": {"urgency": "alta"},
+        },
+    )
+    assert_equal("handoff", step["state_after"]["handoff"], True)
+    assert_equal("next_action", step["state_after"]["next_action"], "handoff")
+    assert_equal("briefing_ready", step["state_after"]["briefing_ready"], True)
+
+
+def test_julia_number_normalization():
+    raw = "11973510549"
+    normalized = "55" + re.sub(r"\D+", "", raw)
+    assert_equal("julia whatsapp", normalized, "5511973510549")
 
 
 def test_automation_leads():
@@ -408,6 +525,10 @@ def main():
         ("automation_choice", test_automation_choice),
         ("pipeline_automation_contextual_answers", test_pipeline_automation_contextual_answers),
         ("real_meta_list_reply_automation_payload", test_real_meta_list_reply_automation_payload),
+        ("ai_led_after_menu_choice", test_ai_led_after_menu_choice),
+        ("ai_repeat_is_blocked", test_ai_repeat_is_blocked),
+        ("urgency_triggers_julia_handoff", test_urgency_triggers_julia_handoff),
+        ("julia_number_normalization", test_julia_number_normalization),
         ("automation_leads", test_automation_leads),
         ("manual", test_manual),
         ("ai_context", test_ai_context),

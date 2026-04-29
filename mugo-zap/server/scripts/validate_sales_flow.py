@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import sys
+import urllib.parse
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -119,7 +120,7 @@ def pipeline_step(
     ):
         from app import build_handoff_lead_reply
 
-        reply = build_handoff_lead_reply()
+        reply = build_handoff_lead_reply(state_after)
         state_after = sales_brain.merge_state(
             state_after,
             {
@@ -630,6 +631,66 @@ def test_handoff_reply_includes_julia_link():
     from app import JULIA_DIRECT_LINK, JULIA_HANDOFF_REPLY
 
     assert_true("handoff has link", JULIA_DIRECT_LINK in JULIA_HANDOFF_REPLY)
+    assert_true("handoff has encoded text", "?text=" in JULIA_HANDOFF_REPLY)
+
+
+def test_prefilled_julia_link_contains_encoded_context():
+    from app import JULIA_DIRECT_LINK, build_julia_prefilled_link
+
+    context = {
+        "service_interest": "automacao_whatsapp",
+        "main_goal": "responder leads mais rápido",
+        "current_problem": "processo manual",
+        "lead_source": "WhatsApp",
+        "current_tools": "planilha",
+        "urgency": "alta",
+        "briefing": {"summary": "Lead quer automatizar atendimento até maio."},
+    }
+    link = build_julia_prefilled_link(context)
+    assert_true("link prefix", link.startswith(f"{JULIA_DIRECT_LINK}?text="))
+    decoded = urllib.parse.unquote(link.split("?text=", 1)[1])
+    assert_true("decoded service", "Serviço: automacao_whatsapp" in decoded)
+    assert_true("decoded goal", "Objetivo: responder leads mais rápido" in decoded)
+    assert_true("decoded problem", "Problema: processo manual" in decoded)
+
+
+def test_internal_operation_briefing_without_link():
+    from app import OPERATION_NUMBER, _build_julia_briefing_message
+
+    result = {
+        "lead_temperature": "hot",
+        "lead_fields": {
+            "service_interest": "site",
+            "main_goal": "vendas/leads",
+            "current_problem": "página antiga",
+            "lead_source": "Instagram",
+            "current_tools": "manual",
+            "urgency": "alta",
+        },
+        "briefing": {"summary": "Lead quer melhorar a página atual para vender mais."},
+    }
+    message = _build_julia_briefing_message(wa_id="5511999999999", user={"nome": "Lead Teste"}, result=result)
+    assert_equal("operation number", OPERATION_NUMBER, "5511972769605")
+    assert_true("structured title", "🔥 Novo lead qualificado" in message)
+    assert_true("service in message", "Serviço: site" in message)
+    assert_true("summary in message", "Lead quer melhorar a página atual" in message)
+    assert_true("no wa link", "wa.me" not in message)
+
+
+def test_no_legacy_eduarda_routing():
+    import app
+
+    assert_true("no legacy Eduarda number", not hasattr(app, "EDUARDA_NUMBER"))
+
+
+def test_handoff_opening_varies_from_last_reply():
+    from app import build_handoff_lead_reply
+
+    first = build_handoff_lead_reply({"last_question_asked": "Certo. Já deixei um resumo pronto para a Julia."})
+    second = build_handoff_lead_reply({"last_question_asked": first})
+    third = build_handoff_lead_reply({"last_question_asked": second})
+    openings = [reply.split(".", 1)[0] for reply in [first, second, third]]
+    assert_true("no same opening three times", len(set(openings)) > 1)
 
 
 def test_traffic_budget_handoff_reply_has_julia_link():
@@ -776,6 +837,10 @@ def main():
         ("site_scope_not_overwritten_without_explicit_change", test_site_scope_not_overwritten_without_explicit_change),
         ("explicit_site_scope_change_allowed", test_explicit_site_scope_change_allowed),
         ("handoff_reply_includes_julia_link", test_handoff_reply_includes_julia_link),
+        ("prefilled_julia_link_contains_encoded_context", test_prefilled_julia_link_contains_encoded_context),
+        ("internal_operation_briefing_without_link", test_internal_operation_briefing_without_link),
+        ("no_legacy_eduarda_routing", test_no_legacy_eduarda_routing),
+        ("handoff_opening_varies_from_last_reply", test_handoff_opening_varies_from_last_reply),
         ("traffic_budget_handoff_reply_has_julia_link", test_traffic_budget_handoff_reply_has_julia_link),
         ("site_urgency_handoff_reply_has_julia_link", test_site_urgency_handoff_reply_has_julia_link),
         ("any_handoff_reply_without_link_is_corrected", test_any_handoff_reply_without_link_is_corrected),

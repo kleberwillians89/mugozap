@@ -154,6 +154,12 @@ INTERNAL_ALLOWED_EMAILS = {
 DEFAULT_INTERNAL_ROLE = (os.getenv("DEFAULT_INTERNAL_ROLE") or "staff").strip()
 DEFAULT_ASSIGNEE = (os.getenv("DEFAULT_ASSIGNEE") or "Julia").strip()
 OPERATION_NUMBER = _normalize_brazil_whatsapp_number(os.getenv("OPERATION_NUMBER") or "11972769605")
+OPERATION_SECONDARY_NUMBER = _normalize_brazil_whatsapp_number(os.getenv("OPERATION_SECONDARY_NUMBER") or "5511986531008")
+OPERATION_BRIEFING_NUMBERS = [
+    number
+    for index, number in enumerate([OPERATION_NUMBER, OPERATION_SECONDARY_NUMBER])
+    if number and number not in [OPERATION_NUMBER, OPERATION_SECONDARY_NUMBER][:index]
+]
 
 from services.ai_state import get_ai_state, upsert_ai_state, reset_ai_state
 from services.state import (
@@ -206,6 +212,7 @@ async def startup_check():
     print("DEFAULT_ASSIGNEE:", DEFAULT_ASSIGNEE)
     print("HUMAN_NUMBER:", HUMAN_NUMBER)
     print("OPERATION_NUMBER:", OPERATION_NUMBER)
+    print("OPERATION_SECONDARY_NUMBER:", OPERATION_SECONDARY_NUMBER)
     print("SUPABASE_TABLE_CONVERSATIONS:", SUPABASE_TABLE_CONVERSATIONS)
     print("SUPABASE_TABLE_USERS:", SUPABASE_TABLE_USERS)
     print("SUPABASE_TABLE_MESSAGES:", SUPABASE_TABLE_MESSAGES)
@@ -1235,6 +1242,27 @@ def _build_julia_briefing_message(
     return "\n".join(lines)[:3500]
 
 
+def _send_operation_briefing(
+    message: str,
+    *,
+    meta: dict | None = None,
+    workspace_id: str = "",
+    cid: str = "",
+) -> dict:
+    results = {}
+    for number in OPERATION_BRIEFING_NUMBERS:
+        ok = safe_send(
+            number,
+            message,
+            meta={**(meta or {}), "operation_number": number},
+            workspace_id=workspace_id,
+            cid=cid,
+        )
+        results[number] = bool(ok)
+        print(f"INTERNAL_BRIEFING_SENT_TO_OPERATION cid={cid} to={number} ok={bool(ok)}")
+    return results
+
+
 async def _save_ai_result_state(
     wa_id: str,
     *,
@@ -1818,14 +1846,13 @@ async def _handle_ai_operational_decision(
         return True
 
     print(f"[{cid}] BRIEFING:send_internal wa_id={wa_id} topic={topic} summary_len={len(summary)}")
-    operation_ok = safe_send(
-        OPERATION_NUMBER,
+    operation_results = _send_operation_briefing(
         internal_briefing,
         meta={"event": "internal_briefing_to_operation", "cid": cid, "lead_wa_id": wa_id, "topic": topic},
         workspace_id=workspace_id,
         cid=cid,
     )
-    print(f"INTERNAL_BRIEFING_SENT_TO_OPERATION cid={cid} wa_id={wa_id} to={OPERATION_NUMBER} ok={bool(operation_ok)}")
+    operation_ok = any(operation_results.values())
     latest = await get_ai_state(wa_id, workspace_id=workspace_id) or {}
     await upsert_ai_state(
         wa_id,
@@ -1833,6 +1860,7 @@ async def _handle_ai_operational_decision(
             **latest,
             "briefing_sent_at": latest.get("briefing_sent_at") or now,
             "briefing_sent_operation": bool(operation_ok),
+            "briefing_sent_operation_numbers": operation_results,
         },
         workspace_id=workspace_id,
     )
@@ -3202,8 +3230,7 @@ def start_handoff_now(
         f"{summary}"
     )
 
-    operation_ok = safe_send(
-        OPERATION_NUMBER,
+    operation_results = _send_operation_briefing(
         internal_briefing,
         meta={
             "event": "internal_handoff_to_operation",
@@ -3215,7 +3242,7 @@ def start_handoff_now(
         workspace_id=workspace_id,
         cid=cid,
     )
-    print(f"INTERNAL_BRIEFING_SENT_TO_OPERATION cid={cid} wa_id={wa_id} to={OPERATION_NUMBER} ok={bool(operation_ok)}")
+    operation_ok = any(operation_results.values())
 
     if send_lead_message:
         lead_reply = build_handoff_lead_reply(
@@ -3231,6 +3258,7 @@ def start_handoff_now(
                 "event": "handoff_link",
                 "cid": cid,
                 "internal_briefing_sent_operation": operation_ok,
+                "internal_briefing_sent_operation_numbers": operation_results,
             },
             workspace_id=workspace_id,
             cid=cid,

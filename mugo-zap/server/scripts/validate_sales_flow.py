@@ -395,6 +395,12 @@ def test_operation_number_normalization():
     assert_equal("operation already normalized", _normalize_brazil_whatsapp_number("5511972769605"), "5511972769605")
 
 
+def test_operation_briefing_numbers_include_both():
+    from app import OPERATION_BRIEFING_NUMBERS
+
+    assert_equal("operation briefing numbers", OPERATION_BRIEFING_NUMBERS, ["5511972769605", "5511986531008"])
+
+
 def test_automation_leads():
     state = state_with_choice("service_automation")
     state = sales_brain.merge_state(state, {"last_question_category": "lead_source"})
@@ -828,6 +834,7 @@ def main():
         ("urgency_triggers_julia_handoff", test_urgency_triggers_julia_handoff),
         ("julia_number_normalization", test_julia_number_normalization),
         ("operation_number_normalization", test_operation_number_normalization),
+        ("operation_briefing_numbers_include_both", test_operation_briefing_numbers_include_both),
         ("automation_leads", test_automation_leads),
         ("manual", test_manual),
         ("ai_context", test_ai_context),

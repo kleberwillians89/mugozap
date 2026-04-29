@@ -496,6 +496,36 @@ def test_dedupe_patch_preserves_sales_state():
     assert_equal("next category", second["next_question"]["category"], "current_tools")
 
 
+def test_ai_fields_do_not_turn_lead_source_into_current_tools():
+    from app import _sanitize_ai_lead_fields
+
+    state = state_with_choice("service_automation")
+    state = sales_brain.merge_state(
+        state,
+        {
+            "last_question_category": "lead_source",
+            "last_question_asked": "Hoje os contatos chegam mais pelo WhatsApp, Instagram ou site?",
+        },
+    )
+    signals = {"lead_source": "WhatsApp", "funnel_stage": "qualificacao"}
+    sanitized = _sanitize_ai_lead_fields(
+        {"lead_source": "WhatsApp", "current_tools": "WhatsApp", "main_goal": "Automatizar meu WhatsApp"},
+        state_before=state,
+        extracted_signals=signals,
+        user_text="WhatsApp",
+    )
+    assert_equal("lead_source kept", sanitized.get("lead_source"), "WhatsApp")
+    assert_equal("current_tools removed", sanitized.get("current_tools"), None)
+    assert_equal("unrelated main_goal removed", sanitized.get("main_goal"), None)
+
+
+def test_openai_fallback_is_marked():
+    from services.openai_client import _fallback
+
+    result = _fallback("Ok, muito obrigado")
+    assert_equal("fallback marker", result.get("fallback"), True)
+
+
 def test_human():
     state = state_with_choice("service_human")
     flat = sales_brain.flatten_state(state)
@@ -567,6 +597,8 @@ def main():
         ("pipeline_site_melhorar", test_pipeline_site_melhorar),
         ("persisted_pipeline_site_state_between_messages", test_persisted_pipeline_site_state_between_messages),
         ("dedupe_patch_preserves_sales_state", test_dedupe_patch_preserves_sales_state),
+        ("ai_fields_do_not_turn_lead_source_into_current_tools", test_ai_fields_do_not_turn_lead_source_into_current_tools),
+        ("openai_fallback_is_marked", test_openai_fallback_is_marked),
         ("human", test_human),
         ("anti_loop", test_anti_loop),
         ("known_lead_source_blocks_repeat", test_known_lead_source_blocks_repeat),

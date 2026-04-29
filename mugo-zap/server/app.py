@@ -817,6 +817,85 @@ def _deterministic_choice_result(choice: dict, state: dict) -> dict:
     return result
 
 
+def _sanitize_ai_lead_fields(
+    ai_fields: dict | None,
+    *,
+    state_before: dict | None,
+    extracted_signals: dict | None,
+    user_text: str = "",
+) -> dict:
+    fields = dict(ai_fields or {})
+    before = sales_brain.flatten_state(state_before or {})
+    signals = dict(extracted_signals or {})
+    last_category = before.get("last_question_category") or ""
+    text_norm = sales_brain.normalize_text(user_text)
+    channel_values = {"whatsapp", "whats", "zap", "instagram", "insta", "site", "indicacao"}
+
+    allowed_by_category = {
+        "lead_source": {"lead_source", "funnel_stage"},
+        "current_tools": {"current_tools", "current_problem", "funnel_stage"},
+        "current_status": {"current_status", "funnel_stage"},
+        "site_scope": {"site_scope", "funnel_stage"},
+        "main_goal": {"main_goal", "desired_result", "current_problem", "funnel_stage"},
+        "current_problem": {"current_problem", "main_goal", "funnel_stage"},
+        "urgency": {"urgency", "funnel_stage"},
+        "budget_signal": {"budget_signal", "funnel_stage"},
+    }
+    protected_fields = {
+        "service_interest",
+        "intent",
+        "main_goal",
+        "desired_result",
+        "site_scope",
+        "lead_source",
+        "current_tools",
+        "current_status",
+        "current_problem",
+        "urgency",
+        "budget_signal",
+    }
+    allowed = allowed_by_category.get(last_category)
+
+    for key in list(fields.keys()):
+        value = fields.get(key)
+        if key in signals:
+            continue
+        if key in protected_fields and before.get(key) not in (None, "", [], {}) and value not in (None, "", [], {}, before.get(key)):
+            print(
+                "AI_FIELD_OVERWRITE_BLOCKED "
+                f"field={key} previous={before.get(key)!r} incoming={value!r} category={last_category or '-'}"
+            )
+            fields.pop(key, None)
+            continue
+        if allowed is not None and key in protected_fields and key not in allowed and value not in (None, "", [], {}):
+            print(
+                "AI_FIELD_CONTEXT_BLOCKED "
+                f"field={key} incoming={value!r} category={last_category or '-'} text={user_text[:120]!r}"
+            )
+            fields.pop(key, None)
+
+    if last_category == "lead_source":
+        current_tools = sales_brain.normalize_text(fields.get("current_tools") or "")
+        lead_source = sales_brain.normalize_text(signals.get("lead_source") or fields.get("lead_source") or before.get("lead_source") or "")
+        if current_tools and (current_tools in channel_values or current_tools == lead_source or current_tools in text_norm):
+            print(
+                "AI_FIELD_CONTEXT_BLOCKED "
+                f"field=current_tools incoming={fields.get('current_tools')!r} category=lead_source text={user_text[:120]!r}"
+            )
+            fields.pop("current_tools", None)
+
+    if last_category in {"urgency", "handoff", "offer_meeting"}:
+        for key in ["main_goal", "desired_result", "current_problem"]:
+            if key in fields and key not in signals and before.get(key) not in (None, "", [], {}):
+                print(
+                    "AI_FIELD_CONTEXT_BLOCKED "
+                    f"field={key} incoming={fields.get(key)!r} category={last_category} reason=post_qualification"
+                )
+                fields.pop(key, None)
+
+    return fields
+
+
 def _postprocess_ai_result(
     *,
     cid: str,
@@ -1372,13 +1451,20 @@ async def process_inbound_sales_message(
             recent_messages=recent_messages,
             lead_context=ai_context,
         )
-        used_openai = openai_available
+        used_openai = openai_available and not bool(ai_result.get("fallback"))
+        if ai_result.get("fallback"):
+            print(f"SALES_PIPELINE_OPENAI_FALLBACK cid={cid} wa_id={wa_id} using=deterministic_reply")
     except Exception as e:
         print(f"SALES_PIPELINE_OPENAI_ERROR cid={cid} wa_id={wa_id} error={repr(e)}")
         ai_result = {}
         used_openai = False
 
-    ai_fields = ai_result.get("lead_fields") if isinstance(ai_result.get("lead_fields"), dict) else {}
+    ai_fields = _sanitize_ai_lead_fields(
+        {} if ai_result.get("fallback") else (ai_result.get("lead_fields") if isinstance(ai_result.get("lead_fields"), dict) else {}),
+        state_before=state_before,
+        extracted_signals=extracted_signals,
+        user_text=user_text,
+    )
     state_after = sales_brain.merge_state(state_after, ai_fields)
     state_after = sales_brain.merge_state(state_after, extracted_signals)
     if (
@@ -1402,7 +1488,7 @@ async def process_inbound_sales_message(
     if state_after.get("handoff"):
         reply = "Perfeito, vou encaminhar seu contexto para a Julia e ela continua com você por aqui."
     else:
-        reply = (ai_result.get("reply") or deterministic_reply or next_question.get("question") or "").strip()
+        reply = ((None if ai_result.get("fallback") else ai_result.get("reply")) or deterministic_reply or next_question.get("question") or "").strip()
 
     validation = sales_brain.validate_final_reply(reply, state_after)
     blocked_reason = validation.get("reason") or ""
@@ -1566,6 +1652,7 @@ async def _handle_ai_operational_decision(
             user=user,
             workspace_id=workspace_id,
             internal_briefing=internal_briefing,
+            send_lead_message=False,
         )
         await mark_handoff_done(wa_id, topic=topic, summary=summary, workspace_id=workspace_id)
         latest = await get_ai_state(wa_id, workspace_id=workspace_id) or {}
@@ -2881,6 +2968,7 @@ def start_handoff_now(
     user: dict | None = None,
     workspace_id: str = "",
     internal_briefing: str = "",
+    send_lead_message: bool = True,
 ):
     topic = (topic or "Atendimento Mugô").strip()[:100]
     flow_data = _flow_data(wa_id, workspace_id=workspace_id)
@@ -3002,18 +3090,19 @@ def start_handoff_now(
         cid=cid,
     )
 
-    safe_send(
-        wa_id,
-        "Perfeito, vou encaminhar seu contexto para a Julia e ela continua com você por aqui.",
-        meta={
-            "event": "handoff_link",
-            "cid": cid,
-            "internal_briefing_sent_julia": internal_ok_julia,
-            "internal_briefing_sent_eduarda": internal_ok_eduarda,
-        },
-        workspace_id=workspace_id,
-        cid=cid,
-    )
+    if send_lead_message:
+        safe_send(
+            wa_id,
+            "Perfeito, vou encaminhar seu contexto para a Julia e ela continua com você por aqui.",
+            meta={
+                "event": "handoff_link",
+                "cid": cid,
+                "internal_briefing_sent_julia": internal_ok_julia,
+                "internal_briefing_sent_eduarda": internal_ok_eduarda,
+            },
+            workspace_id=workspace_id,
+            cid=cid,
+        )
 
     merge_flow_data(
         wa_id,
@@ -3394,6 +3483,20 @@ async def _process_webhook_payload(data: dict, cid: str):
                     },
                     event="resume",
                 )
+            return
+
+        if post_handoff_mode:
+            print(f"[{cid}] WEBHOOK:post_handoff_skip_bot wa_id={wa_id} handoff_sent_at={ai_state.get('handoff_sent_at') or '-'}")
+            _log_outbound_skipped(cid, wa_id, "post_handoff_bot_paused")
+            _apply_operational_state(
+                wa_id,
+                workspace_id=workspace_id,
+                status="handoff_active",
+                step=(flow_data.get("current_step") or "handoff_waiting"),
+                waiting_for="human",
+                flow_patch={"last_user_text": _trim_text(user_text), "last_user_at": _now_iso()},
+                event="state_change",
+            )
             return
 
         if automation_paused or not bot_enabled or current_attendance_mode == "human":

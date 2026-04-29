@@ -58,6 +58,7 @@ def _fallback(user_message: str) -> Dict[str, Any]:
     next_action = "handoff" if handoff and intent == "humano" else ("offer_meeting" if meeting_suggested else "ask_question")
 
     return {
+        "fallback": True,
         "reply": _fallback_reply(msg, intent, score),
         "intent": intent,
         "next_action": next_action,

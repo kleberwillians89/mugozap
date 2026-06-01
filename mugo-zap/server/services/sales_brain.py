@@ -32,6 +32,7 @@ FIELD_KEYS = [
     "handoff_sent_at",
     "lead_temperature",
     "next_action",
+    "conversation_memory",
 ]
 
 
@@ -61,6 +62,7 @@ def default_lead_state() -> Dict[str, Any]:
         "handoff_reason": None,
         "handoff_sent_at": None,
         "lead_fields": {},
+        "conversation_memory": {},
     }
 
 
@@ -258,6 +260,76 @@ def _append_source(current: Any, source: str) -> str:
     if source and source not in parts:
         parts.append(source)
     return " e ".join(parts)
+
+
+def _empty_conversation_memory() -> Dict[str, Any]:
+    return {
+        "canal": None,
+        "atendimento": None,
+        "objetivo": None,
+        "gargalo": None,
+        "volume": None,
+        "tempo_resposta": None,
+        "processo_comercial": None,
+        "crm": None,
+        "automacao": None,
+        "orcamento": None,
+    }
+
+
+def _read_memory(state: Dict[str, Any]) -> Dict[str, Any]:
+    fields = state.get("lead_fields") if isinstance(state.get("lead_fields"), dict) else {}
+    raw = state.get("conversation_memory") or fields.get("conversation_memory") or {}
+    memory = _empty_conversation_memory()
+    if isinstance(raw, dict):
+        for key, value in raw.items():
+            if key in memory and value not in (None, "", [], {}):
+                memory[key] = value
+    return memory
+
+
+def _memory_from_known_fields(state: Dict[str, Any], updates: Dict[str, Any] | None = None, text: str = "") -> Dict[str, Any]:
+    merged = {**flatten_state(state), **(updates or {})}
+    memory = _read_memory(state)
+    norm = normalize_text(text)
+
+    if merged.get("lead_source"):
+        memory["canal"] = merged.get("lead_source")
+    if merged.get("current_tools"):
+        tools_norm = normalize_text(str(merged.get("current_tools") or ""))
+        if "manual" in tools_norm:
+            memory["atendimento"] = "manual"
+            memory["automacao"] = memory.get("automacao") or "não identificada"
+        elif tools_norm:
+            memory["atendimento"] = merged.get("current_tools")
+            if "crm" in tools_norm or tools_norm in {"hubspot", "pipedrive", "rd station", "kommo"}:
+                memory["crm"] = merged.get("current_tools")
+            else:
+                memory["automacao"] = merged.get("current_tools")
+    if merged.get("main_goal"):
+        memory["objetivo"] = merged.get("main_goal")
+    if merged.get("current_problem") and normalize_text(str(merged.get("current_problem"))) not in {"processo manual"}:
+        memory["gargalo"] = merged.get("current_problem")
+    if merged.get("budget_signal"):
+        memory["orcamento"] = merged.get("budget_signal")
+
+    volume_match = re.search(r"\b(\d{1,5})\s+(?:leads?|contatos?|mensagens?|atendimentos?)\b", norm)
+    if volume_match:
+        memory["volume"] = f"{volume_match.group(1)} contatos/leads"
+    if _has_any(norm, ["muito lead", "muitos leads", "alto volume", "bastante mensagem", "muita mensagem"]):
+        memory["volume"] = "alto volume percebido"
+    if _has_any(norm, ["demora", "demoram", "responder rapido", "responder rápido", "tempo de resposta", "lead esfria", "esfriam"]):
+        memory["tempo_resposta"] = "tempo de resposta é uma dor"
+        memory["gargalo"] = memory.get("gargalo") or "tempo de resposta"
+    if _has_any(norm, ["sem crm", "nao temos crm", "não temos crm", "planilha", "caderno"]):
+        memory["crm"] = "não usa CRM"
+        memory["processo_comercial"] = memory.get("processo_comercial") or "controle manual"
+    elif _has_any(norm, ["crm", "hubspot", "pipedrive", "rd station", "kommo"]):
+        memory["crm"] = merged.get("current_tools") or "usa CRM"
+    if _has_any(norm, ["sem processo", "baguncado", "bagunçado", "perdemos lead", "perde lead", "perdendo lead"]):
+        memory["processo_comercial"] = "processo comercial desorganizado"
+        memory["gargalo"] = memory.get("gargalo") or "perda de leads no processo"
+    return memory
 
 
 def _multi_short_answer(text: str) -> str:
@@ -658,6 +730,8 @@ def flatten_state(state: Dict[str, Any] | None) -> Dict[str, Any]:
     flat["selected_service_id"] = src.get("selected_service_id") or ""
     recent_questions = src.get("recent_bot_questions") or fields.get("recent_bot_questions") or []
     flat["recent_bot_questions"] = recent_questions if isinstance(recent_questions, list) else []
+    memory = src.get("conversation_memory") or fields.get("conversation_memory") or {}
+    flat["conversation_memory"] = memory if isinstance(memory, dict) else {}
     return flat
 
 
@@ -913,7 +987,9 @@ def extract_signal_from_message(text: str, current_state: Dict[str, Any]) -> Dic
                 }
             )
 
-    return _lock_known_field_updates(updates, state, text)
+    locked_updates = _lock_known_field_updates(updates, state, text)
+    locked_updates["conversation_memory"] = _memory_from_known_fields(state, locked_updates, text)
+    return locked_updates
 
 
 def merge_state(old_state: Dict[str, Any], updates: Dict[str, Any]) -> Dict[str, Any]:
@@ -937,6 +1013,52 @@ def merge_state(old_state: Dict[str, Any], updates: Dict[str, Any]) -> Dict[str,
         fields["recent_bot_questions"] = cleaned[-3:]
     merged["lead_fields"] = fields
     return merged
+
+
+def _progressive_automation_question(state: Dict[str, Any]) -> Dict[str, Any]:
+    state = flatten_state(state)
+    memory = _read_memory(state)
+    if not memory.get("objetivo"):
+        return {
+            "category": "main_goal",
+            "question": "O principal objetivo agora é vender mais, responder mais rápido ou organizar melhor o processo comercial?",
+            "next_action": "ask_question",
+        }
+    if not memory.get("volume"):
+        return {
+            "category": "volume",
+            "question": "Para dimensionar melhor, mais ou menos quantos leads ou conversas entram por semana?",
+            "next_action": "ask_question",
+        }
+    if not memory.get("gargalo"):
+        return {
+            "category": "gargalo",
+            "question": "Hoje o maior gargalo está na demora para responder, no acompanhamento dos leads ou na perda de oportunidades?",
+            "next_action": "ask_question",
+        }
+    if not memory.get("crm"):
+        return {
+            "category": "crm",
+            "question": "Vocês controlam esses leads em algum CRM ou ainda fica tudo no WhatsApp e na memória da equipe?",
+            "next_action": "ask_question",
+        }
+    if not memory.get("tempo_resposta"):
+        return {
+            "category": "tempo_resposta",
+            "question": "Quando um lead chama hoje, em média ele recebe retorno em minutos, horas ou só quando alguém consegue parar para responder?",
+            "next_action": "ask_question",
+        }
+    if not memory.get("orcamento"):
+        return {
+            "category": "budget_signal",
+            "question": "Vocês já têm uma faixa de investimento pensada para organizar essa operação?",
+            "next_action": "ask_question",
+        }
+    return {
+        "category": "offer_meeting",
+        "question": "Já tenho uma leitura boa do cenário. Posso encaminhar isso para a Julia avaliar o próximo movimento com vocês?",
+        "next_action": "offer_meeting",
+    }
 
 
 def get_next_question(state: Dict[str, Any]) -> Dict[str, Any]:
@@ -976,9 +1098,7 @@ def get_next_question(state: Dict[str, Any]) -> Dict[str, Any]:
             return {"category": "lead_source", "question": "Hoje os contatos chegam mais pelo WhatsApp, Instagram ou site?", "next_action": "ask_question"}
         if not (state.get("current_tools") or state.get("current_problem")):
             return {"category": "current_tools", "question": "Hoje vocês atendem manualmente ou já existe alguma automação rodando?", "next_action": "ask_question"}
-        if not state.get("urgency"):
-            return {"category": "urgency", "question": "Você quer colocar isso para rodar ainda este mês ou está só entendendo possibilidades?", "next_action": "ask_question"}
-        return offer
+        return _progressive_automation_question(state)
     if service == "inteligencia_artificial":
         if not state.get("main_goal"):
             return {"category": "main_goal", "question": "Você imagina usar IA mais para atendimento, vendas, conteúdo ou processos internos?", "next_action": "ask_question"}
@@ -1045,6 +1165,14 @@ def question_category(text: str) -> str:
         return "lead_source"
     if "manual" in norm or "ferramenta" in norm or "crm" in norm or "ja anunciam" in norm:
         return "current_tools" if "anunciam" not in norm else "current_status"
+    if "quantos leads" in norm or "quantas conversas" in norm or "entram por semana" in norm:
+        return "volume"
+    if "maior gargalo" in norm or "perda de oportunidades" in norm or "acompanhamento dos leads" in norm:
+        return "gargalo"
+    if "algum crm" in norm or "fica tudo no whatsapp" in norm:
+        return "crm"
+    if "recebe retorno" in norm or "minutos horas" in norm or "tempo de resposta" in norm:
+        return "tempo_resposta"
     if "data" in norm or "campanha" in norm or "este mes" in norm or "curto prazo" in norm or "prioridade" in norm:
         return "urgency"
     if "verba" in norm or "midia" in norm or "orcamento" in norm:
@@ -1084,6 +1212,7 @@ def is_duplicate_question(reply: str, last_question: str) -> bool:
 
 def _category_answered(state: Dict[str, Any], category: str) -> bool:
     state = flatten_state(state)
+    memory = _read_memory(state)
     if category == "current_tools":
         return bool(state.get("current_tools"))
     if category == "current_status":
@@ -1096,6 +1225,8 @@ def _category_answered(state: Dict[str, Any], category: str) -> bool:
         return bool(state.get("main_goal"))
     if category == "offer_meeting":
         return False
+    if category in {"volume", "gargalo", "crm", "tempo_resposta"}:
+        return bool(memory.get(category))
     return bool(state.get(category))
 
 

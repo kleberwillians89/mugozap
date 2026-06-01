@@ -337,7 +337,8 @@ def test_pipeline_automation_contextual_answers():
     step3 = pipeline_step(state, message="manualmente")
     state = step3["state_after"]
     assert_equal("current_tools", state["current_tools"], "manual")
-    assert_equal("next category", step3["next_question"]["category"], "urgency")
+    assert_equal("next category", step3["next_question"]["category"], "main_goal")
+    assert_true("asks objective", "vender mais" in step3["reply"] and "processo comercial" in step3["reply"])
 
 
 def test_real_meta_list_reply_automation_payload():
@@ -367,6 +368,28 @@ def test_real_meta_list_reply_automation_payload():
     assert_equal("lead_source", state["lead_source"], "WhatsApp")
     assert_true("reply asks tools", "manualmente" in step2["reply"] and "automação" in step2["reply"])
     assert_true("did not repeat source", "Hoje os contatos chegam mais pelo WhatsApp, Instagram ou site?" not in step2["reply"])
+
+
+def test_progressive_discovery_whatsapp_manual_vender_mais():
+    step1 = pipeline_step(sales_brain.default_lead_state(), message="WhatsApp")
+    assert_equal("service", step1["state_after"]["service_interest"], "automacao_whatsapp")
+    assert_equal("canal", step1["state_after"]["conversation_memory"]["canal"], "WhatsApp")
+    assert_equal("next category after channel", step1["next_question"]["category"], "current_tools")
+
+    step2 = pipeline_step(step1["state_after"], message="manual")
+    assert_equal("atendimento", step2["state_after"]["conversation_memory"]["atendimento"], "manual")
+    assert_equal("next category after manual", step2["next_question"]["category"], "main_goal")
+    assert_true("does not ask channel again", "contatos chegam" not in step2["reply"])
+
+    step3 = pipeline_step(step2["state_after"], message="vender mais")
+    memory = step3["state_after"]["conversation_memory"]
+    reply_norm = sales_brain.normalize_text(step3["reply"])
+    assert_equal("objetivo", memory["objetivo"], "vendas/leads")
+    assert_true("does not ask channel", "contatos chegam" not in reply_norm and "whatsapp instagram ou site" not in reply_norm)
+    assert_true("does not ask attendance", "atendem manualmente" not in reply_norm and "automacao rodando" not in reply_norm)
+    assert_true("does not ask objective", "objetivo agora e vender mais" not in reply_norm and "responder mais rapido" not in reply_norm)
+    assert_true("deepens context", step3["next_question"]["category"] in {"volume", "gargalo", "crm", "tempo_resposta"})
+    assert_true("asks deeper question", any(term in reply_norm for term in ["quantos leads", "gargalo", "crm", "tempo de resposta", "conversas entram"]))
 
 
 def test_ai_led_after_menu_choice():
@@ -1045,6 +1068,7 @@ def main():
         ("all_service_buttons", test_all_service_buttons),
         ("pipeline_automation_contextual_answers", test_pipeline_automation_contextual_answers),
         ("real_meta_list_reply_automation_payload", test_real_meta_list_reply_automation_payload),
+        ("progressive_discovery_whatsapp_manual_vender_mais", test_progressive_discovery_whatsapp_manual_vender_mais),
         ("ai_led_after_menu_choice", test_ai_led_after_menu_choice),
         ("ai_repeat_is_blocked", test_ai_repeat_is_blocked),
         ("urgency_triggers_julia_handoff", test_urgency_triggers_julia_handoff),

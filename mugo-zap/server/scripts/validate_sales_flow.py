@@ -24,7 +24,17 @@ def assert_true(name: str, value):
 
 
 def state_with_choice(choice_id: str) -> dict:
-    return sales_brain.merge_state(sales_brain.default_lead_state(), sales_brain.service_choice_update(choice_id))
+    state = sales_brain.merge_state(sales_brain.default_lead_state(), sales_brain.service_choice_update(choice_id))
+    next_q = sales_brain.get_next_question(state)
+    return sales_brain.merge_state(
+        state,
+        {
+            "last_question_asked": next_q["question"],
+            "last_question_category": next_q["category"],
+            "next_best_question": next_q["question"],
+            "next_action": next_q["next_action"],
+        },
+    )
 
 
 def pipeline_step(
@@ -212,9 +222,9 @@ def test_site_melhorar():
     assert_equal("contextual text is not menu", choice["is_menu_choice"], False)
     state = apply_message(state, "melhorar")
     flat = sales_brain.flatten_state(state)
-    assert_equal("site_scope", flat["site_scope"], "melhorar existente")
-    assert_equal("next category", sales_brain.get_next_question(flat)["category"], "main_goal")
-    assert_equal("next question", sales_brain.get_next_question(flat)["question"], "O foco dessa página é gerar leads, vender mais ou apresentar melhor a marca?")
+    assert_equal("site_scope", flat["site_scope"], "melhorar_site_existente")
+    assert_equal("next category", sales_brain.get_next_question(flat)["category"], "current_problem")
+    assert_true("next question asks problem", "maior incômodo" in sales_brain.get_next_question(flat)["question"])
 
 
 def test_site_do_zero():
@@ -226,13 +236,13 @@ def test_site_do_zero():
 def test_site_melhorar_frase():
     state = state_with_choice("service_site")
     state = apply_message(state, "melhorar uma página que já existe")
-    assert_equal("site_scope", sales_brain.flatten_state(state)["site_scope"], "melhorar existente")
+    assert_equal("site_scope", sales_brain.flatten_state(state)["site_scope"], "melhorar_site_existente")
 
 
 def test_text_site_without_state_is_menu():
     choice = sales_brain.normalize_inbound_choice(text="site", current_state={})
-    assert_equal("choice_id", choice["choice_id"], "service_site")
-    assert_equal("is_menu_choice", choice["is_menu_choice"], True)
+    assert_equal("choice_id", choice["choice_id"], None)
+    assert_equal("is_menu_choice", choice["is_menu_choice"], False)
 
 
 def test_text_site_with_state_is_not_menu():
@@ -310,12 +320,13 @@ def test_real_meta_list_reply_automation_payload():
     state = step1["state_after"]
     assert_equal("choice_id", step1["normalized_choice"]["choice_id"], "service_automation")
     assert_equal("service_interest", state["service_interest"], "automacao_whatsapp")
-    assert_equal("reply", step1["reply"], "Hoje os contatos chegam mais pelo WhatsApp, Instagram ou site?")
+    assert_true("reply interprets automation", "atendimento" in step1["reply"].lower())
+    assert_true("reply asks source", "WhatsApp, Instagram ou site" in step1["reply"])
 
     step2 = pipeline_step(state, message="WhatsApp")
     state = step2["state_after"]
     assert_equal("lead_source", state["lead_source"], "WhatsApp")
-    assert_true("reply asks tools", "Hoje vocês atendem tudo manualmente ou já usam alguma ferramenta/CRM?" in step2["reply"])
+    assert_true("reply asks tools", "manualmente" in step2["reply"] and "automação" in step2["reply"])
     assert_true("did not repeat source", "Hoje os contatos chegam mais pelo WhatsApp, Instagram ou site?" not in step2["reply"])
 
 
@@ -372,7 +383,7 @@ def test_ai_repeat_is_blocked():
     )
     assert_equal("used_openai", step["used_openai"], True)
     assert_true("blocked repeat", step["blocked_reason"] in {"duplicate_last_question", "known_lead_source"})
-    assert_true("replacement asks tools", "ferramenta/CRM" in step["reply"] or "CRM" in step["reply"])
+    assert_true("replacement asks operation", "manual" in step["reply"].lower() or "automação" in step["reply"].lower())
 
 
 def test_urgency_triggers_julia_handoff():
@@ -562,9 +573,58 @@ def test_pipeline_site_melhorar():
     step2 = pipeline_step(state, message="melhorar uma pagina que ja existe")
     state = step2["state_after"]
     assert_equal("contextual answer is not menu", step2["normalized_choice"]["is_menu_choice"], False)
-    assert_equal("site_scope", state["site_scope"], "melhorar existente")
-    assert_equal("next category", step2["next_question"]["category"], "main_goal")
+    assert_equal("site_scope", state["site_scope"], "melhorar_site_existente")
+    assert_equal("next category", step2["next_question"]["category"], "current_problem")
     assert_true("did not repeat site_scope", "página nova do zero" not in step2["reply"])
+    assert_true("asks site problem", "maior incômodo" in step2["reply"])
+
+
+def test_pipeline_site_melhorar_um_site_advances_to_problem():
+    step1 = pipeline_step(
+        sales_brain.default_lead_state(),
+        list_title="Site ou landing",
+        list_description="Criar ou melhorar páginas",
+    )
+    step2 = pipeline_step(step1["state_after"], message="Melhorar um site")
+    assert_equal("contextual answer is not menu", step2["normalized_choice"]["is_menu_choice"], False)
+    assert_equal("site scope", step2["state_after"]["site_scope"], "melhorar_site_existente")
+    assert_equal("next category", step2["next_question"]["category"], "current_problem")
+    assert_true("does not repeat create/improve", "página nova do zero" not in step2["reply"])
+    assert_true("asks problem", "maior incômodo" in step2["reply"])
+
+
+def test_pipeline_site_short_answer_does_not_repeat_scope():
+    state = state_with_choice("service_site")
+    step = pipeline_step(state, message="Site")
+    assert_equal("site scope", step["state_after"]["site_scope"], "melhorar_site_existente")
+    assert_equal("next category", step["next_question"]["category"], "current_problem")
+    assert_true("does not repeat scope", "página nova do zero" not in step["reply"])
+    assert_true("asks site problem", "maior incômodo" in step["reply"])
+
+
+def test_pipeline_whatsapp_short_answer_maps_to_automation():
+    step = pipeline_step(sales_brain.default_lead_state(), message="WhatsApp")
+    assert_equal("not menu click", step["normalized_choice"]["is_menu_choice"], False)
+    assert_equal("service", step["state_after"]["service_interest"], "automacao_whatsapp")
+    assert_equal("lead source", step["state_after"]["lead_source"], "WhatsApp")
+    assert_equal("next category", step["next_question"]["category"], "current_tools")
+    assert_true("asks operation", "manual" in step["reply"].lower() or "automação" in step["reply"].lower())
+
+
+def test_pipeline_instagram_short_answer_maps_to_social():
+    step = pipeline_step(sales_brain.default_lead_state(), message="Instagram")
+    assert_equal("not menu click", step["normalized_choice"]["is_menu_choice"], False)
+    assert_equal("service", step["state_after"]["service_interest"], "branding")
+    assert_equal("lead source", step["state_after"]["lead_source"], "Instagram")
+    assert_equal("next category", step["next_question"]["category"], "current_problem")
+    assert_true("asks instagram challenge", "atrair pessoas certas" in step["reply"])
+
+
+def test_pipeline_vague_answer_uses_premium_refinement():
+    step = pipeline_step(sales_brain.default_lead_state(), message="não sei ainda")
+    assert_equal("next category", step["next_question"]["category"], "service_interest")
+    assert_true("premium fallback", "leitura mais ampla" in step["reply"])
+    assert_true("one question", step["reply"].count("?") <= 1)
 
 
 def test_persisted_pipeline_site_state_between_messages():
@@ -583,10 +643,10 @@ def test_persisted_pipeline_site_state_between_messages():
     assert_equal("second loaded service", second["state_before"]["service_interest"], "site")
     assert_equal("second loaded category", second["state_before"]["last_question_category"], "site_scope")
     assert_equal("contextual answer is not menu", second["normalized_choice"]["is_menu_choice"], False)
-    assert_equal("signal site_scope", second["extracted_signals"]["site_scope"], "melhorar existente")
-    assert_equal("state site_scope", second["state_after"]["site_scope"], "melhorar existente")
-    assert_equal("next category", second["next_question"]["category"], "main_goal")
-    assert_equal("reply", second["reply"], "Certo. Então estamos falando de melhorar uma página que já existe. O foco dessa página é gerar leads, vender mais ou apresentar melhor a marca?")
+    assert_equal("signal site_scope", second["extracted_signals"]["site_scope"], "melhorar_site_existente")
+    assert_equal("state site_scope", second["state_after"]["site_scope"], "melhorar_site_existente")
+    assert_equal("next category", second["next_question"]["category"], "current_problem")
+    assert_equal("reply", second["reply"], "Entendi. Então o foco é melhorar uma estrutura que já existe. Hoje o maior incômodo é visual, conversão, velocidade, clareza da oferta ou organização das informações?")
 
 
 def test_dedupe_patch_preserves_sales_state():
@@ -684,20 +744,20 @@ def test_site_scope_not_overwritten_without_explicit_change():
     state = sales_brain.merge_state(
         state,
         {
-            "site_scope": "melhorar existente",
+            "site_scope": "melhorar_site_existente",
             "main_goal": "vendas/leads",
             "last_question_category": "urgency",
         },
     )
     step = pipeline_step(state, message="Preciso que vocês me ajudem a criar tudo, vocês conseguem?")
-    assert_equal("site_scope kept", step["state_after"]["site_scope"], "melhorar existente")
+    assert_equal("site_scope kept", step["state_after"]["site_scope"], "melhorar_site_existente")
     assert_equal("handoff", step["state_after"]["handoff"], True)
     assert_equal("briefing_ready", step["state_after"]["briefing_ready"], True)
 
 
 def test_explicit_site_scope_change_allowed():
     state = state_with_choice("service_site")
-    state = sales_brain.merge_state(state, {"site_scope": "melhorar existente", "last_question_category": "site_scope"})
+    state = sales_brain.merge_state(state, {"site_scope": "melhorar_site_existente", "last_question_category": "site_scope"})
     step = pipeline_step(state, message="na verdade quero criar do zero")
     assert_equal("site_scope changed", step["state_after"]["site_scope"], "criar do zero")
 
@@ -824,7 +884,7 @@ def test_site_urgency_handoff_reply_has_julia_link():
     state = sales_brain.merge_state(
         state,
         {
-            "site_scope": "melhorar existente",
+            "site_scope": "melhorar_site_existente",
             "main_goal": "vendas/leads",
             "last_question_category": "urgency",
         },
@@ -879,7 +939,7 @@ def test_anti_loop():
     )
     assert_equal("blocked", result["blocked"], True)
     assert_equal("reason", result["reason"], "forbidden_generic_reply")
-    assert_equal("replacement category", result["category"], "site_scope")
+    assert_equal("replacement category", result["category"], "current_problem")
 
 
 def test_known_lead_source_blocks_repeat():
@@ -908,7 +968,28 @@ def test_pipeline_anti_loop():
         forced_reply="Pra eu te direcionar melhor: você procura site, automação, IA, tráfego ou branding?",
     )
     assert_true("blocked generic", result["reply"] != "Pra eu te direcionar melhor: você procura site, automação, IA, tráfego ou branding?")
-    assert_equal("replacement category", result["next_question"]["category"], "site_scope")
+    assert_equal("replacement category", result["next_question"]["category"], "current_problem")
+
+
+def test_last_three_questions_block_semantic_repeat():
+    state = sales_brain.merge_state(
+        sales_brain.default_lead_state(),
+        {
+            "service_interest": "site",
+            "intent": "site",
+            "recent_bot_questions": [
+                "Você quer criar uma página nova do zero ou melhorar uma página que já existe?",
+                "Hoje o maior incômodo é visual, conversão, velocidade, clareza da oferta ou organização das informações?",
+                "O foco dessa página é gerar leads, vender mais ou apresentar melhor a marca?",
+            ],
+            "last_question_asked": "O foco dessa página é gerar leads, vender mais ou apresentar melhor a marca?",
+            "last_question_category": "main_goal",
+        },
+    )
+    result = sales_brain.validate_final_reply("O foco dessa página é gerar leads, vender mais ou apresentar melhor a marca?", state)
+    assert_equal("blocked", result["blocked"], True)
+    assert_equal("reason", result["reason"], "duplicate_last_question")
+    assert_true("replacement changes question", "O foco dessa página" not in result["reply"])
 
 
 def main():
@@ -941,6 +1022,11 @@ def main():
         ("timeout_fallback_branding_does_not_repeat_literal", test_timeout_fallback_branding_does_not_repeat_literal),
         ("pipeline_traffic_zero", test_pipeline_traffic_zero),
         ("pipeline_site_melhorar", test_pipeline_site_melhorar),
+        ("pipeline_site_melhorar_um_site_advances_to_problem", test_pipeline_site_melhorar_um_site_advances_to_problem),
+        ("pipeline_site_short_answer_does_not_repeat_scope", test_pipeline_site_short_answer_does_not_repeat_scope),
+        ("pipeline_whatsapp_short_answer_maps_to_automation", test_pipeline_whatsapp_short_answer_maps_to_automation),
+        ("pipeline_instagram_short_answer_maps_to_social", test_pipeline_instagram_short_answer_maps_to_social),
+        ("pipeline_vague_answer_uses_premium_refinement", test_pipeline_vague_answer_uses_premium_refinement),
         ("persisted_pipeline_site_state_between_messages", test_persisted_pipeline_site_state_between_messages),
         ("dedupe_patch_preserves_sales_state", test_dedupe_patch_preserves_sales_state),
         ("ai_fields_do_not_turn_lead_source_into_current_tools", test_ai_fields_do_not_turn_lead_source_into_current_tools),
@@ -965,6 +1051,7 @@ def main():
         ("anti_loop", test_anti_loop),
         ("known_lead_source_blocks_repeat", test_known_lead_source_blocks_repeat),
         ("pipeline_anti_loop", test_pipeline_anti_loop),
+        ("last_three_questions_block_semantic_repeat", test_last_three_questions_block_semantic_repeat),
     ]
     for name, fn in tests:
         run_test(name, fn)

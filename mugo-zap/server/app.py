@@ -921,8 +921,10 @@ def _field_for_question_category(category: str) -> str:
     return {
         "service_interest": "service_interest",
         "main_goal": "main_goal",
+        "site_scope": "site_scope",
         "lead_source": "lead_source",
         "current_tools": "current_tools",
+        "current_problem": "current_problem",
         "urgency": "urgency",
         "budget_signal": "budget_signal",
     }.get(category or "", "")

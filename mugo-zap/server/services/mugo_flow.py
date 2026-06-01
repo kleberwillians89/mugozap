@@ -111,7 +111,7 @@ SERVICE_CHOICES = {
 
 
 STEP1_TEXT = (
-    "Oi, tudo bem? Sou a assistente da Mugô. Como podemos te ajudar hoje?"
+    "Oi. Sou a assistente da Mugô. Vou entender rapidamente seu momento para direcionar o melhor caminho."
 )
 
 STEP2_TEXT = "Legal. Qual dessas opções mais se aproxima do que você precisa agora?"

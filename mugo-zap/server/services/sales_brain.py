@@ -85,6 +85,10 @@ SERVICE_CHOICES = {
     "service_human": ("humano", "humano", "handoff", "Claro. Vou te encaminhar para a Julia com um resumo do que você precisa."),
 }
 
+SITE_SCOPE_QUESTION = "Certo. Você quer criar uma página nova do zero ou melhorar uma página que já existe?"
+SITE_PROBLEM_QUESTION = "Hoje o maior incômodo é visual, conversão, velocidade, clareza da oferta ou organização das informações?"
+SITE_EXISTING_SCOPE = "melhorar_site_existente"
+
 CHOICE_ID_BY_SERVICE = {
     "site": "service_site",
     "automacao_whatsapp": "service_automation",
@@ -272,9 +276,40 @@ def _service_candidate_from_text(text: str) -> str:
         return "inteligencia_artificial"
     if _has_any(text, ["trafego", "anuncio", "ads", "performance"]):
         return "trafego_pago"
-    if _has_any(text, ["branding", "marca", "conteudo", "redes sociais"]):
+    if _has_any(text, ["branding", "marca", "identidade", "conteudo", "redes sociais", "instagram", "insta"]):
         return "branding"
+    if _has_any(text, ["crm", "funil", "vendas", "comercial"]):
+        return "automacao_whatsapp"
     return ""
+
+
+def _is_existing_site_scope(text: str) -> bool:
+    norm = normalize_text(text)
+    if not norm:
+        return False
+    if _has_any(norm, ["do zero", "nova pagina", "pagina nova", "criar do zero", "comecar do zero", "fazer uma nova"]):
+        return False
+    existing_terms = [
+        "melhorar site",
+        "melhorar um site",
+        "melhorar o site",
+        "melhorar uma pagina",
+        "melhorar pagina",
+        "ja tenho site",
+        "tenho site",
+        "site ja existe",
+        "ja existe",
+        "existente",
+        "quero melhorar",
+        "otimizar site",
+        "otimizar o site",
+        "arrumar site",
+        "reformular site",
+        "refazer site",
+    ]
+    if _has_any(norm, existing_terms):
+        return True
+    return norm in {"site", "meu site", "o site", "pagina", "minha pagina", "melhorar"}
 
 
 def _explicit_service_switch(text: str) -> bool:
@@ -340,7 +375,9 @@ def normalize_inbound_choice(
         service, confidence = _match_menu_service(value)
         if not service:
             continue
-        if source == "text" and locked_service and active_question and not detect_explicit_service_switch(value) and not _is_pure_menu_number(value):
+        if source == "text" and not _is_pure_menu_number(value):
+            continue
+        if source == "text" and locked_service and not detect_explicit_service_switch(value) and not _is_pure_menu_number(value):
             print(
                 f"SALES_BRAIN_SERVICE_LOCKED service={locked_service} "
                 f"ignored_contextual_menu_candidate={service} source=text text={value[:160]!r}"
@@ -386,6 +423,8 @@ def flatten_state(state: Dict[str, Any] | None) -> Dict[str, Any]:
     flat["lead_fields"] = dict(fields)
     flat["selected_service"] = src.get("selected_service") or fields.get("service_interest") or flat.get("service_interest")
     flat["selected_service_id"] = src.get("selected_service_id") or ""
+    recent_questions = src.get("recent_bot_questions") or fields.get("recent_bot_questions") or []
+    flat["recent_bot_questions"] = recent_questions if isinstance(recent_questions, list) else []
     return flat
 
 
@@ -401,8 +440,6 @@ def service_choice_update(choice_id: str) -> Dict[str, Any]:
         "service_interest": service,
         "intent": intent,
         "funnel_stage": "qualificacao",
-        "last_question_asked": question,
-        "last_question_category": category,
         "next_best_question": question,
         "next_action": "ask_question",
     }
@@ -427,7 +464,7 @@ def extract_signal_from_message(text: str, current_state: Dict[str, Any]) -> Dic
     service = state.get("service_interest") or state.get("selected_service") or ""
     updates: Dict[str, Any] = {}
 
-    choice_updates = service_choice_update(norm)
+    choice_updates = service_choice_update(norm) if (_is_pure_menu_number(norm) or norm.startswith("service_")) else {}
     if choice_updates:
         choice_service = choice_updates.get("service_interest") or ""
         if service and last_category and not detect_explicit_service_switch(text) and not _is_pure_menu_number(text):
@@ -455,6 +492,7 @@ def extract_signal_from_message(text: str, current_state: Dict[str, Any]) -> Dic
         )
 
     candidate_service = _service_candidate_from_text(norm)
+    had_site_context = service == "site" or last_category == "site_scope"
     if not service and candidate_service:
         updates.update({"service_interest": candidate_service, "intent": candidate_service, "funnel_stage": "qualificacao"})
     elif service and candidate_service and candidate_service != service:
@@ -502,9 +540,9 @@ def extract_signal_from_message(text: str, current_state: Dict[str, Any]) -> Dic
         if _has_any(norm, ["do zero", "nova", "novo", "nova pagina", "criar", "criar do zero", "comecar", "fazer uma nova"]):
             updates["site_scope"] = "criar do zero"
             print(f"SALES_BRAIN_CONTEXT_SIGNAL category=site_scope field=site_scope value='criar do zero' text={text[:160]!r}")
-        elif _has_any(norm, ["melhorar", "melhorar uma pagina", "ja existe", "existe", "existente", "refazer", "otimizar", "arrumar", "reformular"]):
-            updates["site_scope"] = "melhorar existente"
-            print(f"SALES_BRAIN_CONTEXT_SIGNAL category=site_scope field=site_scope value='melhorar existente' text={text[:160]!r}")
+        elif _is_existing_site_scope(norm) and (had_site_context or normalize_text(norm) not in {"site", "meu site", "o site", "pagina", "minha pagina"}):
+            updates["site_scope"] = SITE_EXISTING_SCOPE
+            print(f"SALES_BRAIN_CONTEXT_SIGNAL category=site_scope field=site_scope value={SITE_EXISTING_SCOPE!r} text={text[:160]!r}")
 
     if service == "trafego_pago" or last_category == "current_status":
         if _has_any(norm, ["ja anuncio", "ja anunciam", "ja anunciamos", "rodo anuncio", "tenho campanha", "anuncio hoje", "anunciamos", "campanha ativa"]):
@@ -645,6 +683,16 @@ def merge_state(old_state: Dict[str, Any], updates: Dict[str, Any]) -> Dict[str,
         merged[key] = value
         if key in FIELD_KEYS and key not in {"meeting_suggested", "briefing_ready", "handoff"}:
             fields[key] = value
+    question = str((updates or {}).get("last_question_asked") or "").strip()
+    if question:
+        recent = merged.get("recent_bot_questions") or fields.get("recent_bot_questions") or []
+        if not isinstance(recent, list):
+            recent = []
+        cleaned = [str(item).strip() for item in recent if str(item).strip()]
+        if not cleaned or not is_duplicate_question(question, cleaned[-1]):
+            cleaned.append(question)
+        merged["recent_bot_questions"] = cleaned[-3:]
+        fields["recent_bot_questions"] = cleaned[-3:]
     merged["lead_fields"] = fields
     return merged
 
@@ -661,7 +709,9 @@ def get_next_question(state: Dict[str, Any]) -> Dict[str, Any]:
         return {"category": "handoff", "question": "Claro. Vou te encaminhar para a Julia com um resumo do que você precisa.", "next_action": "handoff"}
     if service == "site":
         if not state.get("site_scope"):
-            return {"category": "site_scope", "question": "Certo. Você quer criar uma página nova do zero ou melhorar uma página que já existe?", "next_action": "ask_question"}
+            return {"category": "site_scope", "question": SITE_SCOPE_QUESTION, "next_action": "ask_question"}
+        if not state.get("current_problem"):
+            return {"category": "current_problem", "question": SITE_PROBLEM_QUESTION, "next_action": "ask_question"}
         if not state.get("main_goal"):
             return {"category": "main_goal", "question": "O foco dessa página é gerar leads, vender mais ou apresentar melhor a marca?", "next_action": "ask_question"}
         if not state.get("urgency"):
@@ -671,7 +721,7 @@ def get_next_question(state: Dict[str, Any]) -> Dict[str, Any]:
         if not state.get("lead_source"):
             return {"category": "lead_source", "question": "Hoje os contatos chegam mais pelo WhatsApp, Instagram ou site?", "next_action": "ask_question"}
         if not (state.get("current_tools") or state.get("current_problem")):
-            return {"category": "current_tools", "question": "Hoje vocês atendem tudo manualmente ou já usam alguma ferramenta/CRM?", "next_action": "ask_question"}
+            return {"category": "current_tools", "question": "Hoje vocês atendem manualmente ou já existe alguma automação rodando?", "next_action": "ask_question"}
         if not state.get("urgency"):
             return {"category": "urgency", "question": "Você quer colocar isso para rodar ainda este mês ou está só entendendo possibilidades?", "next_action": "ask_question"}
         return offer
@@ -697,6 +747,9 @@ def get_next_question(state: Dict[str, Any]) -> Dict[str, Any]:
             return {"category": "budget_signal", "question": "Vocês já têm uma verba mensal pensada para mídia?", "next_action": "ask_question"}
         return offer
     if service == "branding":
+        source_text = normalize_text(state.get("lead_source") or "")
+        if "instagram" in source_text and not state.get("current_problem"):
+            return {"category": "current_problem", "question": "Hoje o maior desafio está em atrair pessoas certas, transformar interesse em conversa ou manter constância de conteúdo?", "next_action": "ask_question"}
         if not state.get("main_goal"):
             return {"category": "main_goal", "question": "A ideia é melhorar posicionamento, conteúdo para redes sociais ou identidade da marca?", "next_action": "ask_question"}
         if not state.get("current_status"):
@@ -706,7 +759,11 @@ def get_next_question(state: Dict[str, Any]) -> Dict[str, Any]:
         if not state.get("urgency"):
             return {"category": "urgency", "question": "Você quer iniciar isso agora ou está planejando para os próximos meses?", "next_action": "ask_question"}
         return offer
-    return {"category": "service_interest", "question": "Pra eu te direcionar melhor: você procura site, automação, IA, tráfego ou branding?", "next_action": "ask_question"}
+    return {
+        "category": "service_interest",
+        "question": "Vou seguir por uma leitura mais ampla para não te prender em pergunta solta. Hoje você busca mais clareza estratégica, melhoria de comunicação ou automação do atendimento?",
+        "next_action": "ask_question",
+    }
 
 
 def question_category(text: str) -> str:
@@ -715,10 +772,19 @@ def question_category(text: str) -> str:
         "prioridade e pagina" in norm
         or ("pagina" in norm and "whatsapp" in norm and "marca" in norm)
         or ("procura" in norm and "automacao" in norm and "branding" in norm)
+        or ("clareza estrategica" in norm and "automacao do atendimento" in norm)
     ):
         return "service_interest"
     if "pagina nova" in norm or "melhorar uma pagina" in norm:
         return "site_scope"
+    if (
+        "maior incomodo" in norm
+        or ("visual" in norm and "conversao" in norm)
+        or ("velocidade" in norm and "clareza" in norm)
+        or ("maior desafio" in norm and "constancia de conteudo" in norm)
+        or "principal ponto que voce quer resolver" in norm
+    ):
+        return "current_problem"
     if "vendas/leads" in norm or "vender mais" in norm or "gerar leads" in norm or "foco e gerar" in norm:
         return "main_goal"
     if "whatsapp" in norm and ("chegam" in norm or "chega" in norm or "por onde" in norm or ("instagram" in norm and "site" in norm)):
@@ -779,13 +845,30 @@ def _category_answered(state: Dict[str, Any], category: str) -> bool:
     return bool(state.get(category))
 
 
+def _non_repeating_recovery_question(state: Dict[str, Any]) -> Dict[str, Any]:
+    state = flatten_state(state)
+    service = state.get("service_interest") or state.get("selected_service") or ""
+    last_category = state.get("last_question_category") or question_category(state.get("last_question_asked") or "")
+    if service == "site":
+        if last_category == "site_scope" and not state.get("current_problem"):
+            return {"category": "current_problem", "question": "Me conta em uma frase o que mais precisa melhorar no site hoje?", "next_action": "ask_question"}
+        if not state.get("current_problem"):
+            return {"category": "current_problem", "question": SITE_PROBLEM_QUESTION, "next_action": "ask_question"}
+    return {"category": "current_problem", "question": "Me conta em uma frase qual é o principal ponto que você quer resolver agora?", "next_action": "ask_question"}
+
+
+def _matches_recent_question(reply: str, state: Dict[str, Any]) -> bool:
+    recent = flatten_state(state).get("recent_bot_questions") or []
+    return any(is_duplicate_question(reply, question) for question in recent[-3:])
+
+
 def validate_reply(reply: str, state: Dict[str, Any]) -> Dict[str, Any]:
     state = flatten_state(state)
     next_q = get_next_question(state)
     category = question_category(reply)
     blocked = False
     reason = ""
-    if is_duplicate_question(reply, state.get("last_question_asked") or ""):
+    if is_duplicate_question(reply, state.get("last_question_asked") or "") or _matches_recent_question(reply, state):
         blocked = True
         reason = "duplicate_last_question"
     elif is_forbidden_generic_reply(reply, state):
@@ -798,6 +881,8 @@ def validate_reply(reply: str, state: Dict[str, Any]) -> Dict[str, Any]:
         blocked = True
         reason = "known_service_interest"
     if blocked:
+        if is_duplicate_question(next_q.get("question") or "", state.get("last_question_asked") or "") or _matches_recent_question(next_q.get("question") or "", state):
+            next_q = _non_repeating_recovery_question(state)
         return {**next_q, "reply": next_q["question"], "blocked": True, "reason": reason}
     return {**next_q, "reply": reply, "blocked": False, "reason": ""}
 
@@ -820,14 +905,17 @@ def build_contextual_reply(
 
     lead_source = signals.get("lead_source")
     if lead_source:
-        if normalize_text(str(lead_source)) == "whatsapp":
-            confirmation = "Boa. Então o WhatsApp é o principal canal."
+        source_norm = normalize_text(str(lead_source))
+        if source_norm == "whatsapp":
+            confirmation = "Faz sentido. Então o foco é melhorar o atendimento e a entrada de leads pelo WhatsApp."
+        elif "instagram" in source_norm and after.get("service_interest") == "branding":
+            confirmation = "Então o ponto de entrada é o Instagram."
         else:
-            confirmation = f"Boa. Então os contatos chegam principalmente por {lead_source}."
+            confirmation = f"Boa, vou considerar {lead_source} como principal ponto de entrada."
     elif signals.get("current_tools") == "manual":
         confirmation = "Entendi. Aí a automação pode ajudar bastante a organizar e acelerar o retorno."
-    elif signals.get("site_scope") == "melhorar existente":
-        confirmation = "Certo. Então estamos falando de melhorar uma página que já existe."
+    elif signals.get("site_scope") in {SITE_EXISTING_SCOPE, "melhorar existente"}:
+        confirmation = "Entendi. Então o foco é melhorar uma estrutura que já existe."
     elif signals.get("site_scope") == "criar do zero":
         confirmation = "Legal. Então estamos falando de criar uma página nova do zero."
     elif signals.get("current_status") == "começar do zero":
@@ -850,6 +938,14 @@ def build_contextual_reply(
         confirmation = "Entendi o foco."
     elif signals.get("current_problem") and after.get("service_interest") == "inteligencia_artificial":
         confirmation = "Boa. Esse é um bom ponto para a IA ajudar."
+    elif after.get("service_interest") == "site" and not before.get("service_interest"):
+        confirmation = "Então o ponto central parece ser a estrutura digital."
+    elif after.get("service_interest") == "automacao_whatsapp" and not before.get("service_interest"):
+        confirmation = "Faz sentido. Vou olhar isso pela frente de atendimento e relacionamento."
+    elif after.get("service_interest") == "branding" and not before.get("service_interest"):
+        confirmation = "Boa. Vou puxar isso para comunicação e posicionamento."
+    elif after.get("service_interest") == "trafego_pago" and not before.get("service_interest"):
+        confirmation = "Legal. Vou olhar isso pela frente de aquisição."
 
     if not confirmation:
         return question

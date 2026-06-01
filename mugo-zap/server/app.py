@@ -91,6 +91,12 @@ def _readable_signal(value: Any) -> str:
     return str(value or "").strip().replace("_", " ")
 
 
+def _normalize_text_local(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    text = re.sub(r"[^\w\s/áàâãéêíóôõúç-]", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
 def _compact_lines(*values: Any, limit: int = 4) -> List[str]:
     lines: List[str] = []
     for value in values:
@@ -139,55 +145,75 @@ def _build_premium_handoff_message(
     temp = _readable_signal(temperature or _handoff_context_value(context, "lead_temperature") or context.get("temperature"))
     base_summary = str(summary or _handoff_context_value(context, "summary") or context.get("handoff_summary") or context.get("memory_summary") or "").strip()
 
-    synthesis_lines = _compact_lines(base_summary, limit=2)
+    moment_lines = _compact_lines(base_summary, limit=2)
     if goal or problem:
-        synthesis_lines.append(
-            f"O momento aponta para {goal or 'crescimento comercial'}"
-            + (f", com trava em {problem}" if problem else "")
+        moment_lines.append(
+            f"O contato está buscando {goal or 'evolução comercial'}"
+            + (f" e já sinaliza uma trava em {problem}" if problem else "")
             + "."
         )
     if channel or tools:
-        synthesis_lines.append(
-            "A operação atual passa por "
+        moment_lines.append(
+            "O cenário citado passa por "
             + " e ".join([part for part in [channel, tools] if part])
-            + ", então a abordagem deve conectar estratégia e execução."
+            + "."
         )
-    if not synthesis_lines:
-        synthesis_lines = ["Contato entrou pela Mugô com sinal comercial e precisa de uma leitura consultiva antes de qualquer proposta."]
-    synthesis = "\n".join(synthesis_lines[:4])
+    if not moment_lines:
+        moment_lines = ["Contato chegou com abertura para diagnóstico e precisa de uma leitura consultiva antes de qualquer proposta."]
+    moment = "\n".join(moment_lines[:4])
 
-    if interest:
-        opportunity = f"A frente mais aderente parece ser {interest}, porque conversa diretamente com {goal or problem or 'o momento comercial descrito'}."
+    strategic_bits = []
+    if problem:
+        strategic_bits.append(f"A dor central está em {problem}, o que indica espaço para organizar prioridade antes de falar em execução.")
+    if goal:
+        strategic_bits.append(f"O objetivo declarado é {goal}, então a conversa deve conectar ambição comercial com um caminho prático.")
+    if channel or tools:
+        strategic_bits.append("Há sinais operacionais suficientes para validar processo, ritmo de atendimento e maturidade comercial.")
+    strategic_reading = " ".join(strategic_bits) or "A conversa ainda está em fase de leitura, mas já existe abertura para transformar uma demanda inicial em diagnóstico de negócio."
+
+    if interest and goal:
+        opportunity = f"Existe potencial para uma atuação focada em {interest}, conectada ao objetivo de {goal}."
+    elif interest and problem:
+        opportunity = f"Existe potencial para trabalhar {interest} como resposta estratégica à trava percebida em {problem}."
+    elif interest:
+        opportunity = f"Existe potencial para uma atuação consultiva na frente de {interest}, desde que Julia valide prioridade, maturidade e impacto esperado."
     else:
-        opportunity = "Vale diagnosticar rapidamente qual frente da Mugô destrava mais valor antes de apresentar solução."
+        opportunity = "Existe potencial para uma atuação focada em posicionamento, comunicação, estrutura digital ou organização comercial, conforme a dor que Julia validar na primeira troca."
 
     maturity_bits = []
-    if temp:
-        maturity_bits.append(f"temperatura {temp}")
     if urgency:
         maturity_bits.append(f"urgência {urgency}")
     if budget:
-        maturity_bits.append(f"sinal de orçamento: {budget}")
-    if problem:
-        maturity_bits.append(f"dor já verbalizada em {problem}")
-    commercial_reading = "Contato com " + ", ".join(maturity_bits) + "." if maturity_bits else "Contato ainda em diagnóstico, mas com abertura para avançar se a conversa trouxer clareza e próximo passo objetivo."
+        maturity_bits.append(f"sinal de investimento {budget}")
+    if problem or goal:
+        maturity_bits.append("dor ou intenção já verbalizada")
+    temp_norm = _normalize_text_local(temp)
+    if temp_norm in {"hot", "alta", "lead qualificado", "briefing concluido", "briefing concluído"} or urgency == "alta":
+        temperature_label = "🔥 Alta"
+    elif temp_norm in {"warm", "media", "média"} or maturity_bits:
+        temperature_label = "🟡 Média"
+    else:
+        temperature_label = "⚪ Baixa"
+    commercial_temperature = temperature_label + (f" — {', '.join(maturity_bits)}." if maturity_bits else " — ainda precisa de validação consultiva.")
 
     next_step = (
         suggested_next_step
         or str(briefing.get("suggested_next_step") or "").strip()
-        or "Julia deve entrar retomando a síntese do cenário, validar prioridade e conduzir para uma conversa curta de diagnóstico ou proposta."
+        or "Julia deve retomar o momento identificado, validar a principal prioridade e conduzir para uma conversa objetiva sobre impacto, escopo e próximo movimento."
     )
 
     return (
         "✨ Novo contato qualificado pela Mugô\n\n"
         f"{identity}\n\n"
-        "Síntese estratégica:\n"
-        f"{synthesis}\n\n"
-        "Oportunidade percebida:\n"
+        "Momento identificado:\n"
+        f"{moment}\n\n"
+        "Leitura estratégica:\n"
+        f"{strategic_reading}\n\n"
+        "Oportunidade para a Mugô:\n"
         f"{opportunity}\n\n"
-        "Leitura comercial:\n"
-        f"{commercial_reading}\n\n"
-        "Próximo passo sugerido:\n"
+        "Temperatura comercial:\n"
+        f"{commercial_temperature}\n\n"
+        "Próximo movimento recomendado:\n"
         f"{next_step}"
     )[:3500]
 
@@ -211,10 +237,14 @@ def _handoff_opening(context: dict | None = None) -> str:
 
 
 def build_handoff_lead_reply(context: dict | None = None) -> str:
-    opening = _handoff_opening(context)
+    if _handoff_context_value(context, "service_interest") == "humano" or _handoff_context_value(context, "handoff_reason") == "lead_pediu_humano":
+        return (
+            "Claro. Vou te direcionar para a equipe da Mugô.\n\n"
+            f"{JULIA_DIRECT_LINK}"
+        )
     return (
-        f"{opening} Já tenho contexto suficiente e vou encaminhar para a Julia seguir com você.\n\n"
-        "Se quiser falar direto com ela, o link é:\n"
+        "Perfeito. Já tenho contexto suficiente para direcionar você da melhor forma.\n\n"
+        "Você pode continuar diretamente com a Julia:\n\n"
         f"{JULIA_DIRECT_LINK}"
     )
 
@@ -252,11 +282,10 @@ INTERNAL_ALLOWED_EMAILS = {
 DEFAULT_INTERNAL_ROLE = (os.getenv("DEFAULT_INTERNAL_ROLE") or "staff").strip()
 DEFAULT_ASSIGNEE = (os.getenv("DEFAULT_ASSIGNEE") or "Julia").strip()
 OPERATION_NUMBER = _normalize_brazil_whatsapp_number(os.getenv("OPERATION_NUMBER") or "11972769605")
-OPERATION_SECONDARY_NUMBER = _normalize_brazil_whatsapp_number(os.getenv("OPERATION_SECONDARY_NUMBER") or "5511986531008")
 OPERATION_BRIEFING_NUMBERS = [
     number
-    for index, number in enumerate([OPERATION_NUMBER, OPERATION_SECONDARY_NUMBER])
-    if number and number not in [OPERATION_NUMBER, OPERATION_SECONDARY_NUMBER][:index]
+    for index, number in enumerate([HUMAN_NUMBER, OPERATION_NUMBER])
+    if number and number not in [HUMAN_NUMBER, OPERATION_NUMBER][:index]
 ]
 
 from services.ai_state import get_ai_state, upsert_ai_state, reset_ai_state
@@ -310,7 +339,7 @@ async def startup_check():
     print("DEFAULT_ASSIGNEE:", DEFAULT_ASSIGNEE)
     print("HUMAN_NUMBER:", HUMAN_NUMBER)
     print("OPERATION_NUMBER:", OPERATION_NUMBER)
-    print("OPERATION_SECONDARY_NUMBER:", OPERATION_SECONDARY_NUMBER)
+    print("OPERATION_BRIEFING_NUMBERS:", OPERATION_BRIEFING_NUMBERS)
     print("SUPABASE_TABLE_CONVERSATIONS:", SUPABASE_TABLE_CONVERSATIONS)
     print("SUPABASE_TABLE_USERS:", SUPABASE_TABLE_USERS)
     print("SUPABASE_TABLE_MESSAGES:", SUPABASE_TABLE_MESSAGES)
@@ -1297,7 +1326,7 @@ def _briefing_summary_from_result(result: dict, fallback_text: str = "") -> str:
     if fields.get("desired_result"):
         pieces.append(f"O resultado buscado é {fields.get('desired_result')}.")
     if briefing.get("recommended_solution"):
-        pieces.append(f"A frente recomendada é {briefing.get('recommended_solution')}.")
+        pieces.append(f"A oportunidade pode ser trabalhada pela frente de {briefing.get('recommended_solution')}, validando prioridade e impacto antes de propor escopo.")
     if not pieces and fallback_text:
         pieces.append(fallback_text.strip())
     return "\n".join([p for p in pieces if p])[:1500]

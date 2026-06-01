@@ -491,9 +491,11 @@ def test_operation_number_normalization():
 
 
 def test_operation_briefing_numbers_include_both():
-    from app import OPERATION_BRIEFING_NUMBERS
+    from app import HUMAN_NUMBER, OPERATION_NUMBER, OPERATION_BRIEFING_NUMBERS
 
-    assert_equal("operation briefing numbers", OPERATION_BRIEFING_NUMBERS, ["5511972769605", "5511986531008"])
+    assert_equal("operation briefing numbers", OPERATION_BRIEFING_NUMBERS, [HUMAN_NUMBER, OPERATION_NUMBER])
+    assert_equal("julia briefing number", OPERATION_BRIEFING_NUMBERS[0], "5511973510549")
+    assert_equal("operation briefing number", OPERATION_BRIEFING_NUMBERS[1], "5511972769605")
 
 
 def test_automation_leads():
@@ -533,13 +535,14 @@ def test_pipeline_ai_full_flow():
     state = step2["state_after"]
     assert_equal("main_goal", state["main_goal"], "atendimento")
     assert_equal("current_problem", state["current_problem"], "atendimento")
-    assert_equal("next category", step2["next_question"]["category"], "lead_source")
-    assert_true("microconfirmation atendimento", step2["reply"].startswith("Certo. Então faz sentido pensar em IA"))
+    assert_equal("next category", step2["next_question"]["category"], "current_tools")
+    assert_true("microconfirmation atendimento", step2["reply"].startswith("Então faz sentido pensar em IA"))
 
     step3 = pipeline_step(state, message="whatsapp")
     state = step3["state_after"]
     assert_equal("lead_source", state["lead_source"], "WhatsApp")
-    assert_equal("next category", step3["next_question"]["category"], "current_tools")
+    assert_equal("current tools", state["current_tools"], "WhatsApp")
+    assert_equal("next category", step3["next_question"]["category"], "volume_tarefa")
 
 
 def test_ai_three_channels_short_answer():
@@ -563,7 +566,7 @@ def test_branding_os_dois_short_answer():
     state = state_with_choice("service_branding")
     step = pipeline_step(state, message="Os dois")
     assert_equal("main_goal", step["state_after"]["main_goal"], "posicionamento e conteúdo/redes sociais")
-    assert_equal("next category", step["next_question"]["category"], "current_status")
+    assert_equal("next category", step["next_question"]["category"], "produto_servico")
     assert_true("does not repeat branding question", "A ideia é melhorar posicionamento" not in step["reply"])
 
 
@@ -571,7 +574,101 @@ def test_branding_quero_fazer_os_dois_short_answer():
     state = state_with_choice("service_branding")
     step = pipeline_step(state, message="Quero fazer os dois")
     assert_equal("main_goal", step["state_after"]["main_goal"], "posicionamento e conteúdo/redes sociais")
-    assert_true("reply advances", "presença ativa" in step["reply"])
+    assert_true("reply advances", "marca vende" in step["reply"] or "quer apresentar melhor" in step["reply"])
+
+
+def test_branding_identity_does_not_repeat_principal_point():
+    state = state_with_choice("service_branding")
+    step = pipeline_step(state, message="identidade da marca")
+    discovery = step["state_after"]["discovery_memory"]["branding"]
+    assert_equal("focus", discovery["foco_marca"], "identidade")
+    assert_equal("main goal", step["state_after"]["main_goal"], "identidade visual")
+    assert_true("consultive tone", "clareza e consistência" in step["reply"])
+    assert_true("does not ask principal point", "principal ponto que você quer resolver" not in step["reply"])
+    assert_true("asks brand stage", "nome, identidade visual e redes ativas" in step["reply"])
+
+
+def test_branding_create_brand_products_advances_to_product_stage():
+    state = state_with_choice("service_branding")
+    step = pipeline_step(state, message="criar uma marca para divulgar meus produtos")
+    discovery = step["state_after"]["discovery_memory"]["branding"]
+    assert_equal("objective", discovery["objetivo_comunicacao"], "criar marca para divulgar produtos")
+    assert_equal("product", discovery["produto_servico"], "produtos")
+    assert_true("commercial intent tone", "intenção comercial" in step["reply"])
+    assert_true("asks product status", "já são vendidos hoje" in step["reply"])
+    assert_true("does not ask principal point", "principal ponto que você quer resolver" not in step["reply"])
+
+
+def test_branding_growth_advances_to_frequency():
+    state = state_with_choice("service_branding")
+    step = pipeline_step(state, message="aumentar o crescimento da minha marca")
+    discovery = step["state_after"]["discovery_memory"]["branding"]
+    assert_equal("objective", discovery["objetivo_comunicacao"], "crescimento de marca")
+    assert_true("growth tone", "crescer com consistência" in step["reply"])
+    assert_true("asks frequency", "publicam com frequência" in step["reply"])
+    assert_true("does not ask principal point", "principal ponto que você quer resolver" not in step["reply"])
+
+
+def test_all_initial_buttons_have_consultive_tracks():
+    cases = {
+        "service_site": ("site_scope", "página"),
+        "service_automation": ("lead_source", "WhatsApp"),
+        "service_ai": ("main_goal", "processo"),
+        "service_traffic": ("current_status", "anunciam"),
+        "service_branding": ("main_goal", "posicionamento"),
+    }
+    for choice_id, (category, hint) in cases.items():
+        step = pipeline_step(sales_brain.default_lead_state(), list_id=choice_id)
+        assert_equal(f"{choice_id} category", step["next_question"]["category"], category)
+        assert_true(f"{choice_id} hint", hint.lower() in step["reply"].lower())
+
+
+def test_human_button_directs_to_team():
+    step = pipeline_step(sales_brain.default_lead_state(), list_id="service_human")
+    assert_equal("handoff", step["state_after"]["handoff"], True)
+    assert_true("direct team copy", "Claro. Vou te direcionar para a equipe da Mugô." in step["reply"])
+    assert_true("julia link", "https://wa.me/5511973510549" in step["reply"])
+
+
+def test_traffic_advances_after_objective():
+    state = state_with_choice("service_traffic")
+    step1 = pipeline_step(state, message="já anuncio")
+    step2 = pipeline_step(step1["state_after"], message="gerar leads")
+    assert_equal("objective", step2["state_after"]["discovery_memory"]["trafego_pago"]["objetivo_campanha"], "vendas/leads")
+    assert_true("does not repeat objective", "gerar leads, vender no site ou fortalecer" not in step2["reply"])
+    assert_true("asks offer", "oferta" in step2["reply"] or "produto" in step2["reply"])
+
+
+def test_ai_advances_after_operational_pain():
+    state = state_with_choice("service_ai")
+    step = pipeline_step(state, message="processos internos manuais tomam tempo")
+    discovery = step["state_after"]["discovery_memory"]["inteligencia_artificial"]
+    assert_equal("process", discovery["processo"], "processos internos")
+    assert_true("pain", bool(discovery["dor_operacional"]))
+    assert_true("does not repeat process question", "atendimento, vendas, conteúdo ou operação interna" not in step["reply"])
+    assert_true("asks next depth", "manual" in step["reply"].lower() or "ferramenta" in step["reply"].lower() or "volume" in step["reply"].lower())
+
+
+def test_no_button_repeats_last_three_questions():
+    scenarios = [
+        ("service_site", ["melhorar um site", "não converte"]),
+        ("service_automation", ["WhatsApp", "manual", "vender mais"]),
+        ("service_ai", ["processos internos manuais tomam tempo", "planilha"]),
+        ("service_traffic", ["já anuncio", "gerar leads"]),
+        ("service_branding", ["identidade da marca", "ainda está do zero"]),
+    ]
+    for choice_id, messages in scenarios:
+        state = pipeline_step(sales_brain.default_lead_state(), list_id=choice_id)["state_after"]
+        replies = []
+        for message in messages:
+            step = pipeline_step(state, message=message)
+            replies.append(step["reply"])
+            recent = step["state_after"].get("recent_bot_questions") or []
+            assert_true(f"{choice_id} recent max three", len(recent) <= 3)
+            for previous in recent[:-1]:
+                assert_true(f"{choice_id} no semantic repeat", not sales_brain.is_duplicate_question(step["reply"], previous))
+            state = step["state_after"]
+        assert_true(f"{choice_id} unique replies", len({sales_brain.normalize_text(reply) for reply in replies}) == len(replies))
 
 
 def test_traffic_three_points_short_answer():
@@ -586,7 +683,7 @@ def test_traffic_three_points_short_answer():
     )
     step = pipeline_step(state, message="os 3 pontos")
     assert_equal("main_goal", step["state_after"]["main_goal"], "gerar leads, vender no site e fortalecer marca")
-    assert_equal("next category", step["next_question"]["category"], "budget_signal")
+    assert_equal("next category", step["next_question"]["category"], "oferta")
 
 
 def test_timeout_fallback_branding_does_not_repeat_literal():
@@ -594,7 +691,7 @@ def test_timeout_fallback_branding_does_not_repeat_literal():
     step = pipeline_step(state, message="os dois")
     assert_true("fallback advanced", step["reply"] != "Legal. A ideia é melhorar posicionamento, conteúdo para redes sociais ou identidade da marca?")
     assert_equal("main_goal", step["state_after"]["main_goal"], "posicionamento e conteúdo/redes sociais")
-    assert_equal("next category", step["next_question"]["category"], "current_status")
+    assert_equal("next category", step["next_question"]["category"], "produto_servico")
     assert_true("did not repeat branding question", "A ideia é melhorar posicionamento" not in step["reply"])
 
 
@@ -678,7 +775,7 @@ def test_pipeline_instagram_short_answer_maps_to_social():
     assert_equal("not menu click", step["normalized_choice"]["is_menu_choice"], False)
     assert_equal("service", step["state_after"]["service_interest"], "branding")
     assert_equal("lead source", step["state_after"]["lead_source"], "Instagram")
-    assert_equal("next category", step["next_question"]["category"], "current_problem")
+    assert_equal("next category", step["next_question"]["category"], "dificuldade_atual")
     assert_true("asks instagram challenge", "atrair pessoas certas" in step["reply"])
 
 
@@ -708,7 +805,7 @@ def test_persisted_pipeline_site_state_between_messages():
     assert_equal("signal site_scope", second["extracted_signals"]["site_scope"], "melhorar_site_existente")
     assert_equal("state site_scope", second["state_after"]["site_scope"], "melhorar_site_existente")
     assert_equal("next category", second["next_question"]["category"], "current_problem")
-    assert_equal("reply", second["reply"], "Entendi. Então o foco é melhorar uma estrutura que já existe. Hoje o maior incômodo é visual, conversão, velocidade, clareza da oferta ou organização das informações?")
+    assert_equal("reply", second["reply"], "Então o foco é melhorar uma estrutura que já existe. Hoje o maior incômodo é visual, conversão, velocidade, clareza da oferta ou organização das informações?")
 
 
 def test_dedupe_patch_preserves_sales_state():
@@ -827,8 +924,17 @@ def test_explicit_site_scope_change_allowed():
 def test_handoff_reply_includes_julia_link():
     from app import JULIA_DIRECT_LINK, JULIA_HANDOFF_REPLY
 
-    assert_true("handoff has link", JULIA_DIRECT_LINK in JULIA_HANDOFF_REPLY)
+    expected = (
+        "Perfeito. Já tenho contexto suficiente para direcionar você da melhor forma.\n\n"
+        "Você pode continuar diretamente com a Julia:\n\n"
+        f"{JULIA_DIRECT_LINK}"
+    )
+    assert_equal("handoff exact reply", JULIA_HANDOFF_REPLY, expected)
     assert_true("handoff has no encoded text", "?text=" not in JULIA_HANDOFF_REPLY)
+    assert_true("client has no strategic synthesis", "Síntese estratégica" not in JULIA_HANDOFF_REPLY)
+    assert_true("client has no opportunity", "Oportunidade percebida" not in JULIA_HANDOFF_REPLY)
+    assert_true("client has no commercial reading", "Leitura comercial" not in JULIA_HANDOFF_REPLY)
+    assert_true("client has no next step", "Próximo passo" not in JULIA_HANDOFF_REPLY)
 
 
 def test_prefilled_julia_link_contains_encoded_context():
@@ -848,12 +954,14 @@ def test_prefilled_julia_link_contains_encoded_context():
     assert_true("link prefix", link.startswith(f"{JULIA_DIRECT_LINK}?text="))
     decoded = urllib.parse.unquote(link.split("?text=", 1)[1])
     assert_true("premium title", "✨ Novo contato qualificado pela Mugô" in decoded)
-    assert_true("strategic synthesis", "Síntese estratégica:" in decoded)
-    assert_true("perceived opportunity", "Oportunidade percebida:" in decoded)
-    assert_true("commercial reading", "Leitura comercial:" in decoded)
-    assert_true("next step", "Próximo passo sugerido:" in decoded)
+    assert_true("moment", "Momento identificado:" in decoded)
+    assert_true("strategic reading", "Leitura estratégica:" in decoded)
+    assert_true("opportunity", "Oportunidade para a Mugô:" in decoded)
+    assert_true("temperature", "Temperatura comercial:" in decoded)
+    assert_true("next movement", "Próximo movimento recomendado:" in decoded)
     assert_true("no raw service label", "Serviço:" not in decoded)
     assert_true("no raw budget label", "Orçamento:" not in decoded)
+    assert_true("no generic adherence language", "A frente mais aderente parece ser" not in decoded)
 
 
 def test_internal_operation_briefing_without_link():
@@ -874,9 +982,15 @@ def test_internal_operation_briefing_without_link():
     message = _build_julia_briefing_message(wa_id="5511999999999", user={"nome": "Lead Teste"}, result=result)
     assert_equal("operation number", OPERATION_NUMBER, "5511972769605")
     assert_true("structured title", "✨ Novo contato qualificado pela Mugô" in message)
-    assert_true("opportunity in message", "Oportunidade percebida:" in message)
+    assert_true("moment in message", "Momento identificado:" in message)
+    assert_true("reading in message", "Leitura estratégica:" in message)
+    assert_true("opportunity in message", "Oportunidade para a Mugô:" in message)
+    assert_true("temperature in message", "Temperatura comercial:" in message)
+    assert_true("next movement in message", "Próximo movimento recomendado:" in message)
     assert_true("summary in message", "Lead quer melhorar a página atual" in message)
     assert_true("no wa link", "wa.me" not in message)
+    assert_true("no crm style language", "Contato sinaliza aderência" not in message)
+    assert_true("no generic ai language", "A frente mais aderente parece ser" not in message)
 
 
 def test_no_legacy_eduarda_routing():
@@ -891,8 +1005,9 @@ def test_handoff_opening_varies_from_last_reply():
     first = build_handoff_lead_reply({"last_question_asked": "Certo. Já deixei um resumo pronto para a Julia."})
     second = build_handoff_lead_reply({"last_question_asked": first})
     third = build_handoff_lead_reply({"last_question_asked": second})
-    openings = [reply.split(".", 1)[0] for reply in [first, second, third]]
-    assert_true("no same opening three times", len(set(openings)) > 1)
+    assert_equal("fixed first", first, second)
+    assert_equal("fixed second", second, third)
+    assert_true("fixed starts perfeito", first.startswith("Perfeito. Já tenho contexto suficiente"))
 
 
 def test_followup_created_for_handoff():
@@ -1082,6 +1197,14 @@ def main():
         ("ai_three_channels_short_answer", test_ai_three_channels_short_answer),
         ("branding_os_dois_short_answer", test_branding_os_dois_short_answer),
         ("branding_quero_fazer_os_dois_short_answer", test_branding_quero_fazer_os_dois_short_answer),
+        ("branding_identity_does_not_repeat_principal_point", test_branding_identity_does_not_repeat_principal_point),
+        ("branding_create_brand_products_advances_to_product_stage", test_branding_create_brand_products_advances_to_product_stage),
+        ("branding_growth_advances_to_frequency", test_branding_growth_advances_to_frequency),
+        ("all_initial_buttons_have_consultive_tracks", test_all_initial_buttons_have_consultive_tracks),
+        ("human_button_directs_to_team", test_human_button_directs_to_team),
+        ("traffic_advances_after_objective", test_traffic_advances_after_objective),
+        ("ai_advances_after_operational_pain", test_ai_advances_after_operational_pain),
+        ("no_button_repeats_last_three_questions", test_no_button_repeats_last_three_questions),
         ("traffic", test_traffic),
         ("traffic_three_points_short_answer", test_traffic_three_points_short_answer),
         ("timeout_fallback_branding_does_not_repeat_literal", test_timeout_fallback_branding_does_not_repeat_literal),

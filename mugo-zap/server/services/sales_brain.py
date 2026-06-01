@@ -33,6 +33,7 @@ FIELD_KEYS = [
     "lead_temperature",
     "next_action",
     "conversation_memory",
+    "discovery_memory",
 ]
 
 
@@ -63,6 +64,7 @@ def default_lead_state() -> Dict[str, Any]:
         "handoff_sent_at": None,
         "lead_fields": {},
         "conversation_memory": {},
+        "discovery_memory": {},
     }
 
 
@@ -79,9 +81,9 @@ SERVICE_CHOICES = {
     "4": ("trafego_pago", "trafego_pago", "current_status", "Legal. Hoje vocês já anunciam ou querem começar do zero?"),
     "04": ("trafego_pago", "trafego_pago", "current_status", "Legal. Hoje vocês já anunciam ou querem começar do zero?"),
     "service_traffic": ("trafego_pago", "trafego_pago", "current_status", "Legal. Hoje vocês já anunciam ou querem começar do zero?"),
-    "5": ("branding", "branding", "main_goal", "Legal. A ideia é melhorar posicionamento, conteúdo para redes sociais ou identidade da marca?"),
-    "05": ("branding", "branding", "main_goal", "Legal. A ideia é melhorar posicionamento, conteúdo para redes sociais ou identidade da marca?"),
-    "service_branding": ("branding", "branding", "main_goal", "Legal. A ideia é melhorar posicionamento, conteúdo para redes sociais ou identidade da marca?"),
+    "5": ("branding", "branding", "main_goal", "Você quer fortalecer posicionamento, identidade visual ou conteúdo para redes?"),
+    "05": ("branding", "branding", "main_goal", "Você quer fortalecer posicionamento, identidade visual ou conteúdo para redes?"),
+    "service_branding": ("branding", "branding", "main_goal", "Você quer fortalecer posicionamento, identidade visual ou conteúdo para redes?"),
     "6": ("humano", "humano", "handoff", "Claro. Vou te encaminhar para a Julia com um resumo do que você precisa."),
     "06": ("humano", "humano", "handoff", "Claro. Vou te encaminhar para a Julia com um resumo do que você precisa."),
     "service_human": ("humano", "humano", "handoff", "Claro. Vou te encaminhar para a Julia com um resumo do que você precisa."),
@@ -277,6 +279,34 @@ def _empty_conversation_memory() -> Dict[str, Any]:
     }
 
 
+DISCOVERY_SCHEMAS = {
+    "site": ["site_scope", "objetivo_pagina", "problema_site", "publico", "prazo", "orcamento"],
+    "automacao_whatsapp": ["canal", "atendimento_atual", "objetivo", "gargalo", "volume", "crm", "orcamento"],
+    "inteligencia_artificial": ["processo", "dor_operacional", "ferramenta_atual", "volume_tarefa", "objetivo_ia", "orcamento"],
+    "trafego_pago": ["canal_atual", "objetivo_campanha", "verba", "oferta", "estrutura_atual", "problema_performance"],
+    "branding": ["foco_marca", "estagio_marca", "objetivo_comunicacao", "produto_servico", "canal_principal", "dificuldade_atual", "orcamento"],
+    "humano": [],
+}
+
+
+def _empty_discovery_memory() -> Dict[str, Any]:
+    return {service: {key: None for key in keys} for service, keys in DISCOVERY_SCHEMAS.items()}
+
+
+def _read_discovery_memory(state: Dict[str, Any]) -> Dict[str, Any]:
+    fields = state.get("lead_fields") if isinstance(state.get("lead_fields"), dict) else {}
+    raw = state.get("discovery_memory") or fields.get("discovery_memory") or {}
+    memory = _empty_discovery_memory()
+    if isinstance(raw, dict):
+        for service, values in raw.items():
+            if service not in memory or not isinstance(values, dict):
+                continue
+            for key, value in values.items():
+                if key in memory[service] and value not in (None, "", [], {}):
+                    memory[service][key] = value
+    return memory
+
+
 def _read_memory(state: Dict[str, Any]) -> Dict[str, Any]:
     fields = state.get("lead_fields") if isinstance(state.get("lead_fields"), dict) else {}
     raw = state.get("conversation_memory") or fields.get("conversation_memory") or {}
@@ -329,6 +359,105 @@ def _memory_from_known_fields(state: Dict[str, Any], updates: Dict[str, Any] | N
     if _has_any(norm, ["sem processo", "baguncado", "bagunçado", "perdemos lead", "perde lead", "perdendo lead"]):
         memory["processo_comercial"] = "processo comercial desorganizado"
         memory["gargalo"] = memory.get("gargalo") or "perda de leads no processo"
+    return memory
+
+
+def _discovery_from_known_fields(state: Dict[str, Any], updates: Dict[str, Any] | None = None, text: str = "") -> Dict[str, Any]:
+    merged = {**flatten_state(state), **(updates or {})}
+    memory = _read_discovery_memory(state)
+    norm = normalize_text(text)
+    service = merged.get("service_interest") or merged.get("selected_service") or ""
+
+    site = memory["site"]
+    if merged.get("site_scope"):
+        site["site_scope"] = merged.get("site_scope")
+    if merged.get("main_goal") and service == "site":
+        site["objetivo_pagina"] = merged.get("main_goal")
+    if merged.get("current_problem") and service == "site":
+        site["problema_site"] = merged.get("current_problem")
+    if merged.get("urgency"):
+        site["prazo"] = merged.get("urgency")
+    if merged.get("budget_signal"):
+        site["orcamento"] = merged.get("budget_signal")
+
+    automation = memory["automacao_whatsapp"]
+    if merged.get("lead_source"):
+        automation["canal"] = merged.get("lead_source")
+    if merged.get("current_tools"):
+        automation["atendimento_atual"] = merged.get("current_tools")
+    if merged.get("main_goal") and service == "automacao_whatsapp":
+        automation["objetivo"] = merged.get("main_goal")
+    if merged.get("current_problem") and normalize_text(str(merged.get("current_problem"))) != "processo manual":
+        automation["gargalo"] = merged.get("current_problem")
+    if _has_any(norm, ["sem crm", "planilha", "caderno"]) or (merged.get("current_tools") and "crm" in normalize_text(str(merged.get("current_tools")))):
+        automation["crm"] = merged.get("current_tools") or ("não usa CRM" if "sem crm" in norm else "usa CRM")
+    volume_match = re.search(r"\b(\d{1,5})\s+(?:leads?|contatos?|mensagens?|atendimentos?|tarefas?)\b", norm)
+    if volume_match:
+        automation["volume"] = f"{volume_match.group(1)} contatos/leads"
+        memory["inteligencia_artificial"]["volume_tarefa"] = f"{volume_match.group(1)} tarefas/ocorrências"
+    if merged.get("budget_signal"):
+        automation["orcamento"] = merged.get("budget_signal")
+
+    ai = memory["inteligencia_artificial"]
+    if service == "inteligencia_artificial":
+        if merged.get("main_goal"):
+            ai["objetivo_ia"] = merged.get("main_goal")
+            ai["processo"] = ai.get("processo") or merged.get("main_goal")
+        if merged.get("current_problem"):
+            ai["dor_operacional"] = merged.get("current_problem")
+        if merged.get("current_tools"):
+            ai["ferramenta_atual"] = merged.get("current_tools")
+        if merged.get("budget_signal"):
+            ai["orcamento"] = merged.get("budget_signal")
+
+    traffic = memory["trafego_pago"]
+    if service == "trafego_pago":
+        if merged.get("current_status"):
+            traffic["estrutura_atual"] = merged.get("current_status")
+            traffic["canal_atual"] = merged.get("current_status")
+        if merged.get("main_goal"):
+            traffic["objetivo_campanha"] = merged.get("main_goal")
+        if merged.get("budget_signal"):
+            traffic["verba"] = merged.get("budget_signal")
+        if merged.get("current_problem"):
+            traffic["problema_performance"] = merged.get("current_problem")
+        if _has_any(norm, ["produto", "servico", "serviço", "oferta"]):
+            traffic["oferta"] = text.strip()[:180]
+
+    branding = memory["branding"]
+    if service == "branding":
+        if merged.get("main_goal"):
+            branding["objetivo_comunicacao"] = branding.get("objetivo_comunicacao") or merged.get("main_goal")
+            branding["foco_marca"] = branding.get("foco_marca") or merged.get("main_goal")
+        if _has_any(norm, ["identidade da marca", "identidade visual", "identidade"]):
+            branding["foco_marca"] = "identidade"
+            branding["objetivo_comunicacao"] = branding.get("objetivo_comunicacao") or "clareza e consistência da marca"
+        if _has_any(norm, ["criar uma marca", "criar marca", "marca para divulgar", "divulgar meus produtos", "divulgar produtos"]):
+            branding["objetivo_comunicacao"] = "criar marca para divulgar produtos"
+            branding["produto_servico"] = "produtos"
+            branding["foco_marca"] = branding.get("foco_marca") or "construção de marca"
+        if _has_any(norm, ["crescimento da minha marca", "aumentar crescimento", "crescer minha marca", "crescimento de marca", "aumentar o crescimento"]):
+            branding["objetivo_comunicacao"] = "crescimento de marca"
+            branding["foco_marca"] = branding.get("foco_marca") or "crescimento"
+        if _has_any(norm, ["posicionamento"]):
+            branding["foco_marca"] = branding.get("foco_marca") or "posicionamento"
+        if _has_any(norm, ["conteudo", "conteúdo", "redes"]):
+            branding["foco_marca"] = branding.get("foco_marca") or "conteúdo/redes"
+        if _has_any(norm, ["nome", "identidade visual", "redes ativas", "ja tem", "já tem", "ja temos", "já temos"]):
+            branding["estagio_marca"] = "já tem estrutura inicial"
+        elif _has_any(norm, ["do zero", "estruturada do zero", "começando", "comecando", "sem identidade"]):
+            branding["estagio_marca"] = "estruturada do zero"
+        if _has_any(norm, ["vendidos hoje", "ja vendo", "já vendo", "vendemos", "vende hoje"]):
+            branding["produto_servico"] = branding.get("produto_servico") or "produtos já vendidos"
+        elif _has_any(norm, ["fase de lancamento", "fase de lançamento", "lancamento", "lançamento"]):
+            branding["produto_servico"] = branding.get("produto_servico") or "produtos em lançamento"
+        if _has_any(norm, ["instagram", "insta"]):
+            branding["canal_principal"] = "Instagram"
+        if merged.get("current_problem") and service == "branding":
+            branding["dificuldade_atual"] = merged.get("current_problem")
+        if merged.get("budget_signal"):
+            branding["orcamento"] = merged.get("budget_signal")
+
     return memory
 
 
@@ -732,6 +861,8 @@ def flatten_state(state: Dict[str, Any] | None) -> Dict[str, Any]:
     flat["recent_bot_questions"] = recent_questions if isinstance(recent_questions, list) else []
     memory = src.get("conversation_memory") or fields.get("conversation_memory") or {}
     flat["conversation_memory"] = memory if isinstance(memory, dict) else {}
+    discovery = src.get("discovery_memory") or fields.get("discovery_memory") or {}
+    flat["discovery_memory"] = discovery if isinstance(discovery, dict) else {}
     return flat
 
 
@@ -838,9 +969,24 @@ def extract_signal_from_message(text: str, current_state: Dict[str, Any]) -> Dic
             updates["funnel_stage"] = "qualificacao"
         elif _has_any(norm, ["identidade", "visual"]):
             updates["main_goal"] = "identidade visual"
+            updates["current_problem"] = updates.get("current_problem") or "clareza e consistência da marca"
             updates["funnel_stage"] = "qualificacao"
         elif "posicionamento" in norm:
             updates["main_goal"] = "posicionamento"
+            updates["funnel_stage"] = "qualificacao"
+        elif _has_any(norm, ["identidade da marca", "identidade visual", "identidade"]):
+            updates["main_goal"] = "identidade visual"
+            updates["current_problem"] = updates.get("current_problem") or "clareza e consistência da marca"
+            updates["funnel_stage"] = "qualificacao"
+        elif _has_any(norm, ["criar uma marca", "marca para divulgar", "divulgar meus produtos", "divulgar produtos"]):
+            updates["main_goal"] = "criar marca para divulgar produtos"
+            updates["desired_result"] = "apresentar melhor os produtos e gerar desejo"
+            updates["current_problem"] = updates.get("current_problem") or "marca ainda precisa sustentar comunicação comercial"
+            updates["funnel_stage"] = "qualificacao"
+        elif _has_any(norm, ["crescimento da minha marca", "aumentar crescimento", "crescer minha marca", "crescimento de marca", "aumentar o crescimento"]):
+            updates["main_goal"] = "crescimento de marca"
+            updates["desired_result"] = "crescer com mais consistência"
+            updates["current_problem"] = updates.get("current_problem") or "marca precisa crescer com consistência"
             updates["funnel_stage"] = "qualificacao"
 
     if last_category == "main_goal" and service == "trafego_pago" and multi_answer == "all":
@@ -877,19 +1023,21 @@ def extract_signal_from_message(text: str, current_state: Dict[str, Any]) -> Dic
             updates["main_goal"] = "atendimento/conteúdo"
         elif "atendimento" in norm:
             updates["main_goal"] = "atendimento"
+        elif _has_any(norm, ["processo", "operacao", "operação", "manual", "retrabalho"]):
+            updates["main_goal"] = "processos internos"
         updates["funnel_stage"] = "qualificacao"
         print(f"SALES_BRAIN_CONTEXT_SIGNAL category={last_category} field=current_problem text={text[:160]!r}")
-    elif _has_any(norm, ["vendas", "vender", "vender mais", "mais clientes", "leads", "gerar leads", "converter mais"]):
+    elif not updates.get("main_goal") and _has_any(norm, ["vendas", "vender", "vender mais", "mais clientes", "leads", "gerar leads", "converter mais"]):
         updates["main_goal"] = "vendas/leads"
         updates["desired_result"] = "vender mais / gerar mais oportunidades"
         updates["funnel_stage"] = "qualificacao"
-    elif _has_any(norm, ["tempo", "ganhar tempo", "responder rapido", "operacao", "automatizar processo"]):
+    elif not updates.get("main_goal") and _has_any(norm, ["tempo", "ganhar tempo", "responder rapido", "operacao", "automatizar processo"]):
         updates["main_goal"] = "operacao/tempo"
         updates["funnel_stage"] = "qualificacao"
-    elif _has_any(norm, ["organizar", "crm", "funil", "acompanhar leads"]):
+    elif not updates.get("main_goal") and _has_any(norm, ["organizar", "crm", "funil", "acompanhar leads"]):
         updates["main_goal"] = "gestao/comercial"
         updates["funnel_stage"] = "qualificacao"
-    elif _has_any(norm, ["posicionamento", "conteudo"]) or (service == "branding" and "marca" in norm):
+    elif not updates.get("main_goal") and (_has_any(norm, ["posicionamento", "conteudo"]) or (service == "branding" and "marca" in norm)):
         updates["main_goal"] = "marca/conteudo"
         updates["funnel_stage"] = "qualificacao"
 
@@ -989,6 +1137,7 @@ def extract_signal_from_message(text: str, current_state: Dict[str, Any]) -> Dic
 
     locked_updates = _lock_known_field_updates(updates, state, text)
     locked_updates["conversation_memory"] = _memory_from_known_fields(state, locked_updates, text)
+    locked_updates["discovery_memory"] = _discovery_from_known_fields(state, locked_updates, text)
     return locked_updates
 
 
@@ -1061,6 +1210,85 @@ def _progressive_automation_question(state: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _progressive_site_question(state: Dict[str, Any]) -> Dict[str, Any]:
+    state = flatten_state(state)
+    memory = _discovery_from_known_fields(state)["site"]
+    if not memory.get("site_scope"):
+        if (state.get("last_question_category") or "") == "site_scope":
+            return {"category": "site_scope", "question": "Para eu não te prender numa pergunta travada: hoje existe alguma página no ar ou a ideia é construir uma nova base?", "next_action": "ask_question"}
+        return {"category": "site_scope", "question": SITE_SCOPE_QUESTION, "next_action": "ask_question"}
+    if memory.get("site_scope") == "criar do zero":
+        if not memory.get("objetivo_pagina"):
+            return {"category": "main_goal", "question": "Essa página precisa vender um serviço, captar leads ou apresentar melhor a marca?", "next_action": "ask_question"}
+    elif not memory.get("problema_site"):
+        return {"category": "current_problem", "question": SITE_PROBLEM_QUESTION, "next_action": "ask_question"}
+    if not memory.get("objetivo_pagina"):
+        return {"category": "main_goal", "question": "O foco dessa página é gerar leads, vender mais ou apresentar melhor a marca?", "next_action": "ask_question"}
+    if not memory.get("publico"):
+        return {"category": "publico", "question": "Essa página fala mais com clientes finais, empresas ou um público mais específico?", "next_action": "ask_question"}
+    if not memory.get("prazo"):
+        return {"category": "urgency", "question": "Você tem alguma data ou campanha em mente para colocar essa página no ar?", "next_action": "ask_question"}
+    return {"category": "offer_meeting", "question": "Já tenho uma boa leitura da página. Posso encaminhar para a Julia avaliar o próximo movimento?", "next_action": "offer_meeting"}
+
+
+def _progressive_ai_question(state: Dict[str, Any]) -> Dict[str, Any]:
+    state = flatten_state(state)
+    memory = _discovery_from_known_fields(state)["inteligencia_artificial"]
+    if not memory.get("processo"):
+        return {"category": "main_goal", "question": "Qual processo você imagina melhorar com IA: atendimento, vendas, conteúdo ou operação interna?", "next_action": "ask_question"}
+    if not memory.get("dor_operacional"):
+        return {"category": "current_problem", "question": "Hoje qual parte desse processo mais trava: volume, tempo de resposta, retrabalho ou falta de padrão?", "next_action": "ask_question"}
+    if not memory.get("ferramenta_atual"):
+        return {"category": "current_tools", "question": "Hoje esse processo acontece manualmente ou já passa por alguma ferramenta?", "next_action": "ask_question"}
+    if not memory.get("volume_tarefa"):
+        return {"category": "volume_tarefa", "question": "Esse processo acontece poucas vezes por semana ou em alto volume todos os dias?", "next_action": "ask_question"}
+    if not memory.get("orcamento"):
+        return {"category": "budget_signal", "question": "Vocês já têm uma faixa de investimento pensada para automatizar isso?", "next_action": "ask_question"}
+    return {"category": "offer_meeting", "question": "Já dá para desenhar uma hipótese de IA com impacto. Posso encaminhar para a Julia avaliar com vocês?", "next_action": "offer_meeting"}
+
+
+def _progressive_traffic_question(state: Dict[str, Any]) -> Dict[str, Any]:
+    state = flatten_state(state)
+    memory = _discovery_from_known_fields(state)["trafego_pago"]
+    if not memory.get("estrutura_atual"):
+        return {"category": "current_status", "question": "Hoje vocês já anunciam ou querem começar do zero?", "next_action": "ask_question"}
+    if not memory.get("objetivo_campanha"):
+        return {"category": "main_goal", "question": "O foco da campanha é gerar leads, vender no site ou fortalecer a marca?", "next_action": "ask_question"}
+    if not memory.get("oferta"):
+        return {"category": "oferta", "question": "Qual oferta, produto ou serviço você quer colocar no centro dessa campanha?", "next_action": "ask_question"}
+    if not memory.get("verba"):
+        return {"category": "budget_signal", "question": "Vocês já têm uma verba mensal pensada para mídia?", "next_action": "ask_question"}
+    if not memory.get("problema_performance") and memory.get("estrutura_atual") == "já anuncia":
+        return {"category": "problema_performance", "question": "Hoje o ponto que mais incomoda é custo, conversão, volume de leads ou qualidade das oportunidades?", "next_action": "ask_question"}
+    return {"category": "offer_meeting", "question": "Já tenho contexto para avaliar mídia com mais responsabilidade. Posso encaminhar para a Julia?", "next_action": "offer_meeting"}
+
+
+def _progressive_branding_question(state: Dict[str, Any]) -> Dict[str, Any]:
+    state = flatten_state(state)
+    memory = _discovery_from_known_fields(state)["branding"]
+    objective = normalize_text(memory.get("objetivo_comunicacao") or "")
+    focus = normalize_text(memory.get("foco_marca") or "")
+    if not (memory.get("foco_marca") or memory.get("objetivo_comunicacao")):
+        if memory.get("canal_principal") == "Instagram":
+            return {"category": "dificuldade_atual", "question": "Hoje o maior desafio está em atrair pessoas certas, transformar interesse em conversa ou manter constância de conteúdo?", "next_action": "ask_question"}
+        return {"category": "main_goal", "question": "Você quer fortalecer posicionamento, identidade visual ou conteúdo para redes?", "next_action": "ask_question"}
+    if "divulgar produtos" in objective and memory.get("produto_servico") == "produtos":
+        return {"category": "produto_servico", "question": "Esses produtos já são vendidos hoje ou ainda estão em fase de lançamento?", "next_action": "ask_question"}
+    if "crescimento" in objective and not memory.get("canal_principal"):
+        return {"category": "canal_principal", "question": "Hoje vocês já publicam com frequência?", "next_action": "ask_question"}
+    if ("identidade" in focus or "construcao" in focus or "construção" in focus) and not memory.get("estagio_marca"):
+        return {"category": "estagio_marca", "question": "Hoje essa marca já tem nome, identidade visual e redes ativas ou ainda está sendo estruturada do zero?", "next_action": "ask_question"}
+    if not memory.get("produto_servico"):
+        return {"category": "produto_servico", "question": "O que essa marca vende ou quer apresentar melhor: produtos, serviços ou uma nova oferta?", "next_action": "ask_question"}
+    if not memory.get("canal_principal"):
+        return {"category": "canal_principal", "question": "Hoje o principal canal de comunicação é Instagram, WhatsApp, site ou outro ponto de contato?", "next_action": "ask_question"}
+    if not memory.get("dificuldade_atual"):
+        return {"category": "dificuldade_atual", "question": "Você quer começar mais pela construção da marca, pela organização do conteúdo ou por uma estratégia para gerar demanda?", "next_action": "ask_question"}
+    if not memory.get("orcamento"):
+        return {"category": "budget_signal", "question": "Vocês já têm uma faixa de investimento pensada para essa frente de marca e comunicação?", "next_action": "ask_question"}
+    return {"category": "offer_meeting", "question": "Já tenho uma leitura consistente da marca. Posso encaminhar para a Julia avaliar o próximo movimento?", "next_action": "offer_meeting"}
+
+
 def get_next_question(state: Dict[str, Any]) -> Dict[str, Any]:
     state = flatten_state(state)
     service = state.get("service_interest") or state.get("selected_service") or ""
@@ -1070,29 +1298,9 @@ def get_next_question(state: Dict[str, Any]) -> Dict[str, Any]:
         "next_action": "offer_meeting",
     }
     if state.get("handoff") or service == "humano":
-        return {"category": "handoff", "question": "Claro. Vou te encaminhar para a Julia com um resumo do que você precisa.", "next_action": "handoff"}
+        return {"category": "handoff", "question": "Claro. Vou te direcionar para a equipe da Mugô.", "next_action": "handoff"}
     if service == "site":
-        if not state.get("site_scope"):
-            if (state.get("last_question_category") or "") == "site_scope":
-                return {
-                    "category": "site_scope",
-                    "question": "Para eu não te prender numa pergunta travada: hoje existe alguma página no ar ou a ideia é construir uma nova base?",
-                    "next_action": "ask_question",
-                }
-            return {"category": "site_scope", "question": SITE_SCOPE_QUESTION, "next_action": "ask_question"}
-        if state.get("site_scope") == "criar do zero":
-            if not state.get("main_goal"):
-                return {"category": "main_goal", "question": "Essa página precisa vender um serviço, captar leads ou apresentar melhor a marca?", "next_action": "ask_question"}
-            if not state.get("urgency"):
-                return {"category": "urgency", "question": "Você tem alguma data ou campanha em mente para colocar essa página no ar?", "next_action": "ask_question"}
-            return offer
-        if not state.get("current_problem"):
-            return {"category": "current_problem", "question": SITE_PROBLEM_QUESTION, "next_action": "ask_question"}
-        if not state.get("main_goal"):
-            return {"category": "main_goal", "question": "O foco dessa página é gerar leads, vender mais ou apresentar melhor a marca?", "next_action": "ask_question"}
-        if not state.get("urgency"):
-            return {"category": "urgency", "question": "Você tem alguma data ou campanha em mente para colocar essa página no ar?", "next_action": "ask_question"}
-        return offer
+        return _progressive_site_question(state)
     if service == "automacao_whatsapp":
         if not state.get("lead_source"):
             return {"category": "lead_source", "question": "Hoje os contatos chegam mais pelo WhatsApp, Instagram ou site?", "next_action": "ask_question"}
@@ -1100,39 +1308,11 @@ def get_next_question(state: Dict[str, Any]) -> Dict[str, Any]:
             return {"category": "current_tools", "question": "Hoje vocês atendem manualmente ou já existe alguma automação rodando?", "next_action": "ask_question"}
         return _progressive_automation_question(state)
     if service == "inteligencia_artificial":
-        if not state.get("main_goal"):
-            return {"category": "main_goal", "question": "Você imagina usar IA mais para atendimento, vendas, conteúdo ou processos internos?", "next_action": "ask_question"}
-        if not state.get("current_problem"):
-            return {"category": "current_problem", "question": "Qual processo hoje mais toma tempo da equipe?", "next_action": "ask_question"}
-        context_text = normalize_text(f"{state.get('main_goal') or ''} {state.get('current_problem') or ''}")
-        if not state.get("lead_source") and _has_any(context_text, ["atendimento", "vendas", "lead", "cliente"]):
-            return {"category": "lead_source", "question": "Hoje esses contatos chegam mais pelo WhatsApp, Instagram ou site?", "next_action": "ask_question"}
-        if not state.get("current_tools"):
-            return {"category": "current_tools", "question": "Hoje vocês fazem isso manualmente ou já usam alguma ferramenta/CRM?", "next_action": "ask_question"}
-        if not state.get("urgency"):
-            return {"category": "urgency", "question": "Isso é prioridade para agora ou vocês ainda estão explorando possibilidades?", "next_action": "ask_question"}
-        return offer
+        return _progressive_ai_question(state)
     if service == "trafego_pago":
-        if not (state.get("current_status") or state.get("current_tools")):
-            return {"category": "current_status", "question": "Legal. Hoje vocês já anunciam ou querem começar do zero?", "next_action": "ask_question"}
-        if not state.get("main_goal"):
-            return {"category": "main_goal", "question": "O foco é gerar leads, vender no site ou fortalecer a marca?", "next_action": "ask_question"}
-        if not state.get("budget_signal"):
-            return {"category": "budget_signal", "question": "Vocês já têm uma verba mensal pensada para mídia?", "next_action": "ask_question"}
-        return offer
+        return _progressive_traffic_question(state)
     if service == "branding":
-        source_text = normalize_text(state.get("lead_source") or "")
-        if "instagram" in source_text and not state.get("current_problem"):
-            return {"category": "current_problem", "question": "Hoje o maior desafio está em atrair pessoas certas, transformar interesse em conversa ou manter constância de conteúdo?", "next_action": "ask_question"}
-        if not state.get("main_goal"):
-            return {"category": "main_goal", "question": "A ideia é melhorar posicionamento, conteúdo para redes sociais ou identidade da marca?", "next_action": "ask_question"}
-        if not state.get("current_status"):
-            return {"category": "current_status", "question": "Hoje vocês já têm uma presença ativa nas redes ou querem estruturar isso do zero?", "next_action": "ask_question"}
-        if not state.get("current_problem"):
-            return {"category": "current_problem", "question": "Hoje o maior incômodo é falta de clareza na marca, falta de conteúdo ou pouca conversão?", "next_action": "ask_question"}
-        if not state.get("urgency"):
-            return {"category": "urgency", "question": "Você quer iniciar isso agora ou está planejando para os próximos meses?", "next_action": "ask_question"}
-        return offer
+        return _progressive_branding_question(state)
     return {
         "category": "service_interest",
         "question": "Vou seguir por uma leitura mais ampla para não te prender em pergunta solta. Hoje você busca mais clareza estratégica, melhoria de comunicação ou automação do atendimento?",
@@ -1157,6 +1337,7 @@ def question_category(text: str) -> str:
         or ("velocidade" in norm and "clareza" in norm)
         or ("maior desafio" in norm and "constancia de conteudo" in norm)
         or "principal ponto que voce quer resolver" in norm
+        or "estrategia para gerar demanda" in norm
     ):
         return "current_problem"
     if "vendas/leads" in norm or "vender mais" in norm or "gerar leads" in norm or "foco e gerar" in norm:
@@ -1167,12 +1348,24 @@ def question_category(text: str) -> str:
         return "current_tools" if "anunciam" not in norm else "current_status"
     if "quantos leads" in norm or "quantas conversas" in norm or "entram por semana" in norm:
         return "volume"
+    if "alto volume todos os dias" in norm or "poucas vezes por semana" in norm:
+        return "volume_tarefa"
     if "maior gargalo" in norm or "perda de oportunidades" in norm or "acompanhamento dos leads" in norm:
         return "gargalo"
     if "algum crm" in norm or "fica tudo no whatsapp" in norm:
         return "crm"
     if "recebe retorno" in norm or "minutos horas" in norm or "tempo de resposta" in norm:
         return "tempo_resposta"
+    if "nome identidade visual e redes ativas" in norm or "estruturada do zero" in norm:
+        return "estagio_marca"
+    if "produtos ja sao vendidos" in norm or "fase de lancamento" in norm or "essa marca vende" in norm:
+        return "produto_servico"
+    if "principal canal de comunicacao" in norm or "publicam com frequencia" in norm:
+        return "canal_principal"
+    if "qual oferta produto ou servico" in norm:
+        return "oferta"
+    if "clientes finais empresas" in norm:
+        return "publico"
     if "data" in norm or "campanha" in norm or "este mes" in norm or "curto prazo" in norm or "prioridade" in norm:
         return "urgency"
     if "verba" in norm or "midia" in norm or "orcamento" in norm:
@@ -1213,6 +1406,7 @@ def is_duplicate_question(reply: str, last_question: str) -> bool:
 def _category_answered(state: Dict[str, Any], category: str) -> bool:
     state = flatten_state(state)
     memory = _read_memory(state)
+    discovery = _read_discovery_memory(state)
     if category == "current_tools":
         return bool(state.get("current_tools"))
     if category == "current_status":
@@ -1227,6 +1421,19 @@ def _category_answered(state: Dict[str, Any], category: str) -> bool:
         return False
     if category in {"volume", "gargalo", "crm", "tempo_resposta"}:
         return bool(memory.get(category))
+    discovery_map = {
+        "publico": ("site", "publico"),
+        "volume_tarefa": ("inteligencia_artificial", "volume_tarefa"),
+        "oferta": ("trafego_pago", "oferta"),
+        "problema_performance": ("trafego_pago", "problema_performance"),
+        "estagio_marca": ("branding", "estagio_marca"),
+        "produto_servico": ("branding", "produto_servico"),
+        "canal_principal": ("branding", "canal_principal"),
+        "dificuldade_atual": ("branding", "dificuldade_atual"),
+    }
+    if category in discovery_map:
+        service, key = discovery_map[category]
+        return bool((discovery.get(service) or {}).get(key))
     return bool(state.get(category))
 
 
@@ -1239,6 +1446,8 @@ def _non_repeating_recovery_question(state: Dict[str, Any]) -> Dict[str, Any]:
             return {"category": "current_problem", "question": "Me conta em uma frase o que mais precisa melhorar no site hoje?", "next_action": "ask_question"}
         if not state.get("current_problem"):
             return {"category": "current_problem", "question": SITE_PROBLEM_QUESTION, "next_action": "ask_question"}
+    if service == "branding":
+        return _progressive_branding_question(state)
     return {"category": "current_problem", "question": "Me conta em uma frase qual é o principal ponto que você quer resolver agora?", "next_action": "ask_question"}
 
 
@@ -1300,9 +1509,9 @@ def build_contextual_reply(
         else:
             confirmation = f"Boa, vou considerar {lead_source} como principal ponto de entrada."
     elif signals.get("current_tools") == "manual":
-        confirmation = "Entendi. Aí a automação pode ajudar bastante a organizar e acelerar o retorno."
+        confirmation = "Aí a automação pode ajudar bastante a organizar e acelerar o retorno."
     elif signals.get("site_scope") in {SITE_EXISTING_SCOPE, "melhorar existente"}:
-        confirmation = "Entendi. Então o foco é melhorar uma estrutura que já existe."
+        confirmation = "Então o foco é melhorar uma estrutura que já existe."
     elif signals.get("site_scope") == "criar do zero":
         confirmation = "Legal. Então estamos falando de criar uma página nova do zero."
     elif signals.get("current_status") == "começar do zero":
@@ -1310,19 +1519,25 @@ def build_contextual_reply(
     elif signals.get("current_status") == "já anuncia":
         confirmation = "Boa. Então vocês já têm alguma experiência com anúncios."
     elif signals.get("urgency") == "alta":
-        confirmation = "Entendi, então faz sentido acelerar."
+        confirmation = "Esse prazo pede um encaminhamento mais ágil."
     elif signals.get("main_goal") == "vendas/leads":
         confirmation = "Faz sentido, então o foco é gerar mais oportunidades."
+    elif after.get("service_interest") == "branding" and signals.get("main_goal") == "identidade visual":
+        confirmation = "Então o foco é dar mais clareza e consistência para a marca."
+    elif after.get("service_interest") == "branding" and signals.get("main_goal") == "criar marca para divulgar produtos":
+        confirmation = "Boa. Então existe uma intenção comercial por trás da marca: apresentar melhor os produtos e gerar desejo."
+    elif after.get("service_interest") == "branding" and signals.get("main_goal") == "crescimento de marca":
+        confirmation = "Faz sentido. Para crescer com consistência, precisamos entender se o desafio está mais em posicionamento, conteúdo ou aquisição."
     elif after.get("service_interest") == "branding" and signals.get("main_goal") == "posicionamento e conteúdo/redes sociais":
-        confirmation = "Legal, então vamos considerar posicionamento e conteúdo."
+        confirmation = "Então vamos considerar posicionamento e conteúdo como frentes conectadas."
     elif after.get("service_interest") == "branding" and signals.get("main_goal"):
-        confirmation = "Legal, entendi o foco da marca."
+        confirmation = "Então o foco é construir uma marca com mais clareza e força comercial."
     elif signals.get("main_goal") == "gerar leads, vender no site e fortalecer marca":
-        confirmation = "Certo, então o objetivo é cobrir os três pontos."
+        confirmation = "Então o objetivo é cobrir os três pontos com uma estratégia integrada."
     elif signals.get("main_goal") == "atendimento" or normalize_text(str(signals.get("current_problem") or "")) == "atendimento":
-        confirmation = "Certo. Então faz sentido pensar em IA para acelerar o atendimento e não deixar lead esfriar."
+        confirmation = "Então faz sentido pensar em IA para acelerar o atendimento e não deixar lead esfriar."
     elif signals.get("main_goal"):
-        confirmation = "Entendi o foco."
+        confirmation = "Vou considerar esse foco como ponto de partida."
     elif signals.get("current_problem") and after.get("service_interest") == "inteligencia_artificial":
         confirmation = "Boa. Esse é um bom ponto para a IA ajudar."
     elif after.get("service_interest") == "site" and not before.get("service_interest"):
@@ -1397,24 +1612,24 @@ def build_briefing(state: Dict[str, Any], recent_messages: list) -> Dict[str, An
 
     if service or goal:
         summary_parts.append(
-            "Contato sinaliza "
-            + (f"aderência com {service}" if service else "uma demanda comercial")
-            + (f" para {goal}" if goal else "")
+            "O momento do contato aponta para "
+            + (f"uma conversa ligada a {service}" if service else "uma demanda comercial em diagnóstico")
+            + (f", com intenção de {goal}" if goal else "")
             + "."
         )
     if problem:
-        summary_parts.append(f"A principal trava percebida é {problem}.")
+        summary_parts.append(f"A trava que merece atenção inicial é {problem}.")
     if channel or tools:
         summary_parts.append(
-            "O cenário operacional citado envolve "
+            "A leitura operacional envolve "
             + " e ".join([str(part) for part in [channel, tools] if part])
             + "."
         )
     if urgency or budget:
         summary_parts.append(
-            "Há sinal comercial relevante"
+            "Há sinal comercial para calibrar prioridade"
             + (f" com urgência {urgency}" if urgency else "")
-            + (f" e orçamento {budget}" if budget else "")
+            + (f" e investimento {budget}" if budget else "")
             + "."
         )
 

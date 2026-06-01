@@ -263,7 +263,8 @@ def test_all_service_buttons():
         assert_equal(f"{choice_id} category", step["next_question"]["category"], category)
         if choice_id == "service_human":
             assert_equal("human handoff", step["state_after"]["handoff"], True)
-            assert_true("human link", "https://wa.me/5511973510549?text=" in step["reply"])
+            assert_true("human direct link", "https://wa.me/5511973510549" in step["reply"])
+            assert_true("human link has no prefilled text", "?text=" not in step["reply"])
         else:
             assert_equal(f"{choice_id} not handoff", bool(step["state_after"]["handoff"]), False)
 
@@ -705,7 +706,7 @@ def test_handoff_reply_includes_julia_link():
     from app import JULIA_DIRECT_LINK, JULIA_HANDOFF_REPLY
 
     assert_true("handoff has link", JULIA_DIRECT_LINK in JULIA_HANDOFF_REPLY)
-    assert_true("handoff has encoded text", "?text=" in JULIA_HANDOFF_REPLY)
+    assert_true("handoff has no encoded text", "?text=" not in JULIA_HANDOFF_REPLY)
 
 
 def test_prefilled_julia_link_contains_encoded_context():
@@ -724,11 +725,13 @@ def test_prefilled_julia_link_contains_encoded_context():
     link = build_julia_prefilled_link(context)
     assert_true("link prefix", link.startswith(f"{JULIA_DIRECT_LINK}?text="))
     decoded = urllib.parse.unquote(link.split("?text=", 1)[1])
-    assert_true("decoded service", "Serviço: automacao_whatsapp" in decoded)
-    assert_true("decoded goal", "Objetivo: responder leads mais rápido" in decoded)
-    assert_true("decoded problem", "Problema: processo manual" in decoded)
-    assert_true("decoded budget", "Orçamento: tem verba" in decoded)
-    assert_true("decoded summary", "Resumo:\nLead quer automatizar atendimento até maio." in decoded)
+    assert_true("premium title", "✨ Novo contato qualificado pela Mugô" in decoded)
+    assert_true("strategic synthesis", "Síntese estratégica:" in decoded)
+    assert_true("perceived opportunity", "Oportunidade percebida:" in decoded)
+    assert_true("commercial reading", "Leitura comercial:" in decoded)
+    assert_true("next step", "Próximo passo sugerido:" in decoded)
+    assert_true("no raw service label", "Serviço:" not in decoded)
+    assert_true("no raw budget label", "Orçamento:" not in decoded)
 
 
 def test_internal_operation_briefing_without_link():
@@ -748,8 +751,8 @@ def test_internal_operation_briefing_without_link():
     }
     message = _build_julia_briefing_message(wa_id="5511999999999", user={"nome": "Lead Teste"}, result=result)
     assert_equal("operation number", OPERATION_NUMBER, "5511972769605")
-    assert_true("structured title", "🔥 Novo lead qualificado" in message)
-    assert_true("service in message", "Serviço: site" in message)
+    assert_true("structured title", "✨ Novo contato qualificado pela Mugô" in message)
+    assert_true("opportunity in message", "Oportunidade percebida:" in message)
     assert_true("summary in message", "Lead quer melhorar a página atual" in message)
     assert_true("no wa link", "wa.me" not in message)
 

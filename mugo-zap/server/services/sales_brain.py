@@ -904,25 +904,39 @@ def has_enough_briefing_for_handoff(state: Dict[str, Any]) -> bool:
 def build_briefing(state: Dict[str, Any], recent_messages: list) -> Dict[str, Any]:
     state = flatten_state(state)
     summary_parts = []
-    if state.get("service_interest"):
-        summary_parts.append(f"Interesse: {state.get('service_interest')}")
-    if state.get("main_goal"):
-        summary_parts.append(f"Objetivo: {state.get('main_goal')}")
-    if state.get("site_scope"):
-        summary_parts.append(f"Escopo site: {state.get('site_scope')}")
-    if state.get("lead_source"):
-        summary_parts.append(f"Origem dos leads: {state.get('lead_source')}")
-    if state.get("current_tools"):
-        summary_parts.append(f"Ferramentas/processo: {state.get('current_tools')}")
-    if state.get("current_problem"):
-        summary_parts.append(f"Problema: {state.get('current_problem')}")
-    if state.get("urgency"):
-        summary_parts.append(f"Urgência: {state.get('urgency')}")
-    if state.get("budget_signal"):
-        summary_parts.append(f"Orçamento: {state.get('budget_signal')}")
+    service = str(state.get("service_interest") or state.get("intent") or "").replace("_", " ").strip()
+    goal = state.get("desired_result") or state.get("main_goal")
+    problem = state.get("current_problem") or state.get("current_status")
+    channel = state.get("lead_source")
+    tools = state.get("current_tools")
+    urgency = state.get("urgency")
+    budget = state.get("budget_signal")
+
+    if service or goal:
+        summary_parts.append(
+            "Contato sinaliza "
+            + (f"aderência com {service}" if service else "uma demanda comercial")
+            + (f" para {goal}" if goal else "")
+            + "."
+        )
+    if problem:
+        summary_parts.append(f"A principal trava percebida é {problem}.")
+    if channel or tools:
+        summary_parts.append(
+            "O cenário operacional citado envolve "
+            + " e ".join([str(part) for part in [channel, tools] if part])
+            + "."
+        )
+    if urgency or budget:
+        summary_parts.append(
+            "Há sinal comercial relevante"
+            + (f" com urgência {urgency}" if urgency else "")
+            + (f" e orçamento {budget}" if budget else "")
+            + "."
+        )
 
     return {
-        "summary": "; ".join(summary_parts) or "Lead iniciou conversa no WhatsApp.",
+        "summary": " ".join(summary_parts) or "Contato iniciou conversa pelo WhatsApp e ainda precisa de diagnóstico consultivo.",
         "pain_points": [state.get("current_problem")] if state.get("current_problem") else [],
         "goals": [state.get("desired_result") or state.get("main_goal")] if (state.get("desired_result") or state.get("main_goal")) else [],
         "recommended_solution": state.get("service_interest") or state.get("intent"),

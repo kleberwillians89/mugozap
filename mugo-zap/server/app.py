@@ -87,30 +87,113 @@ def _handoff_context_value(context: dict | None, key: str) -> str:
     return str(fields.get(key) or context.get(key) or "").strip()
 
 
-def build_julia_prefilled_link(context: dict | None = None) -> str:
-    service = _handoff_context_value(context, "service_interest") or _handoff_context_value(context, "intent")
-    goal = _handoff_context_value(context, "main_goal") or _handoff_context_value(context, "desired_result")
-    problem = _handoff_context_value(context, "current_problem")
-    channel = _handoff_context_value(context, "lead_source")
-    tools = _handoff_context_value(context, "current_tools") or _handoff_context_value(context, "current_status")
-    urgency = _handoff_context_value(context, "urgency")
-    budget = _handoff_context_value(context, "budget_signal")
-    summary = _handoff_context_value(context, "summary")
+def _readable_signal(value: Any) -> str:
+    return str(value or "").strip().replace("_", " ")
 
-    link_text = (
-        "Oi Julia, vim pelo atendimento da Mugô.\n\n"
-        "Meu contexto:\n"
-        f"Serviço: {service}\n"
-        f"Objetivo: {goal}\n"
-        f"Problema: {problem}\n"
-        f"Canal: {channel}\n"
-        f"Ferramenta atual/status: {tools}\n"
-        f"Prazo: {urgency}\n"
-        f"Orçamento: {budget}\n\n"
-        "Resumo:\n"
-        f"{summary}\n\n"
-        "Podemos seguir por aqui?"
+
+def _compact_lines(*values: Any, limit: int = 4) -> List[str]:
+    lines: List[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if not text:
+            continue
+        for part in re.split(r"\n+|\s+\|\s+", text):
+            clean = part.strip(" -;")
+            if clean and clean not in lines:
+                lines.append(clean)
+            if len(lines) >= limit:
+                return lines
+    return lines
+
+
+def _build_premium_handoff_message(
+    context: dict | None = None,
+    *,
+    lead_name: str = "",
+    phone: str = "",
+    topic: str = "",
+    summary: str = "",
+    temperature: str = "",
+    suggested_next_step: str = "",
+) -> str:
+    context = context or {}
+    briefing = context.get("briefing") if isinstance(context.get("briefing"), dict) else {}
+
+    name = (
+        lead_name
+        or _handoff_context_value(context, "lead_name")
+        or _handoff_context_value(context, "name")
+        or _handoff_context_value(context, "contact_name")
+        or "Contato sem nome"
     )
+    contact_phone = phone or _handoff_context_value(context, "phone") or _handoff_context_value(context, "telefone") or _handoff_context_value(context, "wa_id")
+    identity = f"{name} | {contact_phone}" if contact_phone else name
+
+    interest = _readable_signal(topic or _handoff_context_value(context, "service_interest") or _handoff_context_value(context, "intent") or _handoff_context_value(context, "lead_theme"))
+    goal = _readable_signal(_handoff_context_value(context, "main_goal") or _handoff_context_value(context, "desired_result"))
+    problem = _readable_signal(_handoff_context_value(context, "current_problem") or _handoff_context_value(context, "current_status"))
+    channel = _readable_signal(_handoff_context_value(context, "lead_source"))
+    tools = _readable_signal(_handoff_context_value(context, "current_tools"))
+    urgency = _readable_signal(_handoff_context_value(context, "urgency") or briefing.get("urgency"))
+    budget = _readable_signal(_handoff_context_value(context, "budget_signal") or briefing.get("budget_signal"))
+    temp = _readable_signal(temperature or _handoff_context_value(context, "lead_temperature") or context.get("temperature"))
+    base_summary = str(summary or _handoff_context_value(context, "summary") or context.get("handoff_summary") or context.get("memory_summary") or "").strip()
+
+    synthesis_lines = _compact_lines(base_summary, limit=2)
+    if goal or problem:
+        synthesis_lines.append(
+            f"O momento aponta para {goal or 'crescimento comercial'}"
+            + (f", com trava em {problem}" if problem else "")
+            + "."
+        )
+    if channel or tools:
+        synthesis_lines.append(
+            "A operação atual passa por "
+            + " e ".join([part for part in [channel, tools] if part])
+            + ", então a abordagem deve conectar estratégia e execução."
+        )
+    if not synthesis_lines:
+        synthesis_lines = ["Contato entrou pela Mugô com sinal comercial e precisa de uma leitura consultiva antes de qualquer proposta."]
+    synthesis = "\n".join(synthesis_lines[:4])
+
+    if interest:
+        opportunity = f"A frente mais aderente parece ser {interest}, porque conversa diretamente com {goal or problem or 'o momento comercial descrito'}."
+    else:
+        opportunity = "Vale diagnosticar rapidamente qual frente da Mugô destrava mais valor antes de apresentar solução."
+
+    maturity_bits = []
+    if temp:
+        maturity_bits.append(f"temperatura {temp}")
+    if urgency:
+        maturity_bits.append(f"urgência {urgency}")
+    if budget:
+        maturity_bits.append(f"sinal de orçamento: {budget}")
+    if problem:
+        maturity_bits.append(f"dor já verbalizada em {problem}")
+    commercial_reading = "Contato com " + ", ".join(maturity_bits) + "." if maturity_bits else "Contato ainda em diagnóstico, mas com abertura para avançar se a conversa trouxer clareza e próximo passo objetivo."
+
+    next_step = (
+        suggested_next_step
+        or str(briefing.get("suggested_next_step") or "").strip()
+        or "Julia deve entrar retomando a síntese do cenário, validar prioridade e conduzir para uma conversa curta de diagnóstico ou proposta."
+    )
+
+    return (
+        "✨ Novo contato qualificado pela Mugô\n\n"
+        f"{identity}\n\n"
+        "Síntese estratégica:\n"
+        f"{synthesis}\n\n"
+        "Oportunidade percebida:\n"
+        f"{opportunity}\n\n"
+        "Leitura comercial:\n"
+        f"{commercial_reading}\n\n"
+        "Próximo passo sugerido:\n"
+        f"{next_step}"
+    )[:3500]
+
+
+def build_julia_prefilled_link(context: dict | None = None) -> str:
+    link_text = _build_premium_handoff_message(context)
     encoded_text = urllib.parse.quote(link_text)
     link = f"{JULIA_DIRECT_LINK}?text={encoded_text}"
     print(f"HANDOFF_PREFILLED_LINK_GENERATED has_text={bool(encoded_text)} link_len={len(link)}")
@@ -128,12 +211,11 @@ def _handoff_opening(context: dict | None = None) -> str:
 
 
 def build_handoff_lead_reply(context: dict | None = None) -> str:
-    julia_link = build_julia_prefilled_link(context)
     opening = _handoff_opening(context)
     return (
-        f"{opening} Já deixei um resumo pronto para a Julia.\n\n"
-        "Para continuar com ela, clique aqui:\n"
-        f"{julia_link}"
+        f"{opening} Já tenho contexto suficiente e vou encaminhar para a Julia seguir com você.\n\n"
+        "Se quiser falar direto com ela, o link é:\n"
+        f"{JULIA_DIRECT_LINK}"
     )
 
 
@@ -1209,11 +1291,11 @@ def _briefing_summary_from_result(result: dict, fallback_text: str = "") -> str:
     if briefing.get("summary"):
         pieces.append(str(briefing.get("summary")).strip())
     if fields.get("current_problem"):
-        pieces.append(f"Problema: {fields.get('current_problem')}")
+        pieces.append(f"A principal trava citada foi {fields.get('current_problem')}.")
     if fields.get("desired_result"):
-        pieces.append(f"Resultado desejado: {fields.get('desired_result')}")
+        pieces.append(f"O resultado buscado é {fields.get('desired_result')}.")
     if briefing.get("recommended_solution"):
-        pieces.append(f"Solução recomendada: {briefing.get('recommended_solution')}")
+        pieces.append(f"A frente recomendada é {briefing.get('recommended_solution')}.")
     if not pieces and fallback_text:
         pieces.append(fallback_text.strip())
     return "\n".join([p for p in pieces if p])[:1500]
@@ -1230,32 +1312,26 @@ def _build_julia_briefing_message(
     briefing = (result or {}).get("briefing") or {}
     lead_name = _format_lead_name(user, wa_id)
     phone = ((user or {}).get("telefone") or wa_id or "").strip()
-    interest = fields.get("service_interest") or result.get("intent") or result.get("lead_theme") or ""
-    problem = fields.get("current_problem") or ""
-    goal = fields.get("main_goal") or fields.get("desired_result") or ", ".join(briefing.get("goals") or []) or ""
-    channel = fields.get("lead_source") or ""
-    tools = fields.get("current_tools") or ""
-    urgency = fields.get("urgency") or briefing.get("urgency") or ""
     summary = briefing.get("summary") or _briefing_summary_from_result(result, fallback_text)
-
-    lines = [
-        "🔥 Novo lead qualificado",
-        "",
-        f"Nome: {lead_name}",
-        f"Telefone: {phone}",
-        f"Temperatura: {result.get('lead_temperature') or ''}",
-        "",
-        f"Serviço: {interest}",
-        f"Objetivo: {goal}",
-        f"Problema: {problem}",
-        f"Canal: {channel}",
-        f"Ferramenta atual: {tools}",
-        f"Prazo: {urgency}",
-        "",
-        "Resumo:",
-        summary,
-    ]
-    return "\n".join(lines)[:3500]
+    context = {
+        **fields,
+        "briefing": briefing,
+        "intent": result.get("intent"),
+        "lead_theme": result.get("lead_theme"),
+        "lead_temperature": result.get("lead_temperature"),
+        "lead_name": lead_name,
+        "phone": phone,
+    }
+    if briefing.get("goals") and not context.get("desired_result"):
+        context["desired_result"] = ", ".join(briefing.get("goals") or [])
+    return _build_premium_handoff_message(
+        context,
+        lead_name=lead_name,
+        phone=phone,
+        summary=summary,
+        temperature=result.get("lead_temperature") or "",
+        suggested_next_step=briefing.get("suggested_next_step") or "",
+    )
 
 
 def _send_operation_briefing(
@@ -3256,6 +3332,9 @@ async def mark_handoff_done(wa_id: str, topic: str = "", summary: str = "", work
 def _build_handoff_link(topic: str, wa_id: str, summary: str, user: dict | None = None) -> str:
     return build_julia_prefilled_link(
         {
+            "lead_name": _format_lead_name(user, wa_id),
+            "phone": ((user or {}).get("telefone") or wa_id or "").strip(),
+            "wa_id": wa_id,
             "service_interest": (topic or "Atendimento Mugô").strip(),
             "briefing": {"summary": (summary or "").strip()},
         }
@@ -3356,19 +3435,23 @@ def start_handoff_now(
     except Exception as e:
         print(f"[{cid}] Falha ao criar task automática:", repr(e))
 
-    internal_briefing = internal_briefing or (
-        "🔥 Novo lead qualificado\n\n"
-        f"Nome: {lead_name}\n"
-        f"Telefone: {wa_id}\n"
-        f"Temperatura: {reason_label}\n\n"
-        f"Serviço: {topic}\n"
-        "Objetivo: \n"
-        "Problema: \n"
-        "Canal: \n"
-        "Ferramenta atual: \n"
-        "Prazo: \n\n"
-        "Resumo:\n"
-        f"{summary}"
+    internal_briefing = internal_briefing or _build_premium_handoff_message(
+        {
+            "lead_name": lead_name,
+            "phone": ((user or {}).get("telefone") or wa_id or "").strip(),
+            "wa_id": wa_id,
+            "service_interest": topic,
+            "lead_temperature": reason_label,
+            "briefing": {
+                "summary": summary,
+                "suggested_next_step": "Julia deve assumir com uma leitura consultiva, validar prioridade e propor o próximo movimento comercial.",
+            },
+        },
+        lead_name=lead_name,
+        phone=((user or {}).get("telefone") or wa_id or "").strip(),
+        topic=topic,
+        summary=summary,
+        temperature=reason_label,
     )
 
     operation_results = _send_operation_briefing(

@@ -105,3 +105,26 @@
       border-bottom: 1px solid rgba(255,255,255,0.08);
     }
   }
+
+  .loginBrandIcon {
+    width: 88px;
+    height: 88px;
+    border-radius: 20px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(255, 255, 255, 0.06);
+    overflow: hidden;
+  }
+  
+  .loginBrandLogo {
+    width: 60px;
+    height: 60px;
+    object-fit: contain;
+  }
+
+  .loginBrandLogo {
+    width: 72px;
+    height: 72px;
+    object-fit: contain;
+  }

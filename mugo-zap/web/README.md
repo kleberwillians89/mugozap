@@ -1,16 +1,37 @@
-# React + Vite
+# Painel Mugozap
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Frontend React/Vite do painel interno.
 
-Currently, two official plugins are available:
+## Estabilidade de build
+O projeto usa o `vite` oficial, sem alias para `rolldown-vite`, para evitar fragilidade em CI/CD e diferenças de bindings nativos entre ambientes.
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+## Setup
+```bash
+cp .env.example .env
+npm install
+npm run dev
+```
 
-## React Compiler
+## Variáveis
+- `VITE_API_URL`
+- `VITE_SUPABASE_URL`
+- `VITE_SUPABASE_ANON_KEY`
+- `VITE_PANEL_KEY`
+- `VITE_DEFAULT_WORKSPACE_ID`
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+## Scripts
+- `npm run dev`
+- `npm run build`
+- `npm run lint`
+- `npm run preview`
 
-## Expanding the ESLint configuration
+## Produção
+Para CI/CD prefira:
+```bash
+npm ci
+npm run build
+```
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+Ambiente recomendado:
+- Node 20 ou 22
+- npm 10+

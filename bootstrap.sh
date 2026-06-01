@@ -1,31 +1,38 @@
 #!/usr/bin/env bash
-set -e
+set -euo pipefail
 
-ROOT="/Users/klebs/Desktop/mugozap"
-SERVER="$ROOT/mugo-zap/server"
-WEB="$ROOT/mugo-zap/web"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+APP_ROOT="$ROOT/mugo-zap"
+SERVER="$APP_ROOT/server"
+WEB="$APP_ROOT/web"
 
-mkdir -p "$SERVER/services"
-mkdir -p "$WEB"
+if [[ ! -d "$SERVER" || ! -d "$WEB" ]]; then
+  echo "Estrutura esperada não encontrada em $APP_ROOT" >&2
+  exit 1
+fi
 
-echo "✅ Pastas criadas."
+echo "Preparando Mugozap em:"
+echo "  app:    $APP_ROOT"
+echo "  server: $SERVER"
+echo "  web:    $WEB"
+echo
 
-echo "⚠️ Agora, dentro de $SERVER:"
-echo "   - Garanta que existe .venv e requirements.txt"
-echo "   - Garanta que existe .env (com OPENAI_API_KEY etc.)"
+if [[ ! -d "$SERVER/.venv" ]]; then
+  python3 -m venv "$SERVER/.venv"
+fi
 
-echo ""
-echo "✅ Próximo: criar frontend com Vite"
-cd "$ROOT/mugo-zap"
-npm create vite@latest web -- --template react >/dev/null
+"$SERVER/.venv/bin/pip" install --upgrade pip >/dev/null
+"$SERVER/.venv/bin/pip" install -r "$SERVER/requirements.txt"
+
 cd "$WEB"
-npm install >/dev/null
+npm install
 
-echo "✅ Frontend Vite React criado em $WEB"
-echo ""
-echo "Próximo passo:"
-echo "1) Rodar backend:"
-echo "   cd $SERVER && source .venv/bin/activate && uvicorn app:app --reload --port 8000"
-echo ""
-echo "2) Rodar frontend:"
-echo "   cd $WEB && npm run dev"
+echo
+echo "Setup concluído."
+echo
+echo "Próximos passos:"
+echo "1. Backend:"
+echo "   cd $SERVER && cp .env.example .env && source .venv/bin/activate && uvicorn app:app --reload --port 8000"
+echo
+echo "2. Frontend:"
+echo "   cd $WEB && cp .env.example .env && npm run dev"

@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { supabase } from "./lib/supabaseClient";
 import "./login.css";
+import logoMugo from "./assets/logo-mugo.png";
 
 export default function Login() {
   const [email, setEmail] = useState("");
@@ -30,11 +31,13 @@ export default function Login() {
     <div className="loginPage">
       <div className="loginCard">
         <div className="loginBrand">
-          <div className="loginLogo">M</div>
-          <div className="loginBrandText">
+        <div className="loginBrandIcon">
+            <img src={logoMugo} alt="Mugô" className="loginBrandLogo" />
+        </div>
+        <div className="loginBrandText">
             <div className="loginTitle">MugôZap</div>
             <div className="loginSub">Acesso ao painel</div>
-          </div>
+        </div>
         </div>
 
         <form className="loginForm" onSubmit={handleLogin}>

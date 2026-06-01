@@ -17,8 +17,8 @@ export default function AppWrapper() {
       setLoading(false);
     });
 
-    const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
-      setSession(session || null);
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+      setSession(nextSession || null);
       setLoading(false);
     });
 
@@ -34,39 +34,27 @@ export default function AppWrapper() {
     } catch (e) {
       console.warn("logout error:", e);
     } finally {
-      // garante voltar pra tela de login imediatamente
       setSession(null);
     }
   }
 
-  if (loading) return <div style={{ padding: 40 }}>Carregando...</div>;
+  if (loading) {
+    return (
+      <div className="mwLoadingShell">
+        <div className="mwLoadingCard">
+          <div className="mwLoadingBrand">MUGÔ</div>
+          <div className="mwLoadingText">Carregando painel interno...</div>
+        </div>
+      </div>
+    );
+  }
 
   if (!session) return <Login />;
 
   return (
-    <div style={{ height: "100vh" }}>
-      {/* Topbar simples só com Sair (não mexe no layout do App) */}
-      <div
-        style={{
-          position: "fixed",
-          top: 12,
-          right: 12,
-          zIndex: 9999,
-        }}
-      >
-        <button
-          onClick={handleLogout}
-          title="Sair"
-          style={{
-            border: "1px solid rgba(255,255,255,.12)",
-            background: "rgba(0,0,0,.35)",
-            color: "white",
-            padding: "10px 12px",
-            borderRadius: 12,
-            cursor: "pointer",
-            backdropFilter: "blur(8px)",
-          }}
-        >
+    <div className="mwShell">
+      <div className="mwTopActions">
+        <button onClick={handleLogout} title="Sair" className="mwLogoutBtn">
           Sair
         </button>
       </div>

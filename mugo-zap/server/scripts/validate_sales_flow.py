@@ -239,6 +239,45 @@ def test_site_melhorar_frase():
     assert_equal("site_scope", sales_brain.flatten_state(state)["site_scope"], "melhorar_site_existente")
 
 
+def test_semantic_interpretation_site_scope_non_literal():
+    state = state_with_choice("service_site")
+    cases = {
+        "meu site até existe, mas está fraco": ("melhorar_existente", "visual"),
+        "não tenho nada ainda": ("criar_do_zero", ""),
+        "quero dar uma melhorada no que já tenho": ("melhorar_existente", ""),
+        "preciso lançar uma página": ("criar_do_zero", ""),
+        "a página não passa confiança": ("melhorar_existente", "confiança"),
+        "já tenho, mas não vende": ("melhorar_existente", "converte"),
+    }
+    for message, (scope, problem_hint) in cases.items():
+        interpreted = sales_brain.interpret_user_message(message, state)
+        fields = interpreted["extracted_fields"]
+        assert_equal(f"{message} site_scope", fields["site_scope"], scope)
+        assert_equal(f"{message} stage_answered", interpreted["stage_answered"], True)
+        assert_true(f"{message} confidence", interpreted["confidence"] >= 0.65)
+        if problem_hint:
+            assert_true(f"{message} problem", problem_hint in fields["current_problem"])
+
+
+def test_pipeline_site_non_literal_answers_advance():
+    cases = {
+        "meu site até existe, mas está fraco": "melhorar_site_existente",
+        "não tenho nada ainda": "criar do zero",
+        "quero dar uma melhorada no que já tenho": "melhorar_site_existente",
+        "preciso lançar uma página": "criar do zero",
+        "a página não passa confiança": "melhorar_site_existente",
+        "já tenho, mas não vende": "melhorar_site_existente",
+    }
+    for message, expected_scope in cases.items():
+        step = pipeline_step(state_with_choice("service_site"), message=message)
+        assert_equal(f"{message} site_scope", step["state_after"]["site_scope"], expected_scope)
+        assert_true(f"{message} does not repeat scope", "criar uma página nova do zero ou melhorar" not in step["reply"])
+        if expected_scope == "criar do zero":
+            assert_true(f"{message} asks page purpose", "vender um serviço" in step["reply"] and "captar leads" in step["reply"])
+        else:
+            assert_true(f"{message} advances to site problem", step["next_question"]["category"] in {"current_problem", "main_goal"})
+
+
 def test_text_site_without_state_is_menu():
     choice = sales_brain.normalize_inbound_choice(text="site", current_state={})
     assert_equal("choice_id", choice["choice_id"], None)
@@ -998,6 +1037,8 @@ def main():
         ("site_melhorar", test_site_melhorar),
         ("site_do_zero", test_site_do_zero),
         ("site_melhorar_frase", test_site_melhorar_frase),
+        ("semantic_interpretation_site_scope_non_literal", test_semantic_interpretation_site_scope_non_literal),
+        ("pipeline_site_non_literal_answers_advance", test_pipeline_site_non_literal_answers_advance),
         ("text_site_without_state_is_menu", test_text_site_without_state_is_menu),
         ("text_site_with_state_is_not_menu", test_text_site_with_state_is_not_menu),
         ("automation_choice", test_automation_choice),

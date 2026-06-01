@@ -65,9 +65,9 @@ def default_lead_state() -> Dict[str, Any]:
 
 
 SERVICE_CHOICES = {
-    "1": ("site", "site", "site_scope", "Certo. Você quer criar uma página nova do zero ou melhorar uma página que já existe?"),
-    "01": ("site", "site", "site_scope", "Certo. Você quer criar uma página nova do zero ou melhorar uma página que já existe?"),
-    "service_site": ("site", "site", "site_scope", "Certo. Você quer criar uma página nova do zero ou melhorar uma página que já existe?"),
+    "1": ("site", "site", "site_scope", "Hoje a ideia é criar uma página nova do zero ou melhorar uma página que já existe?"),
+    "01": ("site", "site", "site_scope", "Hoje a ideia é criar uma página nova do zero ou melhorar uma página que já existe?"),
+    "service_site": ("site", "site", "site_scope", "Hoje a ideia é criar uma página nova do zero ou melhorar uma página que já existe?"),
     "2": ("automacao_whatsapp", "automacao_whatsapp", "lead_source", "Boa. Hoje o atendimento de vocês acontece mais pelo WhatsApp, Instagram ou outro canal?"),
     "02": ("automacao_whatsapp", "automacao_whatsapp", "lead_source", "Boa. Hoje o atendimento de vocês acontece mais pelo WhatsApp, Instagram ou outro canal?"),
     "service_automation": ("automacao_whatsapp", "automacao_whatsapp", "lead_source", "Boa. Hoje o atendimento de vocês acontece mais pelo WhatsApp, Instagram ou outro canal?"),
@@ -85,9 +85,11 @@ SERVICE_CHOICES = {
     "service_human": ("humano", "humano", "handoff", "Claro. Vou te encaminhar para a Julia com um resumo do que você precisa."),
 }
 
-SITE_SCOPE_QUESTION = "Certo. Você quer criar uma página nova do zero ou melhorar uma página que já existe?"
+SITE_SCOPE_QUESTION = "Hoje a ideia é criar uma página nova do zero ou melhorar uma página que já existe?"
 SITE_PROBLEM_QUESTION = "Hoje o maior incômodo é visual, conversão, velocidade, clareza da oferta ou organização das informações?"
 SITE_EXISTING_SCOPE = "melhorar_site_existente"
+SEMANTIC_EXISTING_SCOPE = "melhorar_existente"
+SEMANTIC_CREATE_SCOPE = "criar_do_zero"
 
 CHOICE_ID_BY_SERVICE = {
     "site": "service_site",
@@ -312,6 +314,237 @@ def _is_existing_site_scope(text: str) -> bool:
     return norm in {"site", "meu site", "o site", "pagina", "minha pagina", "melhorar"}
 
 
+def _semantic_site_scope(text: str, state: Dict[str, Any]) -> tuple[str, float, str]:
+    norm = normalize_text(text)
+    if not norm:
+        return "indefinido", 0.0, ""
+
+    create_signals = [
+        "comecar do zero",
+        "começar do zero",
+        "do zero",
+        "nao tenho nada",
+        "não tenho nada",
+        "nao tenho site",
+        "não tenho site",
+        "ainda nao tenho",
+        "ainda não tenho",
+        "preciso criar",
+        "criar uma landing",
+        "criar landing",
+        "landing nova",
+        "pagina nova",
+        "página nova",
+        "lancar uma pagina",
+        "lançar uma página",
+        "lancar uma landing",
+        "quero lancar",
+        "quero lançar",
+        "construir do inicio",
+        "construir do início",
+    ]
+    existing_signals = [
+        "ja tenho",
+        "já tenho",
+        "o que ja tenho",
+        "o que já tenho",
+        "meu site",
+        "site existe",
+        "ate existe",
+        "até existe",
+        "ja existe",
+        "já existe",
+        "site esta ruim",
+        "site está ruim",
+        "nao converte",
+        "não converte",
+        "nao vende",
+        "não vende",
+        "visual ta fraco",
+        "visual tá fraco",
+        "visual fraco",
+        "dar uma melhorada",
+        "melhorada",
+        "melhorar",
+        "arrumar",
+        "otimizar",
+        "reformular",
+        "refazer",
+        "pagina nao passa confianca",
+        "página não passa confiança",
+        "nao passa confianca",
+        "não passa confiança",
+        "fraco",
+        "ruim",
+    ]
+    if _has_any(norm, create_signals):
+        return SEMANTIC_CREATE_SCOPE, 0.86, "A resposta indica construção de uma página/base nova."
+    if _has_any(norm, existing_signals):
+        return SEMANTIC_EXISTING_SCOPE, 0.86, "A resposta indica que já existe uma base e a dor é melhorar desempenho, percepção ou conversão."
+    if (state.get("service_interest") == "site" or state.get("last_question_category") == "site_scope") and norm in {"site", "pagina", "landing", "meu site"}:
+        return SEMANTIC_EXISTING_SCOPE, 0.68, "Resposta curta dentro do contexto de site; assumo melhoria de uma base existente para avançar."
+    return "indefinido", 0.35, "Não há sinal suficiente para decidir entre criar do zero e melhorar algo existente."
+
+
+def _semantic_current_problem(text: str) -> str:
+    norm = normalize_text(text)
+    if not norm:
+        return ""
+    problem_map = [
+        (["nao converte", "não converte", "conversao", "conversão", "nao vende", "não vende"], "site não converte bem"),
+        (["visual", "fraco", "ruim", "feio", "antigo"], "visual fraco ou desalinhado"),
+        (["confianca", "confiança", "credibilidade"], "página não passa confiança"),
+        (["clareza", "oferta", "confuso", "confusa"], "clareza da oferta"),
+        (["velocidade", "lento", "lenta", "carrega"], "velocidade ou performance"),
+        (["organização", "organizacao", "informacoes", "informações"], "organização das informações"),
+        (["arrumar", "melhorada", "melhorar", "otimizar", "reformular", "refazer"], "estrutura precisa ser melhorada"),
+    ]
+    for terms, label in problem_map:
+        if _has_any(norm, terms):
+            return label
+    return ""
+
+
+def _semantic_budget_signal(text: str) -> str:
+    norm = normalize_text(text)
+    if _has_any(norm, ["baixo custo", "barato", "pouca verba", "sem verba", "orcamento baixo", "orçamento baixo"]):
+        return "baixo"
+    if _has_any(norm, ["tenho verba", "tem verba", "orcamento", "orçamento", "budget", "investir"]):
+        return "medio"
+    if _has_any(norm, ["verba alta", "budget alto", "investimento alto"]):
+        return "alto"
+    return "indefinido"
+
+
+def _semantic_intent(text: str, state: Dict[str, Any]) -> tuple[str, float]:
+    norm = normalize_text(text)
+    current_service = state.get("service_interest") or state.get("selected_service") or ""
+    if current_service == "site":
+        return "site_landing", 0.78
+    if current_service == "automacao_whatsapp":
+        return "whatsapp_automation", 0.78
+    if current_service == "branding":
+        return "branding", 0.74
+    if current_service == "trafego_pago":
+        return "traffic", 0.74
+    if _has_any(norm, ["site", "landing", "pagina", "página"]):
+        return "site_landing", 0.76
+    if _has_any(norm, ["whatsapp", "whats", "zap", "atendimento", "automacao", "automação", "bot"]):
+        return "whatsapp_automation", 0.76
+    if _has_any(norm, ["instagram", "insta", "conteudo", "conteúdo", "redes sociais", "social"]):
+        return "social_media", 0.74
+    if _has_any(norm, ["marca", "branding", "identidade", "posicionamento"]):
+        return "branding", 0.74
+    if _has_any(norm, ["trafego", "tráfego", "ads", "anuncio", "anúncio", "midia paga", "mídia paga"]):
+        return "traffic", 0.74
+    if _has_any(norm, ["crm", "funil", "relacionamento"]):
+        return "crm", 0.72
+    return "unknown", 0.3
+
+
+def _question_was_answered(stage: str, extracted_fields: Dict[str, Any]) -> bool:
+    if stage == "site_scope":
+        return extracted_fields.get("site_scope") in {SEMANTIC_EXISTING_SCOPE, SEMANTIC_CREATE_SCOPE}
+    if stage == "lead_source":
+        return bool(extracted_fields.get("channel"))
+    if stage in {"current_problem", "current_tools", "main_goal", "current_status"}:
+        return any(extracted_fields.get(key) for key in ["current_problem", "channel"])
+    if stage == "budget_signal":
+        return extracted_fields.get("budget_signal") != "indefinido"
+    return any(value not in (None, "", "indefinido") for value in extracted_fields.values())
+
+
+def interpret_user_message(user_message: str, conversation_context: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    state = flatten_state(conversation_context or {})
+    norm = normalize_text(user_message)
+    intent, intent_confidence = _semantic_intent(norm, state)
+    site_scope, scope_confidence, scope_reason = _semantic_site_scope(norm, state)
+    problem = _semantic_current_problem(norm)
+    stage = state.get("last_question_category") or question_category(state.get("last_question_asked") or "")
+    if stage == "site_scope" and problem == "estrutura precisa ser melhorada":
+        problem = ""
+    channel = ""
+    if _has_any(norm, ["whatsapp", "whats", "zap"]):
+        channel = "WhatsApp"
+    elif _has_any(norm, ["instagram", "insta"]):
+        channel = "Instagram"
+    elif _has_any(norm, ["site"]):
+        channel = "Site"
+
+    budget_signal = _semantic_budget_signal(norm)
+    extracted_fields = {
+        "site_scope": site_scope,
+        "current_problem": problem,
+        "channel": channel,
+        "budget_signal": budget_signal,
+    }
+    stage_answered = _question_was_answered(stage, extracted_fields)
+    if stage == "site_scope":
+        confidence = scope_confidence
+    elif stage in {"service_interest", ""}:
+        confidence = max(intent_confidence, scope_confidence if site_scope != "indefinido" else 0.0)
+    else:
+        confidence = max(intent_confidence, scope_confidence if site_scope != "indefinido" else 0.0)
+    if stage_answered:
+        confidence = max(confidence, 0.72)
+
+    projected_state = merge_state(state, _updates_from_interpretation(extracted_fields, intent, state, user_message))
+    next_question = get_next_question(projected_state).get("question") or ""
+    if confidence < 0.65 and stage == "site_scope":
+        next_question = "Para eu não te prender numa pergunta travada: hoje existe alguma página no ar ou a ideia é construir uma nova base?"
+
+    reasoning = scope_reason or "Interpretação feita a partir do contexto comercial e da resposta do lead."
+    return {
+        "intent": intent,
+        "stage_answered": bool(stage_answered),
+        "extracted_fields": extracted_fields,
+        "confidence": round(min(1.0, max(0.0, confidence)), 2),
+        "reasoning_summary": reasoning,
+        "next_best_question": next_question,
+    }
+
+
+def _updates_from_interpretation(
+    extracted_fields: Dict[str, Any],
+    intent: str,
+    state: Dict[str, Any],
+    user_message: str,
+) -> Dict[str, Any]:
+    updates: Dict[str, Any] = {}
+    intent_to_service = {
+        "site_landing": "site",
+        "whatsapp_automation": "automacao_whatsapp",
+        "branding": "branding",
+        "social_media": "branding",
+        "traffic": "trafego_pago",
+        "crm": "automacao_whatsapp",
+    }
+    service = state.get("service_interest") or state.get("selected_service") or ""
+    candidate_service = intent_to_service.get(intent)
+    if candidate_service and (not service or detect_explicit_service_switch(user_message)):
+        updates["service_interest"] = candidate_service
+        updates["intent"] = INTENT_BY_SERVICE.get(candidate_service, candidate_service)
+        updates["funnel_stage"] = "qualificacao"
+
+    semantic_scope = extracted_fields.get("site_scope")
+    site_context = intent == "site_landing" or state.get("service_interest") == "site" or state.get("last_question_category") == "site_scope"
+    if site_context and semantic_scope == SEMANTIC_EXISTING_SCOPE:
+        updates["site_scope"] = SITE_EXISTING_SCOPE
+    elif site_context and semantic_scope == SEMANTIC_CREATE_SCOPE:
+        updates["site_scope"] = "criar do zero"
+
+    if extracted_fields.get("current_problem"):
+        updates["current_problem"] = extracted_fields["current_problem"]
+    if extracted_fields.get("channel"):
+        updates["lead_source"] = _append_source(state.get("lead_source"), extracted_fields["channel"])
+    budget = extracted_fields.get("budget_signal")
+    if budget == "baixo":
+        updates["budget_signal"] = "sensível a preço"
+    elif budget in {"medio", "alto"}:
+        updates["budget_signal"] = "tem verba" if budget == "medio" else "alto potencial"
+    return updates
+
+
 def _explicit_service_switch(text: str) -> bool:
     return _has_any(
         text,
@@ -463,6 +696,15 @@ def extract_signal_from_message(text: str, current_state: Dict[str, Any]) -> Dic
     last_category = state.get("last_question_category") or ""
     service = state.get("service_interest") or state.get("selected_service") or ""
     updates: Dict[str, Any] = {}
+    interpretation = interpret_user_message(text, state)
+    semantic_updates = _updates_from_interpretation(
+        interpretation.get("extracted_fields") or {},
+        interpretation.get("intent") or "unknown",
+        state,
+        text,
+    )
+    if interpretation.get("confidence", 0) >= 0.65 or interpretation.get("stage_answered"):
+        updates.update(semantic_updates)
 
     choice_updates = service_choice_update(norm) if (_is_pure_menu_number(norm) or norm.startswith("service_")) else {}
     if choice_updates:
@@ -538,10 +780,10 @@ def extract_signal_from_message(text: str, current_state: Dict[str, Any]) -> Dic
             updates["current_problem"] = updates.get("current_problem") or "página precisa levar as pessoas para o WhatsApp"
             print(f"SALES_BRAIN_CONTEXT_SIGNAL category=site_scope field=desired_result value='usar WhatsApp como canal de conversão' text={text[:160]!r}")
         if _has_any(norm, ["do zero", "nova", "novo", "nova pagina", "criar", "criar do zero", "comecar", "fazer uma nova"]):
-            updates["site_scope"] = "criar do zero"
+            updates["site_scope"] = updates.get("site_scope") or "criar do zero"
             print(f"SALES_BRAIN_CONTEXT_SIGNAL category=site_scope field=site_scope value='criar do zero' text={text[:160]!r}")
         elif _is_existing_site_scope(norm) and (had_site_context or normalize_text(norm) not in {"site", "meu site", "o site", "pagina", "minha pagina"}):
-            updates["site_scope"] = SITE_EXISTING_SCOPE
+            updates["site_scope"] = updates.get("site_scope") or SITE_EXISTING_SCOPE
             print(f"SALES_BRAIN_CONTEXT_SIGNAL category=site_scope field=site_scope value={SITE_EXISTING_SCOPE!r} text={text[:160]!r}")
 
     if service == "trafego_pago" or last_category == "current_status":
@@ -709,7 +951,19 @@ def get_next_question(state: Dict[str, Any]) -> Dict[str, Any]:
         return {"category": "handoff", "question": "Claro. Vou te encaminhar para a Julia com um resumo do que você precisa.", "next_action": "handoff"}
     if service == "site":
         if not state.get("site_scope"):
+            if (state.get("last_question_category") or "") == "site_scope":
+                return {
+                    "category": "site_scope",
+                    "question": "Para eu não te prender numa pergunta travada: hoje existe alguma página no ar ou a ideia é construir uma nova base?",
+                    "next_action": "ask_question",
+                }
             return {"category": "site_scope", "question": SITE_SCOPE_QUESTION, "next_action": "ask_question"}
+        if state.get("site_scope") == "criar do zero":
+            if not state.get("main_goal"):
+                return {"category": "main_goal", "question": "Essa página precisa vender um serviço, captar leads ou apresentar melhor a marca?", "next_action": "ask_question"}
+            if not state.get("urgency"):
+                return {"category": "urgency", "question": "Você tem alguma data ou campanha em mente para colocar essa página no ar?", "next_action": "ask_question"}
+            return offer
         if not state.get("current_problem"):
             return {"category": "current_problem", "question": SITE_PROBLEM_QUESTION, "next_action": "ask_question"}
         if not state.get("main_goal"):
@@ -881,6 +1135,8 @@ def validate_reply(reply: str, state: Dict[str, Any]) -> Dict[str, Any]:
         blocked = True
         reason = "known_service_interest"
     if blocked:
+        if reason == "forbidden_generic_reply" and state.get("service_interest") == "site":
+            next_q = _non_repeating_recovery_question(state)
         if is_duplicate_question(next_q.get("question") or "", state.get("last_question_asked") or "") or _matches_recent_question(next_q.get("question") or "", state):
             next_q = _non_repeating_recovery_question(state)
         return {**next_q, "reply": next_q["question"], "blocked": True, "reason": reason}

@@ -1402,6 +1402,93 @@ def test_generic_conversation_synthesis_listens_before_asking():
     assert_true("deepens context", step2["next_question"]["category"] in {"estagio_marca", "dificuldade_atual", "budget_signal"})
 
 
+def _assert_consultative_discovery_reply(name: str, step: dict, learned_terms: list[str]):
+    if step["next_question"]["next_action"] != "ask_question":
+        return
+    reply_norm = sales_brain.normalize_text(step["reply"])
+    assert_true(f"{name} starts with listening", step["reply"].startswith("Entendi."))
+    assert_true(f"{name} one question", step["reply"].count("?") == 1)
+    assert_true(f"{name} cites learned context", any(sales_brain.normalize_text(term) in reply_norm for term in learned_terms))
+    assert_true(f"{name} no generic whatsapp summary", "contato iniciou conversa pelo whatsapp" not in reply_norm)
+    assert_true(f"{name} no old form prompt", "me conta em uma frase qual e o principal ponto" not in reply_norm)
+
+
+def test_consultative_discovery_across_required_segments():
+    scenarios = {
+        "perfumes": {
+            "messages": ["quero apresentar meus perfumes", "ainda estou estruturando tudo", "montar o ecommerce e vender"],
+            "terms": ["perfumes", "ecommerce"],
+            "briefing_terms": ["perfumes", "ecommerce"],
+        },
+        "moda_fitness": {
+            "messages": ["vendo roupas fitness", "quero vender mais pelo WhatsApp", "perco lead porque respondo tudo manualmente"],
+            "terms": ["roupas fitness", "WhatsApp"],
+            "briefing_terms": ["roupas fitness", "WhatsApp", "vender mais"],
+        },
+        "arquitetura": {
+            "messages": ["sou arquiteta e quero apresentar meus projetos", "quero fortalecer minha marca e gerar leads", "meu site está antigo e não passa confiança"],
+            "terms": ["projetos", "marca"],
+            "briefing_terms": ["projetos", "site", "vendas/leads"],
+        },
+        "advocacia": {
+            "messages": ["tenho um escritório de advocacia", "quero captar clientes pelo site", "as pessoas não entendem meus serviços"],
+            "terms": ["advocacia", "site"],
+            "briefing_terms": ["advocacia", "site", "vendas/leads"],
+        },
+        "ecommerce_whatsapp": {
+            "messages": ["quero montar meu ecommerce para vender acessórios", "quero vender mais pelo WhatsApp", "hoje respondo tudo manualmente"],
+            "terms": ["ecommerce", "WhatsApp"],
+            "briefing_terms": ["ecommerce", "WhatsApp", "vender mais"],
+        },
+        "ia": {
+            "messages": ["quero criar um chatbot com IA", "quero vender mais", "falta automação no atendimento"],
+            "terms": ["IA", "vender mais"],
+            "briefing_terms": ["chatbot", "vender mais", "automação"],
+        },
+    }
+
+    for name, data in scenarios.items():
+        state = sales_brain.default_lead_state()
+        replies = []
+        for message in data["messages"]:
+            step = pipeline_step(state, message=message)
+            replies.append(step["reply"])
+            _assert_consultative_discovery_reply(name, step, data["terms"])
+            state = step["state_after"]
+            if state.get("handoff"):
+                break
+
+        flat = sales_brain.flatten_state(state)
+        assert_true(f"{name} max four questions", int(flat.get("question_count") or 0) <= 4)
+        assert_true(f"{name} handoff by third message", bool(flat.get("handoff")))
+        assert_true(f"{name} client has Julia link", "https://wa.me/5511973510549" in replies[-1])
+        assert_true(f"{name} client has no internal briefing", "Leitura estratégica:" not in replies[-1])
+        assert_true(f"{name} client has no internal next movement", "Próximo movimento recomendado:" not in replies[-1])
+
+        briefing = sales_brain.build_internal_briefing(flat, [{"direction": "in", "text": msg} for msg in data["messages"]])
+        briefing_text = sales_brain.normalize_text(" ".join(str(value) for value in briefing.values()))
+        for term in data["briefing_terms"]:
+            assert_true(f"{name} briefing contains {term}", sales_brain.normalize_text(term) in briefing_text)
+        assert_true(f"{name} briefing not generic", "contato iniciou conversa pelo whatsapp" not in briefing_text)
+
+
+def test_efficiency_prefers_handoff_when_next_question_adds_little():
+    state = sales_brain.default_lead_state()
+    step1 = pipeline_step(state, message="quero vender meus perfumes")
+    _assert_consultative_discovery_reply("perfumes_efficiency_1", step1, ["perfumes"])
+
+    step2 = pipeline_step(step1["state_after"], message="ainda estou estruturando tudo")
+    _assert_consultative_discovery_reply("perfumes_efficiency_2", step2, ["perfumes"])
+
+    step3 = pipeline_step(step2["state_after"], message="montar o ecommerce e vender")
+    flat = sales_brain.flatten_state(step3["state_after"])
+    assert_equal("handoff after core context", flat["handoff"], True)
+    assert_true("ideal question count", int(flat.get("question_count") or 0) <= 3)
+    assert_true("does not ask fourth question", step3["next_question"]["next_action"] == "handoff")
+    assert_true("handoff link only for client", "https://wa.me/5511973510549" in step3["reply"])
+    assert_true("no strategic briefing to client", "Oportunidade para a Mugô" not in step3["reply"])
+
+
 def main():
     tests = [
         ("menu_site", test_menu_site),
@@ -1479,6 +1566,8 @@ def main():
         ("pipeline_anti_loop", test_pipeline_anti_loop),
         ("last_three_questions_block_semantic_repeat", test_last_three_questions_block_semantic_repeat),
         ("generic_conversation_synthesis_listens_before_asking", test_generic_conversation_synthesis_listens_before_asking),
+        ("consultative_discovery_across_required_segments", test_consultative_discovery_across_required_segments),
+        ("efficiency_prefers_handoff_when_next_question_adds_little", test_efficiency_prefers_handoff_when_next_question_adds_little),
     ]
     for name, fn in tests:
         run_test(name, fn)

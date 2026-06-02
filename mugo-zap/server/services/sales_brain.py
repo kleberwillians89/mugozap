@@ -34,6 +34,26 @@ FIELD_KEYS = [
     "next_action",
     "conversation_memory",
     "discovery_memory",
+    "primary_track",
+    "related_needs",
+]
+
+
+SERVICE_LABELS = {
+    "site": "site/landing page",
+    "automacao_whatsapp": "automação de WhatsApp",
+    "inteligencia_artificial": "inteligência artificial",
+    "trafego_pago": "tráfego pago/performance",
+    "branding": "branding/comunicação",
+    "humano": "atendimento humano",
+}
+
+RAW_LOW_SIGNAL_PHRASES = [
+    "busco todas as frentes para ontem",
+    "todas as frentes para ontem",
+    "me ajudem por favor",
+    "me ajuda por favor",
+    "tudo",
 ]
 
 
@@ -65,6 +85,8 @@ def default_lead_state() -> Dict[str, Any]:
         "lead_fields": {},
         "conversation_memory": {},
         "discovery_memory": {},
+        "primary_track": None,
+        "related_needs": [],
     }
 
 
@@ -84,9 +106,9 @@ SERVICE_CHOICES = {
     "5": ("branding", "branding", "main_goal", "Você quer fortalecer posicionamento, identidade visual ou conteúdo para redes?"),
     "05": ("branding", "branding", "main_goal", "Você quer fortalecer posicionamento, identidade visual ou conteúdo para redes?"),
     "service_branding": ("branding", "branding", "main_goal", "Você quer fortalecer posicionamento, identidade visual ou conteúdo para redes?"),
-    "6": ("humano", "humano", "handoff", "Claro. Vou te encaminhar para a Julia com um resumo do que você precisa."),
-    "06": ("humano", "humano", "handoff", "Claro. Vou te encaminhar para a Julia com um resumo do que você precisa."),
-    "service_human": ("humano", "humano", "handoff", "Claro. Vou te encaminhar para a Julia com um resumo do que você precisa."),
+    "6": ("humano", "humano", "handoff", "Perfeito. Já tenho contexto suficiente para direcionar você da melhor forma."),
+    "06": ("humano", "humano", "handoff", "Perfeito. Já tenho contexto suficiente para direcionar você da melhor forma."),
+    "service_human": ("humano", "humano", "handoff", "Perfeito. Já tenho contexto suficiente para direcionar você da melhor forma."),
 }
 
 SITE_SCOPE_QUESTION = "Hoje a ideia é criar uma página nova do zero ou melhorar uma página que já existe?"
@@ -1298,7 +1320,7 @@ def get_next_question(state: Dict[str, Any]) -> Dict[str, Any]:
         "next_action": "offer_meeting",
     }
     if state.get("handoff") or service == "humano":
-        return {"category": "handoff", "question": "Claro. Vou te direcionar para a equipe da Mugô.", "next_action": "handoff"}
+        return {"category": "handoff", "question": "Perfeito. Já tenho contexto suficiente para direcionar você da melhor forma.", "next_action": "handoff"}
     if service == "site":
         return _progressive_site_question(state)
     if service == "automacao_whatsapp":
@@ -1448,7 +1470,7 @@ def _non_repeating_recovery_question(state: Dict[str, Any]) -> Dict[str, Any]:
             return {"category": "current_problem", "question": SITE_PROBLEM_QUESTION, "next_action": "ask_question"}
     if service == "branding":
         return _progressive_branding_question(state)
-    return {"category": "current_problem", "question": "Me conta em uma frase qual é o principal ponto que você quer resolver agora?", "next_action": "ask_question"}
+    return {"category": "current_problem", "question": "Qual trava mais atrapalha o avanço comercial hoje?", "next_action": "ask_question"}
 
 
 def _matches_recent_question(reply: str, state: Dict[str, Any]) -> bool:
@@ -1599,47 +1621,203 @@ def has_enough_briefing_for_handoff(state: Dict[str, Any]) -> bool:
     return enough
 
 
-def build_briefing(state: Dict[str, Any], recent_messages: list) -> Dict[str, Any]:
+def _as_text(value: Any) -> str:
+    if isinstance(value, (list, tuple, set)):
+        return ", ".join([_as_text(item) for item in value if _as_text(item)])
+    return str(value or "").strip()
+
+
+def _service_label(value: Any) -> str:
+    raw = _as_text(value)
+    return SERVICE_LABELS.get(raw, raw.replace("_", " "))
+
+
+def _message_texts(messages: list | None, direction: str = "") -> List[str]:
+    texts: List[str] = []
+    for item in messages or []:
+        if isinstance(item, dict):
+            if direction and str(item.get("direction") or "").strip() != direction:
+                continue
+            text = str(item.get("text") or item.get("body") or item.get("message") or "").strip()
+        else:
+            text = str(item or "").strip()
+        if text:
+            texts.append(text)
+    return texts
+
+
+def _contains_any_text(texts: List[str], needles: List[str]) -> bool:
+    joined = normalize_text(" | ".join(texts))
+    return any(needle in joined for needle in needles)
+
+
+def _safe_analysis_text(value: Any) -> str:
+    text = _as_text(value)
+    norm = normalize_text(text)
+    if not text:
+        return ""
+    if norm in RAW_LOW_SIGNAL_PHRASES or any(phrase in norm for phrase in RAW_LOW_SIGNAL_PHRASES):
+        return ""
+    return text
+
+
+def _dedupe_texts(values: List[Any], limit: int = 6) -> List[str]:
+    items: List[str] = []
+    seen = set()
+    for value in values:
+        text = _safe_analysis_text(value)
+        if not text:
+            continue
+        key = normalize_text(text)
+        if key and key not in seen:
+            seen.add(key)
+            items.append(text)
+        if len(items) >= limit:
+            break
+    return items
+
+
+def _infer_related_needs(state: Dict[str, Any], messages: list | None) -> List[str]:
     state = flatten_state(state)
-    summary_parts = []
-    service = str(state.get("service_interest") or state.get("intent") or "").replace("_", " ").strip()
+    inbound = _message_texts(messages, direction="in") or _message_texts(messages)
+    related: List[str] = []
+    joined = normalize_text(" | ".join(inbound))
+    checks = [
+        ("automacao_whatsapp", ["whatsapp", "whats", "zap", "atendimento", "crm", "lead"]),
+        ("site", ["site", "landing", "pagina", "ecommerce", "loja virtual"]),
+        ("trafego_pago", ["campanha", "trafego", "tráfego", "anuncio", "anúncio", "ads", "performance"]),
+        ("branding", ["comunicacao", "comunicação", "posicionamento", "marca", "conteudo", "conteúdo", "instagram"]),
+        ("inteligencia_artificial", [" ia ", "inteligencia artificial", "inteligência artificial", "chatbot", "automacao"]),
+    ]
+    primary = state.get("primary_track") or state.get("service_interest") or state.get("intent")
+    for service, needles in checks:
+        if service != primary and any(needle in joined for needle in needles):
+            related.append(service)
+    existing = state.get("related_needs")
+    if isinstance(existing, list):
+        related.extend([str(item) for item in existing])
+    return _dedupe_texts(related, limit=5)
+
+
+def build_internal_briefing(conversation_memory: Dict[str, Any] | None, messages: list | None) -> Dict[str, Any]:
+    state = flatten_state(conversation_memory or {})
+    inbound_texts = _message_texts(messages, direction="in") or _message_texts(messages)
+    all_texts = _message_texts(messages)
+    primary_track = state.get("primary_track") or state.get("service_interest") or state.get("intent") or ""
+    related_needs = _infer_related_needs(state, messages)
+    channel = state.get("lead_source") or ("WhatsApp" if inbound_texts else "")
+    business = state.get("business_type") or state.get("business_name")
     goal = state.get("desired_result") or state.get("main_goal")
     problem = state.get("current_problem") or state.get("current_status")
-    channel = state.get("lead_source")
     tools = state.get("current_tools")
     urgency = state.get("urgency")
     budget = state.get("budget_signal")
+    asks_for_all = _contains_any_text(inbound_texts, ["tudo", "todas as frentes", "todas as frente", "me ajudem", "me ajuda"])
+    high_urgency = urgency == "alta" or _contains_any_text(inbound_texts, ["para ontem", "urgente", "o quanto antes", "ate dia", "até dia"])
+    multi_front = bool(len(related_needs) >= 2 or asks_for_all)
 
-    if service or goal:
-        summary_parts.append(
-            "O momento do contato aponta para "
-            + (f"uma conversa ligada a {service}" if service else "uma demanda comercial em diagnóstico")
-            + (f", com intenção de {goal}" if goal else "")
-            + "."
+    if asks_for_all and not problem:
+        problem = "necessidade de organizar múltiplas frentes da operação digital"
+    if high_urgency and not urgency:
+        urgency = "alta"
+    if multi_front and not primary_track:
+        primary_track = "consultoria"
+
+    front_label = _service_label(primary_track) if primary_track else "demanda integrada"
+    related_labels = [_service_label(item) for item in related_needs if item and item != primary_track]
+    business_phrase = _safe_analysis_text(business) or "negócio ainda sem segmento explicitado"
+    goal_phrase = _safe_analysis_text(goal) or "aumento de clareza comercial e conversão"
+    problem_phrase = _safe_analysis_text(problem) or "priorização e diagnóstico das principais travas"
+    channel_phrase = _safe_analysis_text(channel) or "WhatsApp"
+    tools_phrase = _safe_analysis_text(tools)
+
+    moment_parts = [
+        f"Lead com frente principal em {front_label}",
+        f"canal de entrada {channel_phrase}",
+    ]
+    if business_phrase:
+        moment_parts.append(f"negócio/produto: {business_phrase}")
+    if goal_phrase:
+        moment_parts.append(f"objetivo comercial: {goal_phrase}")
+    if related_labels:
+        moment_parts.append(f"frentes secundárias percebidas: {', '.join(related_labels)}")
+    moment = ". ".join(moment_parts) + "."
+
+    if multi_front:
+        strategic = (
+            "A demanda deve ser tratada como integrada, não como pedido isolado. "
+            "O lead demonstra necessidade de organizar aquisição, comunicação, estrutura digital e conversão, "
+            "com prioridade comercial para entender onde a operação está travando."
         )
+    else:
+        strategic = (
+            f"A dor principal aparece em {problem_phrase}. "
+            f"A conversa deve conectar essa trava ao objetivo de {goal_phrase}, validando impacto e prioridade antes de propor escopo."
+        )
+    if high_urgency:
+        strategic += " O lead demonstra urgência alta e busca apoio para priorizar os próximos movimentos."
+
+    opportunity_needs = related_labels or ([_service_label(primary_track)] if primary_track else [])
+    opportunity = "Atuação combinada em "
+    if multi_front:
+        opportunity += "automação de WhatsApp, revisão da jornada comercial, comunicação da oferta e organização de campanhas."
+    elif opportunity_needs:
+        opportunity += f"{', '.join(opportunity_needs)}, conectando diagnóstico comercial com execução prática."
+    else:
+        opportunity += "diagnóstico comercial, priorização de canais e clareza da oferta."
+
+    maturity_bits = []
+    if goal:
+        maturity_bits.append("objetivo comercial declarado")
     if problem:
-        summary_parts.append(f"A trava que merece atenção inicial é {problem}.")
+        maturity_bits.append("dor operacional/comercial citada")
     if channel or tools:
-        summary_parts.append(
-            "A leitura operacional envolve "
-            + " e ".join([str(part) for part in [channel, tools] if part])
-            + "."
-        )
-    if urgency or budget:
-        summary_parts.append(
-            "Há sinal comercial para calibrar prioridade"
-            + (f" com urgência {urgency}" if urgency else "")
-            + (f" e investimento {budget}" if budget else "")
-            + "."
-        )
+        maturity_bits.append("canais ou ferramentas já mapeados")
+    if high_urgency:
+        maturity_bits.append("urgência alta")
+    maturity = ", ".join(maturity_bits) if maturity_bits else "inicial, com abertura para diagnóstico"
+
+    pain_points = _dedupe_texts(
+        [
+            problem_phrase,
+            "operação digital com múltiplas frentes a organizar" if multi_front else "",
+            f"uso atual de {tools_phrase}" if tools_phrase else "",
+        ],
+        limit=5,
+    )
+    goals = _dedupe_texts([goal_phrase], limit=3)
+    questions = [
+        "Qual é o volume atual de leads/conversas?",
+        "Qual gargalo mais afeta conversão hoje?",
+        "Qual prioridade comercial precisa destravar primeiro?",
+    ]
+    next_step = (
+        "Julia/Kleber devem assumir com diagnóstico curto, começando por volume de leads, "
+        "principal gargalo de conversão e prioridade comercial."
+    )
 
     return {
-        "summary": " ".join(summary_parts) or "Contato iniciou conversa pelo WhatsApp e ainda precisa de diagnóstico consultivo.",
-        "pain_points": [state.get("current_problem")] if state.get("current_problem") else [],
-        "goals": [state.get("desired_result") or state.get("main_goal")] if (state.get("desired_result") or state.get("main_goal")) else [],
-        "recommended_solution": state.get("service_interest") or state.get("intent"),
-        "urgency": state.get("urgency"),
-        "budget_signal": state.get("budget_signal"),
-        "questions_to_julia": ["Confirmar escopo, prioridade e próximo passo comercial."],
-        "suggested_next_step": "Julia assumir ou agendar uma conversa curta.",
+        "summary": moment,
+        "moment": moment,
+        "strategic_reading": strategic,
+        "opportunity": opportunity,
+        "service_interest": primary_track,
+        "primary_track": primary_track,
+        "related_needs": related_needs,
+        "entry_channel": channel_phrase,
+        "business": business_phrase,
+        "commercial_goal": goal_phrase,
+        "pain_points": pain_points,
+        "goals": goals,
+        "urgency": urgency or ("alta" if high_urgency else None),
+        "maturity": maturity,
+        "budget_signal": budget,
+        "recommended_solution": primary_track or ("demanda integrada" if multi_front else ""),
+        "questions_to_julia": questions,
+        "suggested_next_step": next_step,
+        "source_message_count": len(all_texts),
     }
+
+
+def build_briefing(state: Dict[str, Any], recent_messages: list) -> Dict[str, Any]:
+    return build_internal_briefing(state, recent_messages)

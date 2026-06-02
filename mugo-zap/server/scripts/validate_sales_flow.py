@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 import sys
 import urllib.parse
+import asyncio
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 
@@ -624,9 +625,11 @@ def test_all_initial_buttons_have_consultive_tracks():
 
 
 def test_human_button_directs_to_team():
+    from app import JULIA_HANDOFF_REPLY
+
     step = pipeline_step(sales_brain.default_lead_state(), list_id="service_human")
     assert_equal("handoff", step["state_after"]["handoff"], True)
-    assert_true("direct team copy", "Claro. Vou te direcionar para a equipe da Mugô." in step["reply"])
+    assert_equal("fixed handoff copy", step["reply"], JULIA_HANDOFF_REPLY)
     assert_true("julia link", "https://wa.me/5511973510549" in step["reply"])
 
 
@@ -993,6 +996,142 @@ def test_internal_operation_briefing_without_link():
     assert_true("no generic ai language", "A frente mais aderente parece ser" not in message)
 
 
+def test_internal_briefing_consolidates_long_integrated_flow():
+    from app import build_internal_briefing, _build_julia_briefing_message
+
+    memory = sales_brain.merge_state(
+        sales_brain.default_lead_state(),
+        {
+            "service_interest": "automacao_whatsapp",
+            "primary_track": "automacao_whatsapp",
+            "business_type": "moda fitness/performance",
+            "lead_source": "WhatsApp, Instagram e site",
+            "main_goal": "aumentar vendas e melhorar conversão",
+            "desired_result": "vender mais com clareza da oferta",
+            "current_tools": "WhatsApp manual",
+            "current_problem": "atendimento manual e campanha sem jornada clara",
+            "urgency": "alta",
+        },
+    )
+    messages = [
+        {"direction": "in", "text": "Tenho uma marca de moda fitness e performance."},
+        {"direction": "in", "text": "Os leads vêm pelo WhatsApp, site e campanhas no Instagram."},
+        {"direction": "in", "text": "Preciso organizar site, campanhas e comunicação para vender mais."},
+        {"direction": "in", "text": "busco todas as frentes para ontem"},
+    ]
+    briefing = build_internal_briefing(memory, messages)
+    assert_true("summary has business", "moda fitness" in briefing["summary"])
+    assert_true("summary has channels", "WhatsApp" in briefing["summary"] and "site" in briefing["summary"])
+    assert_true("integrated strategic reading", "integrada" in briefing["strategic_reading"])
+    assert_true("opportunity mentions whatsapp", "WhatsApp" in briefing["opportunity"])
+    assert_equal("urgency high", briefing["urgency"], "alta")
+    assert_true("related site", "site" in briefing["related_needs"])
+    assert_true("related traffic", "trafego_pago" in briefing["related_needs"])
+    assert_true("related branding", "branding" in briefing["related_needs"])
+    assert_true("raw phrase removed", "busco todas as frentes para ontem" not in str(briefing))
+
+    message = _build_julia_briefing_message(
+        wa_id="5511888888888",
+        user={"nome": "Lead Moda", "telefone": "5511888888888"},
+        result={"lead_temperature": "hot", "lead_fields": memory, "briefing": briefing},
+    )
+    assert_true("premium title", "✨ Novo contato qualificado pela Mugô" in message)
+    assert_true("real context", "moda fitness" in message)
+    assert_true("strategic reading", "A demanda deve ser tratada como integrada" in message)
+    assert_true("no raw lead quote", "busco todas as frentes para ontem" not in message)
+    assert_true("no generic whatsapp", "Contato iniciou conversa pelo WhatsApp" not in message)
+
+
+def test_internal_briefing_transforms_vague_help_requests():
+    from app import build_internal_briefing
+
+    memory = sales_brain.merge_state(
+        sales_brain.default_lead_state(),
+        {
+            "service_interest": "site",
+            "primary_track": "site",
+            "lead_source": "WhatsApp",
+            "main_goal": "vendas/leads",
+        },
+    )
+    messages = [
+        {"direction": "in", "text": "tudo"},
+        {"direction": "in", "text": "me ajudem por favor"},
+    ]
+    briefing = build_internal_briefing(memory, messages)
+    text = str(briefing)
+    assert_true("analysis from vague text", "múltiplas frentes" in text or "multiplas frentes" in sales_brain.normalize_text(text))
+    assert_true("no raw tudo", "'tudo'" not in text and '"tudo"' not in text)
+    assert_true("no raw help", "me ajudem por favor" not in text)
+
+
+def test_human_request_ends_with_single_client_reply_and_internal_context():
+    from app import JULIA_HANDOFF_REPLY, build_internal_briefing
+
+    state = state_with_choice("service_automation")
+    state = sales_brain.merge_state(
+        state,
+        {
+            "lead_source": "WhatsApp",
+            "current_tools": "manual",
+            "current_problem": "perda de leads no atendimento",
+            "main_goal": "vendas/leads",
+        },
+    )
+    step = pipeline_step(state, message="quero falar com atendente")
+    assert_equal("reply fixed", step["reply"], JULIA_HANDOFF_REPLY)
+    assert_true("client no briefing title", "Novo contato qualificado" not in step["reply"])
+    briefing = build_internal_briefing(step["state_after"], [{"direction": "in", "text": "quero falar com atendente"}])
+    assert_true("briefing keeps context", "perda de leads" in str(briefing) or "vendas" in str(briefing))
+
+
+def test_operational_decision_skips_duplicate_briefing_and_handoff():
+    import app
+
+    calls = {"handoff": 0, "briefing": 0}
+
+    async def fake_get_ai_state(wa_id, workspace_id=""):
+        return {
+            "briefing_sent_at": "2026-04-29T12:00:00+00:00",
+            "handoff_sent_at": "",
+            "lead_fields": {"service_interest": "site", "main_goal": "vendas/leads"},
+            "briefing": {"summary": "Briefing já enviado."},
+        }
+
+    def fake_start_handoff_now(**kwargs):
+        calls["handoff"] += 1
+
+    def fake_send_operation_briefing(*args, **kwargs):
+        calls["briefing"] += 1
+        return {"5511973510549": True, "5511972769605": True}
+
+    original_get = app.get_ai_state
+    original_start = app.start_handoff_now
+    original_send = app._send_operation_briefing
+    app.get_ai_state = fake_get_ai_state
+    app.start_handoff_now = fake_start_handoff_now
+    app._send_operation_briefing = fake_send_operation_briefing
+    try:
+        sent = asyncio.run(
+            app._handle_ai_operational_decision(
+                wa_id="5511888888888",
+                cid="testdup",
+                result={"handoff": True, "next_action": "handoff", "briefing_ready": True, "lead_fields": {"service_interest": "site"}},
+                user_text="falar com atendente",
+                user={"nome": "Lead"},
+                workspace_id="",
+            )
+        )
+    finally:
+        app.get_ai_state = original_get
+        app.start_handoff_now = original_start
+        app._send_operation_briefing = original_send
+
+    assert_equal("handled duplicate", sent, True)
+    assert_equal("no handoff resend", calls["handoff"], 0)
+    assert_equal("no briefing resend", calls["briefing"], 0)
+
+
 def test_no_legacy_eduarda_routing():
     import app
 
@@ -1227,6 +1366,10 @@ def main():
         ("handoff_reply_includes_julia_link", test_handoff_reply_includes_julia_link),
         ("prefilled_julia_link_contains_encoded_context", test_prefilled_julia_link_contains_encoded_context),
         ("internal_operation_briefing_without_link", test_internal_operation_briefing_without_link),
+        ("internal_briefing_consolidates_long_integrated_flow", test_internal_briefing_consolidates_long_integrated_flow),
+        ("internal_briefing_transforms_vague_help_requests", test_internal_briefing_transforms_vague_help_requests),
+        ("human_request_ends_with_single_client_reply_and_internal_context", test_human_request_ends_with_single_client_reply_and_internal_context),
+        ("operational_decision_skips_duplicate_briefing_and_handoff", test_operational_decision_skips_duplicate_briefing_and_handoff),
         ("no_legacy_eduarda_routing", test_no_legacy_eduarda_routing),
         ("handoff_opening_varies_from_last_reply", test_handoff_opening_varies_from_last_reply),
         ("followup_created_for_handoff", test_followup_created_for_handoff),

@@ -144,6 +144,9 @@ def _build_premium_handoff_message(
     budget = _readable_signal(_handoff_context_value(context, "budget_signal") or briefing.get("budget_signal"))
     temp = _readable_signal(temperature or _handoff_context_value(context, "lead_temperature") or context.get("temperature"))
     base_summary = str(summary or _handoff_context_value(context, "summary") or context.get("handoff_summary") or context.get("memory_summary") or "").strip()
+    strategic_from_briefing = str(briefing.get("strategic_reading") or "").strip()
+    opportunity_from_briefing = str(briefing.get("opportunity") or "").strip()
+    maturity_from_briefing = str(briefing.get("maturity") or "").strip()
 
     moment_lines = _compact_lines(base_summary, limit=2)
     if goal or problem:
@@ -169,14 +172,16 @@ def _build_premium_handoff_message(
         strategic_bits.append(f"O objetivo declarado é {goal}, então a conversa deve conectar ambição comercial com um caminho prático.")
     if channel or tools:
         strategic_bits.append("Há sinais operacionais suficientes para validar processo, ritmo de atendimento e maturidade comercial.")
-    strategic_reading = " ".join(strategic_bits) or "A conversa ainda está em fase de leitura, mas já existe abertura para transformar uma demanda inicial em diagnóstico de negócio."
+    strategic_reading = strategic_from_briefing or " ".join(strategic_bits) or "A conversa ainda está em fase de leitura, mas já existe abertura para transformar uma demanda inicial em diagnóstico de negócio."
 
-    if interest and goal:
+    if opportunity_from_briefing:
+        opportunity = opportunity_from_briefing
+    elif interest and goal:
         opportunity = f"Existe potencial para uma atuação focada em {interest}, conectada ao objetivo de {goal}."
     elif interest and problem:
         opportunity = f"Existe potencial para trabalhar {interest} como resposta estratégica à trava percebida em {problem}."
     elif interest:
-        opportunity = f"Existe potencial para uma atuação consultiva na frente de {interest}, desde que Julia valide prioridade, maturidade e impacto esperado."
+        opportunity = f"Existe potencial para trabalhar {interest} com diagnóstico, priorização e validação de impacto."
     else:
         opportunity = "Existe potencial para uma atuação focada em posicionamento, comunicação, estrutura digital ou organização comercial, conforme a dor que Julia validar na primeira troca."
 
@@ -194,7 +199,7 @@ def _build_premium_handoff_message(
         temperature_label = "🟡 Média"
     else:
         temperature_label = "⚪ Baixa"
-    commercial_temperature = temperature_label + (f" — {', '.join(maturity_bits)}." if maturity_bits else " — ainda precisa de validação consultiva.")
+    commercial_temperature = temperature_label + (f" — {maturity_from_briefing or ', '.join(maturity_bits)}." if (maturity_from_briefing or maturity_bits) else " — ainda precisa de validação consultiva.")
 
     next_step = (
         suggested_next_step
@@ -237,11 +242,6 @@ def _handoff_opening(context: dict | None = None) -> str:
 
 
 def build_handoff_lead_reply(context: dict | None = None) -> str:
-    if _handoff_context_value(context, "service_interest") == "humano" or _handoff_context_value(context, "handoff_reason") == "lead_pediu_humano":
-        return (
-            "Claro. Vou te direcionar para a equipe da Mugô.\n\n"
-            f"{JULIA_DIRECT_LINK}"
-        )
     return (
         "Perfeito. Já tenho contexto suficiente para direcionar você da melhor forma.\n\n"
         "Você pode continuar diretamente com a Julia:\n\n"
@@ -1332,6 +1332,10 @@ def _briefing_summary_from_result(result: dict, fallback_text: str = "") -> str:
     return "\n".join([p for p in pieces if p])[:1500]
 
 
+def build_internal_briefing(conversation_memory: dict | None, messages: list | None) -> dict:
+    return sales_brain.build_internal_briefing(conversation_memory or {}, messages or [])
+
+
 def _build_julia_briefing_message(
     *,
     wa_id: str,
@@ -1353,6 +1357,12 @@ def _build_julia_briefing_message(
         "lead_name": lead_name,
         "phone": phone,
     }
+    if briefing.get("primary_track") and not context.get("service_interest"):
+        context["service_interest"] = briefing.get("primary_track")
+    if briefing.get("commercial_goal") and not context.get("desired_result"):
+        context["desired_result"] = briefing.get("commercial_goal")
+    if briefing.get("entry_channel") and not context.get("lead_source"):
+        context["lead_source"] = briefing.get("entry_channel")
     if briefing.get("goals") and not context.get("desired_result"):
         context["desired_result"] = ", ".join(briefing.get("goals") or [])
     return _build_premium_handoff_message(
@@ -1924,11 +1934,11 @@ async def _handle_ai_operational_decision(
 
     state = await get_ai_state(wa_id, workspace_id=workspace_id) or {}
     wants_handoff = bool(result.get("handoff") or result.get("next_action") == "handoff")
-    if wants_handoff and state.get("handoff_sent_at"):
-        print(f"[{cid}] HANDOFF:skip_duplicate wa_id={wa_id} handoff_sent_at={state.get('handoff_sent_at')}")
-        return True
-    if not wants_handoff and state.get("briefing_sent_at"):
-        print(f"[{cid}] BRIEFING:skip_duplicate wa_id={wa_id} briefing_sent_at={state.get('briefing_sent_at')}")
+    if state.get("handoff_sent_at") or state.get("briefing_sent_at"):
+        print(
+            f"[{cid}] OPERATIONAL_BRIEFING:skip_duplicate wa_id={wa_id} "
+            f"handoff_sent_at={state.get('handoff_sent_at') or '-'} briefing_sent_at={state.get('briefing_sent_at') or '-'}"
+        )
         return True
 
     fields = result.get("lead_fields") or {}
@@ -1938,7 +1948,33 @@ async def _handle_ai_operational_decision(
         or result.get("lead_theme")
         or "Atendimento Mugô"
     )
-    summary = _briefing_summary_from_result(result, user_text) or user_text
+    try:
+        recent_messages = get_recent_messages(wa_id, limit=30, workspace_id=workspace_id) or []
+    except Exception:
+        recent_messages = []
+    current_message = {"direction": "in", "text": user_text, "meta": {"src": "current_user_text"}}
+    briefing_memory = sales_brain.merge_state(state, fields)
+    briefing_memory = sales_brain.merge_state(
+        briefing_memory,
+        {
+            "briefing": _merge_briefing((state.get("briefing") if isinstance(state.get("briefing"), dict) else {}), result.get("briefing") if isinstance(result.get("briefing"), dict) else {}),
+            "lead_temperature": result.get("lead_temperature") or state.get("lead_temperature"),
+            "handoff_reason": result.get("handoff_reason") or state.get("handoff_reason"),
+        },
+    )
+    consolidated_briefing = build_internal_briefing(briefing_memory, [*recent_messages, current_message])
+    result = {
+        **result,
+        "lead_fields": _merge_lead_fields(fields, {
+            "primary_track": consolidated_briefing.get("primary_track"),
+            "related_needs": consolidated_briefing.get("related_needs"),
+            "service_interest": consolidated_briefing.get("primary_track") or fields.get("service_interest"),
+            "lead_source": consolidated_briefing.get("entry_channel") or fields.get("lead_source"),
+            "urgency": consolidated_briefing.get("urgency") or fields.get("urgency"),
+        }),
+        "briefing": _merge_briefing(result.get("briefing"), consolidated_briefing),
+    }
+    summary = _briefing_summary_from_result(result, user_text) or consolidated_briefing.get("summary") or user_text
     internal_briefing = _build_julia_briefing_message(
         wa_id=wa_id,
         user=user,
@@ -1971,6 +2007,8 @@ async def _handle_ai_operational_decision(
             wa_id,
             {
                 **latest,
+                "lead_fields": _merge_lead_fields(latest.get("lead_fields"), result.get("lead_fields")),
+                "briefing": _merge_briefing(latest.get("briefing"), result.get("briefing")),
                 "briefing_sent_at": latest.get("briefing_sent_at") or now,
                 "handoff_sent_at": latest.get("handoff_sent_at") or now,
             },
@@ -1991,6 +2029,8 @@ async def _handle_ai_operational_decision(
         wa_id,
         {
             **latest,
+            "lead_fields": _merge_lead_fields(latest.get("lead_fields"), result.get("lead_fields")),
+            "briefing": _merge_briefing(latest.get("briefing"), result.get("briefing")),
             "briefing_sent_at": latest.get("briefing_sent_at") or now,
             "briefing_sent_operation": bool(operation_ok),
             "briefing_sent_operation_numbers": operation_results,

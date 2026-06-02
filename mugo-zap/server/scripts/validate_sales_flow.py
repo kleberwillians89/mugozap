@@ -361,7 +361,7 @@ def test_real_meta_list_reply_automation_payload():
     state = step1["state_after"]
     assert_equal("choice_id", step1["normalized_choice"]["choice_id"], "service_automation")
     assert_equal("service_interest", state["service_interest"], "automacao_whatsapp")
-    assert_true("reply interprets automation", "atendimento" in step1["reply"].lower())
+    assert_true("reply interprets automation", "automação de whatsapp" in step1["reply"].lower())
     assert_true("reply asks source", "Por qual canal você mais recebe oportunidades comerciais hoje?" in step1["reply"])
 
     step2 = pipeline_step(state, message="WhatsApp")
@@ -537,7 +537,7 @@ def test_pipeline_ai_full_flow():
     assert_equal("main_goal", state["main_goal"], "atendimento")
     assert_equal("current_problem", state["current_problem"], "atendimento")
     assert_equal("next category", step2["next_question"]["category"], "current_tools")
-    assert_true("microconfirmation atendimento", step2["reply"].startswith("Então faz sentido pensar em IA"))
+    assert_true("synthesis atendimento", step2["reply"].startswith("Entendi.") and "atendimento" in step2["reply"])
 
     step3 = pipeline_step(state, message="whatsapp")
     state = step3["state_after"]
@@ -595,8 +595,8 @@ def test_branding_create_brand_products_advances_to_product_stage():
     discovery = step["state_after"]["discovery_memory"]["branding"]
     assert_equal("objective", discovery["objetivo_comunicacao"], "criar marca para divulgar produtos")
     assert_equal("product", discovery["produto_servico"], "produtos")
-    assert_true("commercial intent tone", "intenção comercial" in step["reply"])
-    assert_true("asks product status", "já são vendidos hoje" in step["reply"])
+    assert_true("commercial synthesis", "apresentar melhor" in step["reply"])
+    assert_true("asks product status", "já está vendendo hoje" in step["reply"])
     assert_true("does not ask principal point", "principal ponto que você quer resolver" not in step["reply"])
 
 
@@ -808,7 +808,8 @@ def test_persisted_pipeline_site_state_between_messages():
     assert_equal("signal site_scope", second["extracted_signals"]["site_scope"], "melhorar_site_existente")
     assert_equal("state site_scope", second["state_after"]["site_scope"], "melhorar_site_existente")
     assert_equal("next category", second["next_question"]["category"], "current_problem")
-    assert_equal("reply", second["reply"], "Então o foco é melhorar uma estrutura que já existe. Hoje o maior incômodo é visual, conversão, velocidade, clareza da oferta ou organização das informações?")
+    assert_true("reply synthesis", second["reply"].startswith("Entendi.") and "estrutura digital que já existe" in second["reply"])
+    assert_true("reply asks problem", "Hoje o maior incômodo é visual, conversão, velocidade, clareza da oferta ou organização das informações?" in second["reply"])
 
 
 def test_dedupe_patch_preserves_sales_state():
@@ -1369,6 +1370,38 @@ def test_last_three_questions_block_semantic_repeat():
     assert_true("replacement changes question", "O foco dessa página" not in result["reply"])
 
 
+def test_generic_conversation_synthesis_listens_before_asking():
+    facts = sales_brain.extract_conversation_facts(
+        [
+            {"direction": "in", "text": "quero apresentar meus perfumes"},
+            {"direction": "in", "text": "quero montar meu ecommerce e deixar minha rede social boa"},
+        ]
+    )
+    assert_equal("generic product", facts["produto_servico"], "perfumes")
+    assert_true("generic ecommerce", "ecommerce" in facts["related_needs"])
+    assert_true("generic social", "redes sociais" in facts["related_needs"])
+    assert_equal("generic objective", facts["objetivo"], "estrutura digital + comunicação")
+
+    step1 = pipeline_step(sales_brain.default_lead_state(), message="quero apresentar meus perfumes")
+    state = step1["state_after"]
+    assert_equal("stored product", state["produto_servico"], "perfumes")
+    assert_true("reply listens product", "perfumes" in sales_brain.normalize_text(step1["reply"]))
+    assert_true("has listening evidence", "Entendi." in step1["reply"])
+    assert_true("single question step1", step1["reply"].count("?") == 1)
+    assert_true("does not ask product again step1", "O que essa marca vende" not in step1["reply"])
+
+    step2 = pipeline_step(state, message="quero montar meu ecommerce e deixar minha rede social boa")
+    reply_norm = sales_brain.normalize_text(step2["reply"])
+    assert_equal("product persists", step2["state_after"]["produto_servico"], "perfumes")
+    assert_true("reply keeps product", "perfumes" in reply_norm)
+    assert_true("reply consolidates related needs", "ecommerce" in reply_norm or "redes sociais" in reply_norm)
+    assert_true("does not ask product again", "o que essa marca vende" not in reply_norm)
+    assert_true("does not ask objective again", "voce quer fortalecer posicionamento" not in reply_norm)
+    assert_true("does not ask channel again", "principal canal de comunicacao" not in reply_norm)
+    assert_true("single question step2", step2["reply"].count("?") == 1)
+    assert_true("deepens context", step2["next_question"]["category"] in {"estagio_marca", "dificuldade_atual", "budget_signal"})
+
+
 def main():
     tests = [
         ("menu_site", test_menu_site),
@@ -1445,6 +1478,7 @@ def main():
         ("known_lead_source_blocks_repeat", test_known_lead_source_blocks_repeat),
         ("pipeline_anti_loop", test_pipeline_anti_loop),
         ("last_three_questions_block_semantic_repeat", test_last_three_questions_block_semantic_repeat),
+        ("generic_conversation_synthesis_listens_before_asking", test_generic_conversation_synthesis_listens_before_asking),
     ]
     for name, fn in tests:
         run_test(name, fn)

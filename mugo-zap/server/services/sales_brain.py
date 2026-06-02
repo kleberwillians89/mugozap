@@ -18,6 +18,7 @@ FIELD_KEYS = [
     "current_problem",
     "business_type",
     "business_name",
+    "produto_servico",
     "urgency",
     "budget_signal",
     "funnel_stage",
@@ -33,6 +34,7 @@ FIELD_KEYS = [
     "lead_temperature",
     "next_action",
     "conversation_memory",
+    "conversation_synthesis",
     "discovery_memory",
     "primary_track",
     "related_needs",
@@ -62,6 +64,19 @@ RAW_LOW_SIGNAL_PHRASES = [
 ]
 
 
+FACT_KEYS = [
+    "produto_servico",
+    "service_interest",
+    "related_needs",
+    "canal",
+    "objetivo",
+    "dor_principal",
+    "estrutura_atual",
+    "urgencia",
+    "pedido_humano",
+]
+
+
 def default_lead_state() -> Dict[str, Any]:
     return {
         "service_interest": None,
@@ -75,6 +90,7 @@ def default_lead_state() -> Dict[str, Any]:
         "current_problem": None,
         "business_type": None,
         "business_name": None,
+        "produto_servico": None,
         "urgency": None,
         "budget_signal": None,
         "funnel_stage": None,
@@ -89,6 +105,7 @@ def default_lead_state() -> Dict[str, Any]:
         "handoff_sent_at": None,
         "lead_fields": {},
         "conversation_memory": {},
+        "conversation_synthesis": {},
         "discovery_memory": {},
         "primary_track": None,
         "related_needs": [],
@@ -97,6 +114,131 @@ def default_lead_state() -> Dict[str, Any]:
         "pain": None,
         "process": None,
     }
+
+
+def _clean_fact_value(value: str) -> str:
+    value = re.sub(r"\s+", " ", str(value or "")).strip(" .,!?:;")
+    value = re.sub(
+        r"\b(e|tambem|também|mas|para|pra|porque|por que|com|pelo|pela|no|na)\b.*$",
+        "",
+        value,
+        flags=re.IGNORECASE,
+    ).strip(" .,!?:;")
+    return value[:120]
+
+
+def _message_texts(messages: list | None, direction: str | None = None) -> List[str]:
+    texts: List[str] = []
+    for item in messages or []:
+        if isinstance(item, str):
+            texts.append(item)
+            continue
+        if not isinstance(item, dict):
+            continue
+        if direction and item.get("direction") and item.get("direction") != direction:
+            continue
+        text = str(item.get("text") or item.get("body") or item.get("message") or "").strip()
+        if text:
+            texts.append(text)
+    return texts
+
+
+def _append_unique(values: list, item: str) -> list:
+    item = str(item or "").strip()
+    if not item:
+        return values
+    normalized = normalize_text(item)
+    if not any(normalize_text(str(current)) == normalized for current in values):
+        values.append(item)
+    return values
+
+
+def _infer_product_service_from_text(text: str) -> str:
+    raw = str(text or "").strip()
+    norm = normalize_text(raw)
+    patterns = [
+        r"\b(?:vendo|vendemos|vende|trabalho com|trabalhamos com|comercializo|comercializamos)\s+(.+)",
+        r"\b(?:quero|preciso)\s+(?:apresentar|divulgar|vender|mostrar)\s+(?:meus|minhas|meu|minha|os|as|o|a)?\s*(.+)",
+        r"\b(?:tenho|temos)\s+(?:uma|um)?\s*(?:marca|loja|negocio|negócio|empresa)\s+(?:de|com|que vende)\s+(.+)",
+        r"\b(?:minha|meu|nossa|nosso)\s+(?:marca|loja|negocio|negócio|empresa)\s+(?:vende|trabalha com|e de|é de)\s+(.+)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, raw, flags=re.IGNORECASE)
+        if match:
+            candidate = _clean_fact_value(match.group(1))
+            if candidate and normalize_text(candidate) not in {"mais", "melhor", "bem", "hoje"}:
+                return candidate
+    if "roupas fitness" in norm:
+        return "roupas fitness"
+    return ""
+
+
+def extract_conversation_facts(messages: list | None) -> Dict[str, Any]:
+    facts: Dict[str, Any] = {
+        "produto_servico": "",
+        "service_interest": "",
+        "related_needs": [],
+        "canal": "",
+        "objetivo": "",
+        "dor_principal": "",
+        "estrutura_atual": "",
+        "urgencia": "",
+        "pedido_humano": False,
+    }
+    for text in _message_texts(messages):
+        norm = normalize_text(text)
+        product = _infer_product_service_from_text(text)
+        if product and not facts["produto_servico"]:
+            facts["produto_servico"] = product
+
+        service = _service_candidate_from_text(norm)
+        if service and not facts["service_interest"]:
+            facts["service_interest"] = service
+
+        if _has_any(norm, ["ecommerce", "e-commerce", "loja virtual", "loja online"]):
+            _append_unique(facts["related_needs"], "ecommerce")
+        if _has_any(norm, ["rede social", "redes sociais", "instagram", "conteudo", "conteúdo", "social media"]):
+            _append_unique(facts["related_needs"], "redes sociais")
+        if _has_any(norm, ["site", "landing", "pagina", "página"]):
+            _append_unique(facts["related_needs"], "site")
+        if _has_any(norm, ["whatsapp", "whats", "zap"]):
+            facts["canal"] = _append_source(facts.get("canal"), "WhatsApp")
+            _append_unique(facts["related_needs"], "WhatsApp")
+        if _has_any(norm, ["trafego", "tráfego", "anuncio", "anúncio", "ads", "midia paga", "mídia paga"]):
+            _append_unique(facts["related_needs"], "tráfego pago")
+        if _has_any(norm, ["automacao", "automação", "chatbot", "chat bot", "agente de ia"]):
+            _append_unique(facts["related_needs"], "automação")
+
+        if _has_any(norm, ["instagram", "insta"]):
+            facts["canal"] = _append_source(facts.get("canal"), "Instagram")
+        if "site" in norm:
+            facts["canal"] = _append_source(facts.get("canal"), "Site")
+
+        if _has_any(norm, ["vender mais", "mais vendas", "aumentar vendas", "aumentar as vendas"]):
+            facts["objetivo"] = "vender mais"
+        elif _has_any(norm, ["ecommerce", "e-commerce", "loja virtual", "loja online"]) and _has_any(norm, ["rede social", "redes sociais", "instagram", "conteudo", "conteúdo"]):
+            facts["objetivo"] = "estrutura digital + comunicação"
+        elif _has_any(norm, ["apresentar", "divulgar", "mostrar melhor"]):
+            facts["objetivo"] = facts.get("objetivo") or "apresentar melhor produto/marca"
+        elif _has_any(norm, ["gerar leads", "leads", "converter mais"]):
+            facts["objetivo"] = facts.get("objetivo") or "vendas/leads"
+
+        if _has_any(norm, ["falta", "sem", "manual", "demora", "trava", "travando", "nao converte", "não converte", "baguncado", "bagunçado"]):
+            facts["dor_principal"] = facts.get("dor_principal") or _clean_fact_value(text)
+
+        if _has_any(norm, ["ja existe", "já existe", "ja tenho", "já tenho", "ja temos", "já temos", "vendemos", "vendo hoje", "vende hoje"]):
+            facts["estrutura_atual"] = facts.get("estrutura_atual") or "já existe estrutura atual"
+        elif _has_any(norm, ["do zero", "comecar do zero", "começar do zero", "montar", "criar do zero"]):
+            facts["estrutura_atual"] = facts.get("estrutura_atual") or "estrutura a criar"
+
+        if _has_deadline_urgency(norm):
+            facts["urgencia"] = "alta"
+        elif _has_any(norm, ["esse mes", "este mes", "curto prazo"]):
+            facts["urgencia"] = facts.get("urgencia") or "média"
+
+        if _has_any(norm, ["humano", "pessoa", "atendente", "julia", "falar com alguem", "quero falar", "falar com a equipe"]):
+            facts["pedido_humano"] = True
+    return facts
 
 
 SERVICE_CHOICES = {
@@ -349,6 +491,76 @@ def _read_memory(state: Dict[str, Any]) -> Dict[str, Any]:
     return memory
 
 
+def _merge_conversation_synthesis(state: Dict[str, Any], updates: Dict[str, Any] | None = None, text: str = "") -> Dict[str, Any]:
+    merged = {**flatten_state(state), **(updates or {})}
+    previous = merged.get("conversation_synthesis") if isinstance(merged.get("conversation_synthesis"), dict) else {}
+    facts = extract_conversation_facts([{"direction": "in", "text": text}]) if text else {}
+    facts_understood = list(previous.get("facts_understood") or [])
+
+    def remember(label: str, value: Any) -> None:
+        if value in (None, "", [], {}):
+            return
+        sentence = f"{label}: {_as_text(value)}"
+        if not any(normalize_text(sentence) == normalize_text(str(item)) for item in facts_understood):
+            facts_understood.append(sentence)
+
+    product = merged.get("produto_servico") or facts.get("produto_servico")
+    if not product:
+        product = (((merged.get("discovery_memory") or {}).get("branding") or {}).get("produto_servico"))
+    objective = merged.get("objective") or merged.get("main_goal") or facts.get("objetivo")
+    channel = merged.get("lead_source") or facts.get("canal")
+    pain = merged.get("pain") or merged.get("current_problem") or facts.get("dor_principal")
+    current_structure = merged.get("current_status") or merged.get("site_scope") or facts.get("estrutura_atual")
+    related = merged.get("related_needs") or facts.get("related_needs") or []
+    service = merged.get("primary_track") or merged.get("service_interest") or facts.get("service_interest")
+    urgency = merged.get("urgency") or facts.get("urgencia")
+
+    remember("produto/serviço", product)
+    remember("serviço procurado", _service_label(service) if service else "")
+    remember("frentes relacionadas", related)
+    remember("canal citado", channel)
+    remember("objetivo", objective)
+    remember("dor principal", pain)
+    remember("estrutura atual", current_structure)
+    remember("urgência", urgency)
+    if merged.get("handoff") or facts.get("pedido_humano"):
+        remember("pedido", "falar com atendimento humano")
+
+    missing = ""
+    for key, label in [
+        ("produto_servico", "produto/serviço"),
+        ("objective", "objetivo comercial"),
+        ("lead_source", "canal principal"),
+        ("current_problem", "principal gargalo"),
+        ("current_status", "estrutura atual"),
+    ]:
+        if not (merged.get(key) or (key == "objective" and merged.get("main_goal"))):
+            missing = label
+            break
+
+    confidence_parts = sum(
+        1
+        for value in [product, objective, channel, pain, current_structure, service]
+        if value not in (None, "", [], {})
+    )
+    hypothesis = ""
+    if product and objective:
+        hypothesis = f"O foco parece ser {objective} para {product}."
+    elif objective:
+        hypothesis = f"O foco comercial parece ser {objective}."
+    elif product:
+        hypothesis = f"A conversa gira em torno de {product}."
+    elif service:
+        hypothesis = f"A frente principal parece ser {_service_label(service)}."
+
+    return {
+        "facts_understood": facts_understood[-8:],
+        "current_hypothesis": hypothesis,
+        "missing_information": missing,
+        "confidence": round(min(1.0, confidence_parts / 6), 2),
+    }
+
+
 def _memory_from_known_fields(state: Dict[str, Any], updates: Dict[str, Any] | None = None, text: str = "") -> Dict[str, Any]:
     merged = {**flatten_state(state), **(updates or {})}
     memory = _read_memory(state)
@@ -482,8 +694,12 @@ def _discovery_from_known_fields(state: Dict[str, Any], updates: Dict[str, Any] 
             branding["produto_servico"] = branding.get("produto_servico") or "produtos já vendidos"
         elif _has_any(norm, ["fase de lancamento", "fase de lançamento", "lancamento", "lançamento"]):
             branding["produto_servico"] = branding.get("produto_servico") or "produtos em lançamento"
+        if merged.get("produto_servico"):
+            branding["produto_servico"] = branding.get("produto_servico") or merged.get("produto_servico")
         if _has_any(norm, ["instagram", "insta"]):
             branding["canal_principal"] = "Instagram"
+        if merged.get("lead_source") and not branding.get("canal_principal"):
+            branding["canal_principal"] = merged.get("lead_source")
         if merged.get("current_problem") and service == "branding":
             branding["dificuldade_atual"] = merged.get("current_problem")
         if merged.get("budget_signal"):
@@ -899,6 +1115,8 @@ def flatten_state(state: Dict[str, Any] | None) -> Dict[str, Any]:
     flat["conversation_memory"] = memory if isinstance(memory, dict) else {}
     discovery = src.get("discovery_memory") or fields.get("discovery_memory") or {}
     flat["discovery_memory"] = discovery if isinstance(discovery, dict) else {}
+    synthesis = src.get("conversation_synthesis") or fields.get("conversation_synthesis") or {}
+    flat["conversation_synthesis"] = synthesis if isinstance(synthesis, dict) else {}
     return flat
 
 
@@ -937,6 +1155,7 @@ def extract_signal_from_message(text: str, current_state: Dict[str, Any]) -> Dic
     last_category = state.get("last_question_category") or ""
     service = state.get("service_interest") or state.get("selected_service") or ""
     updates: Dict[str, Any] = {}
+    conversation_facts = extract_conversation_facts([{"direction": "in", "text": text}])
     interpretation = interpret_user_message(text, state)
     semantic_updates = _updates_from_interpretation(
         interpretation.get("extracted_fields") or {},
@@ -959,9 +1178,10 @@ def extract_signal_from_message(text: str, current_state: Dict[str, Any]) -> Dic
             print(f"SALES_BRAIN_SERVICE_LOCKED service={service} ignored_candidate={choice_service} source=text text={text[:160]!r}")
         else:
             updates.update(choice_updates)
+            updates["conversation_synthesis"] = _merge_conversation_synthesis(state, updates, text)
             return updates
 
-    if _has_any(norm, ["humano", "pessoa", "atendente", "julia", "falar com alguem", "quero falar", "falar com a equipe"]):
+    if conversation_facts.get("pedido_humano") or _has_any(norm, ["humano", "pessoa", "atendente", "julia", "falar com alguem", "quero falar", "falar com a equipe"]):
         updates.update(
             {
                 "handoff": True,
@@ -973,6 +1193,45 @@ def extract_signal_from_message(text: str, current_state: Dict[str, Any]) -> Dic
                 "funnel_stage": "handoff",
             }
         )
+
+    if conversation_facts.get("produto_servico"):
+        updates["produto_servico"] = conversation_facts["produto_servico"]
+        updates["business_type"] = updates.get("business_type") or conversation_facts["produto_servico"]
+
+    if conversation_facts.get("objetivo"):
+        objective = conversation_facts["objetivo"]
+        if objective == "vender mais":
+            updates["objective"] = "vender mais"
+            updates["main_goal"] = updates.get("main_goal") or "vendas/leads"
+            updates["desired_result"] = updates.get("desired_result") or "vender mais / gerar mais oportunidades"
+        else:
+            updates["objective"] = updates.get("objective") or objective
+            updates["main_goal"] = updates.get("main_goal") or objective
+            updates["desired_result"] = updates.get("desired_result") or objective
+            if not service and "apresentar melhor" in normalize_text(objective):
+                updates["service_interest"] = "branding"
+                updates["intent"] = "branding"
+                updates["primary_track"] = "branding"
+        updates["funnel_stage"] = "qualificacao"
+
+    if conversation_facts.get("canal"):
+        updates["lead_source"] = _append_source(state.get("lead_source"), conversation_facts["canal"])
+
+    if conversation_facts.get("dor_principal"):
+        updates["current_problem"] = updates.get("current_problem") or conversation_facts["dor_principal"]
+
+    if conversation_facts.get("estrutura_atual") and not updates.get("current_status"):
+        updates["current_status"] = conversation_facts["estrutura_atual"]
+
+    if conversation_facts.get("urgencia"):
+        updates["urgency"] = "alta" if conversation_facts["urgencia"] == "alta" else updates.get("urgency") or "media"
+
+    if conversation_facts.get("related_needs"):
+        current_related = state.get("related_needs") if isinstance(state.get("related_needs"), list) else []
+        related = list(current_related)
+        for need in conversation_facts["related_needs"]:
+            _append_unique(related, need)
+        updates["related_needs"] = related
 
     if _has_any(norm, ["chatbot", "chat bot", "agente de ia", "agente ia"]) or (_has_any(norm, ["inteligencia artificial", "inteligência artificial"]) and _has_any(norm, ["criar", "chat", "bot", "atendimento", "vendas"])):
         updates.update(
@@ -1196,6 +1455,10 @@ def extract_signal_from_message(text: str, current_state: Dict[str, Any]) -> Dic
     locked_updates = _lock_known_field_updates(updates, state, text)
     locked_updates["conversation_memory"] = _memory_from_known_fields(state, locked_updates, text)
     locked_updates["discovery_memory"] = _discovery_from_known_fields(state, locked_updates, text)
+    branding_product = ((locked_updates["discovery_memory"].get("branding") or {}).get("produto_servico"))
+    if branding_product and not locked_updates.get("produto_servico"):
+        locked_updates["produto_servico"] = branding_product
+    locked_updates["conversation_synthesis"] = _merge_conversation_synthesis(state, locked_updates, text)
     return locked_updates
 
 
@@ -1342,8 +1605,10 @@ def _progressive_branding_question(state: Dict[str, Any]) -> Dict[str, Any]:
         if memory.get("canal_principal") == "Instagram":
             return {"category": "dificuldade_atual", "question": "Hoje o maior desafio está em atrair pessoas certas, transformar interesse em conversa ou manter constância de conteúdo?", "next_action": "ask_question"}
         return {"category": "main_goal", "question": "Você quer fortalecer posicionamento, identidade visual ou conteúdo para redes?", "next_action": "ask_question"}
-    if "divulgar produtos" in objective and memory.get("produto_servico") == "produtos":
-        return {"category": "produto_servico", "question": "Esses produtos já são vendidos hoje ou ainda estão em fase de lançamento?", "next_action": "ask_question"}
+    if "divulgar produtos" in objective and memory.get("produto_servico"):
+        return {"category": "estagio_marca", "question": "Essa operação já está vendendo hoje ou ainda está em fase de lançamento?", "next_action": "ask_question"}
+    if memory.get("produto_servico") and not memory.get("estagio_marca"):
+        return {"category": "estagio_marca", "question": "Essa operação já está vendendo hoje ou ainda está em fase de lançamento?", "next_action": "ask_question"}
     if "crescimento" in objective and not memory.get("canal_principal"):
         return {"category": "canal_principal", "question": "Hoje vocês já publicam com frequência?", "next_action": "ask_question"}
     if ("identidade" in focus or "construcao" in focus or "construção" in focus) and not memory.get("estagio_marca"):
@@ -1485,13 +1750,13 @@ def _category_answered(state: Dict[str, Any], category: str) -> bool:
     if category == "current_tools":
         return bool(state.get("current_tools"))
     if category == "current_status":
-        return bool(state.get("current_status") or state.get("current_tools"))
+        return bool(state.get("current_status") or state.get("current_tools") or ((state.get("conversation_synthesis") or {}).get("estrutura_atual")))
     if category == "lead_source":
-        return bool(state.get("lead_source"))
+        return bool(state.get("lead_source") or ((state.get("conversation_synthesis") or {}).get("canal")))
     if category == "site_scope":
         return bool(state.get("site_scope"))
     if category == "main_goal":
-        return bool(state.get("main_goal"))
+        return bool(state.get("main_goal") or state.get("objective"))
     if category == "offer_meeting":
         return False
     if category in {"volume", "gargalo", "crm", "tempo_resposta"}:
@@ -1508,6 +1773,10 @@ def _category_answered(state: Dict[str, Any], category: str) -> bool:
     }
     if category in discovery_map:
         service, key = discovery_map[category]
+        if category == "produto_servico" and state.get("produto_servico"):
+            return True
+        if category == "canal_principal" and state.get("lead_source"):
+            return True
         return bool((discovery.get(service) or {}).get(key))
     return bool(state.get(category))
 
@@ -1587,6 +1856,105 @@ def validate_final_reply(reply: str, state: Dict[str, Any]) -> Dict[str, Any]:
     return validate_reply(reply, state)
 
 
+def _question_targets_known_fact(question: str, state: Dict[str, Any]) -> bool:
+    category = question_category(question)
+    if not category:
+        return False
+    return _category_answered(state, category)
+
+
+def _synthesis_from_state(state: Dict[str, Any]) -> Dict[str, Any]:
+    state = flatten_state(state)
+    synthesis = state.get("conversation_synthesis") if isinstance(state.get("conversation_synthesis"), dict) else {}
+    if synthesis.get("facts_understood"):
+        return synthesis
+    return _merge_conversation_synthesis(state)
+
+
+def _primary_fact_summary(state: Dict[str, Any], synthesis: Dict[str, Any]) -> str:
+    state = flatten_state(state)
+    product = state.get("produto_servico") or ((state.get("discovery_memory") or {}).get("branding") or {}).get("produto_servico")
+    objective = state.get("objective") or state.get("main_goal")
+    related = state.get("related_needs") if isinstance(state.get("related_needs"), list) else []
+    channel = state.get("lead_source")
+    service = state.get("primary_track") or state.get("service_interest")
+    site_scope = state.get("site_scope")
+
+    if site_scope == SITE_EXISTING_SCOPE:
+        return "O foco é melhorar uma estrutura digital que já existe."
+    if site_scope == "criar do zero":
+        return "O foco é criar uma nova estrutura digital do zero."
+    if product and objective:
+        return f"Então o foco é {_as_text(objective)} para {_as_text(product)}."
+    if product:
+        return f"A conversa gira em torno de {_as_text(product)}."
+    if objective:
+        return f"O objetivo comercial é {_as_text(objective)}."
+    if service:
+        return f"A frente principal é {_service_label(service)}."
+    if channel:
+        return f"{_as_text(channel)} já apareceu como canal importante."
+
+    facts = synthesis.get("facts_understood") or []
+    if facts:
+        return re.sub(r"^[^:]+:\s*", "", str(facts[-1])).strip()
+    return "Entendi o contexto inicial."
+
+
+def _strategic_synthesis_line(state: Dict[str, Any]) -> str:
+    state = flatten_state(state)
+    related = state.get("related_needs") if isinstance(state.get("related_needs"), list) else []
+    product = state.get("produto_servico")
+    objective = state.get("objective") or state.get("main_goal")
+    channel = state.get("lead_source")
+    pain = state.get("pain") or state.get("current_problem")
+    service = state.get("primary_track") or state.get("service_interest")
+
+    service = state.get("primary_track") or state.get("service_interest")
+    redundant_by_service = {
+        "site": {"site"},
+        "automacao_whatsapp": {"whatsapp", "automacao", "automação"},
+        "ia_no_negocio": set(),
+        "inteligencia_artificial": set(),
+        "branding": set(),
+        "trafego_pago": {"trafego pago", "tráfego pago"},
+    }
+    redundant = redundant_by_service.get(str(service), set()) | {"whatsapp"}
+    visible_related = [item for item in related if normalize_text(str(item)) not in redundant]
+    if visible_related:
+        return f"Além disso, já apareceram frentes relacionadas como {_as_text(visible_related)}, então a demanda deve ser tratada de forma integrada."
+    if product and objective:
+        return "A leitura é que não se trata só de uma peça isolada, mas de organizar oferta, comunicação e conversão."
+    if channel and objective:
+        return f"A leitura é que {_as_text(channel)} precisa sustentar melhor esse objetivo, sem perder o contexto comercial."
+    if pain:
+        return f"A principal dor percebida até aqui é {_as_text(pain)}."
+    if service:
+        return "Vou aprofundar só a maior lacuna para não transformar a conversa em formulário."
+    return "Vou organizar a conversa pelo que já apareceu e aprofundar só o ponto que falta."
+
+
+def build_consultative_reply(conversation_memory: Dict[str, Any], next_question: Dict[str, Any] | None = None) -> str:
+    state = flatten_state(conversation_memory or {})
+    next_q = next_question or get_next_question(state)
+    question = (next_q or {}).get("question") or ""
+    if not question:
+        return ""
+    if (next_q or {}).get("next_action") in {"handoff", "offer_meeting"}:
+        return question
+    if _question_targets_known_fact(question, state):
+        replacement = _non_repeating_recovery_question(state)
+        if replacement.get("question") and not _question_targets_known_fact(replacement["question"], state):
+            question = replacement["question"]
+
+    synthesis = _synthesis_from_state(state)
+    summary = _primary_fact_summary(state, synthesis)
+    reading = _strategic_synthesis_line(state)
+    if normalize_text(summary) in normalize_text(reading):
+        return f"Entendi.\n\n{summary}\n\n{question}".strip()
+    return f"Entendi.\n\n{summary}\n\n{reading}\n\n{question}".strip()
+
+
 def build_contextual_reply(
     state_before: Dict[str, Any],
     state_after: Dict[str, Any],
@@ -1597,6 +1965,10 @@ def build_contextual_reply(
     after = flatten_state(state_after or {})
     signals = extracted_signals or {}
     question = (next_question or {}).get("question") or ""
+    if (next_question or {}).get("next_action") == "ask_question":
+        consultative = build_consultative_reply(after, next_question)
+        if consultative:
+            return consultative
     confirmation = ""
 
     if after.get("solution") == "chatbot com IA" and signals.get("pain"):
@@ -1752,20 +2124,6 @@ def _as_text(value: Any) -> str:
 def _service_label(value: Any) -> str:
     raw = _as_text(value)
     return SERVICE_LABELS.get(raw, raw.replace("_", " "))
-
-
-def _message_texts(messages: list | None, direction: str = "") -> List[str]:
-    texts: List[str] = []
-    for item in messages or []:
-        if isinstance(item, dict):
-            if direction and str(item.get("direction") or "").strip() != direction:
-                continue
-            text = str(item.get("text") or item.get("body") or item.get("message") or "").strip()
-        else:
-            text = str(item or "").strip()
-        if text:
-            texts.append(text)
-    return texts
 
 
 def _contains_any_text(texts: List[str], needles: List[str]) -> bool:

@@ -232,6 +232,42 @@ def build_julia_prefilled_link(context: dict | None = None) -> str:
     return link
 
 
+def _build_client_handoff_mini_briefing(context: dict | None = None) -> tuple[str, str]:
+    context = context or {}
+    solution = _handoff_context_value(context, "solution")
+    objective = _handoff_context_value(context, "objective") or _handoff_context_value(context, "desired_result") or _handoff_context_value(context, "main_goal")
+    pain = _handoff_context_value(context, "pain") or _handoff_context_value(context, "current_problem")
+    process = _handoff_context_value(context, "process") or _handoff_context_value(context, "lead_source") or _handoff_context_value(context, "current_tools")
+    service = _handoff_context_value(context, "primary_track") or _handoff_context_value(context, "service_interest") or _handoff_context_value(context, "intent")
+
+    norm_solution = _normalize_text_local(solution)
+    norm_objective = _normalize_text_local(objective)
+    norm_pain = _normalize_text_local(pain)
+    norm_process = _normalize_text_local(process)
+    if "chatbot" in norm_solution or "chatbot" in norm_pain or "chatbot" in norm_process or "ia_no_negocio" in _normalize_text_local(service):
+        scenario = "criar um chatbot com IA para automatizar o atendimento e vender mais"
+    elif "inteligencia" in _normalize_text_local(service) or "ia" == _normalize_text_local(service):
+        scenario = "usar IA para organizar o atendimento e melhorar o resultado comercial"
+    elif "automacao" in _normalize_text_local(service) or "whatsapp" in norm_process:
+        scenario = "automatizar o atendimento para ganhar velocidade e vender mais"
+    elif objective:
+        scenario = f"avançar em {str(objective).strip()}"
+    else:
+        scenario = "seguir com um diagnóstico comercial da Mugô"
+
+    if "vender" not in scenario and ("vendas" in norm_objective or "vender" in norm_objective):
+        scenario = f"{scenario} e vender mais"
+
+    client_line = f"Perfeito. Já entendi o cenário: você quer {scenario}."
+    julia_text = f"Oi Julia, vim pelo atendimento da Mugô. Quero {scenario}."
+    return client_line, julia_text
+
+
+def build_julia_client_prefilled_link(context: dict | None = None) -> str:
+    _, link_text = _build_client_handoff_mini_briefing(context)
+    return f"{JULIA_DIRECT_LINK}?text={urllib.parse.quote(link_text)}"
+
+
 def _handoff_opening(context: dict | None = None) -> str:
     last_reply = _handoff_context_value(context, "last_question_asked").lower()
     openings = ["Certo.", "Legal.", "Ótimo.", "Faz sentido."]
@@ -242,10 +278,11 @@ def _handoff_opening(context: dict | None = None) -> str:
 
 
 def build_handoff_lead_reply(context: dict | None = None) -> str:
+    client_line, _ = _build_client_handoff_mini_briefing(context)
     return (
-        "Perfeito. Já tenho contexto suficiente para direcionar você da melhor forma.\n\n"
-        "Você pode continuar diretamente com a Julia:\n\n"
-        f"{JULIA_DIRECT_LINK}"
+        f"{client_line}\n\n"
+        "Você pode continuar diretamente com a Julia por aqui:\n\n"
+        f"{build_julia_client_prefilled_link(context)}"
     )
 
 
@@ -857,9 +894,18 @@ def _infer_fields_from_text(user_text: str, ai_state: dict | None, result: dict 
     if any(k in text for k in ["vendas", "vender", "vender mais", "mais vendas", "aumentar venda", "aumentar as vendas", "gerar lead", "gerar leads", "mais clientes", "cliente", "clientes", "vender pelo whatsapp", "perco vendas", "perder vendas"]):
         inferred["main_goal"] = "vendas/leads"
         inferred["desired_result"] = "vender mais / gerar mais vendas"
+        inferred["objective"] = "vender mais"
         inferred["funnel_stage"] = "qualificacao"
         if service_interest == "automacao_whatsapp":
             inferred["service_interest"] = "automacao_whatsapp"
+
+    if any(k in text for k in ["chatbot", "chat bot", "agente de ia", "inteligência artificial", "inteligencia artificial"]):
+        inferred["service_interest"] = "inteligencia_artificial"
+        inferred["intent"] = "inteligencia_artificial"
+        inferred["primary_track"] = "ia_no_negocio"
+        inferred["solution"] = "chatbot com IA" if "chatbot" in text or "chat bot" in text else "agente de IA"
+        inferred["process"] = "atendimento/vendas" if "venda" in text or "comercial" in text else "atendimento"
+        inferred["related_needs"] = ["automacao_whatsapp", "vendas"]
 
     if any(k in text for k in ["tempo", "ganhar tempo", "responder mais rápido", "responder mais rapido", "diminuir trabalho", "automatizar", "automatizar atendimento", "não perder mensagem", "nao perder mensagem"]):
         inferred["main_goal"] = inferred.get("main_goal") or "operação/tempo"
@@ -898,6 +944,11 @@ def _infer_fields_from_text(user_text: str, ai_state: dict | None, result: dict 
         inferred["current_tools"] = "manual"
         inferred["current_problem"] = inferred.get("current_problem") or "atendimento e acompanhamento manual"
         inferred["funnel_stage"] = "qualificacao"
+
+    if any(k in text for k in ["falta de automação", "falta de automacao", "falta da automação", "falta da automacao", "sem automação", "sem automacao"]):
+        inferred["pain"] = "falta de automação no atendimento"
+        inferred["current_problem"] = inferred.get("current_problem") or "falta de automação no atendimento"
+        inferred["current_tools"] = inferred.get("current_tools") or "manual"
 
     if any(k in text for k in ["loja", "ecommerce", "e commerce", "restaurante", "clínica", "clinica", "empresa"]):
         inferred["business_type"] = "loja" if "loja" in text else inferred.get("business_type")
@@ -1363,6 +1414,9 @@ def _build_julia_briefing_message(
         context["desired_result"] = briefing.get("commercial_goal")
     if briefing.get("entry_channel") and not context.get("lead_source"):
         context["lead_source"] = briefing.get("entry_channel")
+    for semantic_key in ["solution", "objective", "pain", "process"]:
+        if briefing.get(semantic_key) and not context.get(semantic_key):
+            context[semantic_key] = briefing.get(semantic_key)
     if briefing.get("goals") and not context.get("desired_result"):
         context["desired_result"] = ", ".join(briefing.get("goals") or [])
     return _build_premium_handoff_message(
@@ -1443,6 +1497,12 @@ async def _save_ai_result_state(
         "current_problem": lead_fields.get("current_problem") or state.get("current_problem") or "",
         "business_type": lead_fields.get("business_type") or state.get("business_type") or "",
         "business_name": lead_fields.get("business_name") or state.get("business_name") or "",
+        "primary_track": lead_fields.get("primary_track") or state.get("primary_track") or "",
+        "related_needs": lead_fields.get("related_needs") or state.get("related_needs") or [],
+        "solution": lead_fields.get("solution") or state.get("solution") or "",
+        "objective": lead_fields.get("objective") or state.get("objective") or "",
+        "pain": lead_fields.get("pain") or state.get("pain") or "",
+        "process": lead_fields.get("process") or state.get("process") or "",
         "urgency": lead_fields.get("urgency") or state.get("urgency") or "",
         "budget_signal": lead_fields.get("budget_signal") or state.get("budget_signal") or "",
         "funnel_stage": lead_fields.get("funnel_stage") or state.get("funnel_stage") or "",
@@ -1700,12 +1760,14 @@ async def process_inbound_sales_message(
     state_after = sales_brain.merge_state(state_before, extracted_signals)
     print(f"SALES_STATE_AFTER_MERGE cid={cid} wa_id={wa_id} state={json.dumps(state_after, ensure_ascii=False)[:1400]}")
 
-    if sales_brain.should_handoff(state_after, user_text):
+    wants_human_handoff = sales_brain.should_handoff(state_after, user_text)
+    has_enough_for_handoff = sales_brain.should_handoff_now(state_after, [{"direction": "in", "text": user_text}])
+    if wants_human_handoff or has_enough_for_handoff:
         state_after = sales_brain.merge_state(
             state_after,
             {
                 "handoff": True,
-                "handoff_reason": state_after.get("handoff_reason") or "lead_pediu_humano",
+                "handoff_reason": state_after.get("handoff_reason") or ("lead_pediu_humano" if wants_human_handoff else "contexto_suficiente"),
                 "lead_temperature": "hot",
                 "meeting_suggested": True,
                 "briefing_ready": True,
@@ -1777,12 +1839,13 @@ async def process_inbound_sales_message(
         or ai_result.get("next_action") == "handoff"
         or ai_result.get("briefing_ready")
         or ai_result.get("lead_temperature") == "hot"
+        or sales_brain.should_handoff_now(state_after, [{"direction": "in", "text": user_text}])
     ):
         state_after = sales_brain.merge_state(
             state_after,
             {
                 "handoff": True,
-                "handoff_reason": ai_result.get("handoff_reason") or "ai_handoff",
+                "handoff_reason": ai_result.get("handoff_reason") or state_after.get("handoff_reason") or "contexto_suficiente",
                 "lead_temperature": "hot",
                 "meeting_suggested": True,
                 "briefing_ready": True,
@@ -1968,9 +2031,13 @@ async def _handle_ai_operational_decision(
         "lead_fields": _merge_lead_fields(fields, {
             "primary_track": consolidated_briefing.get("primary_track"),
             "related_needs": consolidated_briefing.get("related_needs"),
-            "service_interest": consolidated_briefing.get("primary_track") or fields.get("service_interest"),
+            "service_interest": fields.get("service_interest") or result.get("intent"),
             "lead_source": consolidated_briefing.get("entry_channel") or fields.get("lead_source"),
             "urgency": consolidated_briefing.get("urgency") or fields.get("urgency"),
+            "solution": consolidated_briefing.get("solution") or fields.get("solution"),
+            "objective": consolidated_briefing.get("objective") or fields.get("objective"),
+            "pain": consolidated_briefing.get("pain") or fields.get("pain"),
+            "process": consolidated_briefing.get("process") or fields.get("process"),
         }),
         "briefing": _merge_briefing(result.get("briefing"), consolidated_briefing),
     }

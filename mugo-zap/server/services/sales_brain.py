@@ -36,10 +36,15 @@ FIELD_KEYS = [
     "discovery_memory",
     "primary_track",
     "related_needs",
+    "solution",
+    "objective",
+    "pain",
+    "process",
 ]
 
 
 SERVICE_LABELS = {
+    "ia_no_negocio": "IA no negócio",
     "site": "site/landing page",
     "automacao_whatsapp": "automação de WhatsApp",
     "inteligencia_artificial": "inteligência artificial",
@@ -87,6 +92,10 @@ def default_lead_state() -> Dict[str, Any]:
         "discovery_memory": {},
         "primary_track": None,
         "related_needs": [],
+        "solution": None,
+        "objective": None,
+        "pain": None,
+        "process": None,
     }
 
 
@@ -493,6 +502,8 @@ def _multi_short_answer(text: str) -> str:
 
 
 def _service_candidate_from_text(text: str) -> str:
+    if _has_any(text, ["chatbot", "chat bot", "agente de ia", "agente ia", "inteligencia artificial", "inteligência artificial"]) or re.search(r"\bia\b", text):
+        return "inteligencia_artificial"
     if _has_any(text, ["landing", "pagina", "site"]):
         return "site"
     if _has_any(text, ["whatsapp", "whats", "zap", "automacao", "automatizar", "atendimento"]):
@@ -650,6 +661,8 @@ def _semantic_intent(text: str, state: Dict[str, Any]) -> tuple[str, float]:
         return "branding", 0.74
     if current_service == "trafego_pago":
         return "traffic", 0.74
+    if _has_any(norm, ["chatbot", "chat bot", "agente de ia", "agente ia", "inteligencia artificial", "inteligência artificial"]) or re.search(r"\bia\b", norm):
+        return "ai_business", 0.84
     if _has_any(norm, ["site", "landing", "pagina", "página"]):
         return "site_landing", 0.76
     if _has_any(norm, ["whatsapp", "whats", "zap", "atendimento", "automacao", "automação", "bot"]):
@@ -735,6 +748,7 @@ def _updates_from_interpretation(
 ) -> Dict[str, Any]:
     updates: Dict[str, Any] = {}
     intent_to_service = {
+        "ai_business": "inteligencia_artificial",
         "site_landing": "site",
         "whatsapp_automation": "automacao_whatsapp",
         "branding": "branding",
@@ -959,6 +973,28 @@ def extract_signal_from_message(text: str, current_state: Dict[str, Any]) -> Dic
                 "funnel_stage": "handoff",
             }
         )
+
+    if _has_any(norm, ["chatbot", "chat bot", "agente de ia", "agente ia"]) or (_has_any(norm, ["inteligencia artificial", "inteligência artificial"]) and _has_any(norm, ["criar", "chat", "bot", "atendimento", "vendas"])):
+        updates.update(
+            {
+                "service_interest": "inteligencia_artificial",
+                "intent": "inteligencia_artificial",
+                "primary_track": "ia_no_negocio",
+                "solution": "chatbot com IA",
+                "process": "atendimento/vendas" if _has_any(norm, ["vendas", "vender", "comercial"]) else "atendimento",
+                "related_needs": ["automacao_whatsapp", "vendas"],
+                "funnel_stage": "qualificacao",
+            }
+        )
+
+    if _has_any(norm, ["vendas", "vender", "vender mais", "mais vendas", "aumentar vendas"]):
+        updates["objective"] = "vender mais"
+
+    if _has_any(norm, ["falta de automacao", "falta da automacao", "sem automacao", "sem automação", "atendimento manual", "falta de automacao no atendimento", "falta da automacao de chatbot"]):
+        updates["pain"] = "falta de automação no atendimento"
+        updates["current_problem"] = updates.get("current_problem") or "falta de automação no atendimento"
+        updates["current_tools"] = updates.get("current_tools") or "manual"
+        updates["process"] = updates.get("process") or "atendimento/vendas"
 
     candidate_service = _service_candidate_from_text(norm)
     had_site_context = service == "site" or last_category == "site_scope"
@@ -1256,6 +1292,18 @@ def _progressive_site_question(state: Dict[str, Any]) -> Dict[str, Any]:
 def _progressive_ai_question(state: Dict[str, Any]) -> Dict[str, Any]:
     state = flatten_state(state)
     memory = _discovery_from_known_fields(state)["inteligencia_artificial"]
+    if state.get("solution") == "chatbot com IA" and not (state.get("objective") or state.get("main_goal")):
+        return {
+            "category": "main_goal",
+            "question": "Então o caminho é criar um agente de IA para atendimento. Esse chatbot precisa mais qualificar leads, responder dúvidas ou conduzir vendas?",
+            "next_action": "ask_question",
+        }
+    if state.get("solution") == "chatbot com IA" and (state.get("objective") or state.get("main_goal")) and not (state.get("pain") or state.get("current_problem")):
+        return {
+            "category": "current_problem",
+            "question": "Boa. Então ele precisa atuar no comercial, não só no suporte. Hoje a maior perda acontece por demora na resposta ou por falta de acompanhamento dos contatos?",
+            "next_action": "ask_question",
+        }
     if not memory.get("processo"):
         return {"category": "main_goal", "question": "Qual processo você imagina melhorar com IA: atendimento, vendas, conteúdo ou operação interna?", "next_action": "ask_question"}
     if not memory.get("dor_operacional"):
@@ -1321,13 +1369,15 @@ def get_next_question(state: Dict[str, Any]) -> Dict[str, Any]:
     }
     if state.get("handoff") or service == "humano":
         return {"category": "handoff", "question": "Perfeito. Já tenho contexto suficiente para direcionar você da melhor forma.", "next_action": "handoff"}
+    if should_handoff_now(state, []):
+        return {"category": "handoff", "question": "Perfeito. Já tenho contexto suficiente para direcionar você da melhor forma.", "next_action": "handoff"}
     if service == "site":
         return _progressive_site_question(state)
     if service == "automacao_whatsapp":
         if not state.get("lead_source"):
-            return {"category": "lead_source", "question": "Hoje os contatos chegam mais pelo WhatsApp, Instagram ou site?", "next_action": "ask_question"}
+            return {"category": "lead_source", "question": "Por qual canal você mais recebe oportunidades comerciais hoje?", "next_action": "ask_question"}
         if not (state.get("current_tools") or state.get("current_problem")):
-            return {"category": "current_tools", "question": "Hoje vocês atendem manualmente ou já existe alguma automação rodando?", "next_action": "ask_question"}
+            return {"category": "current_tools", "question": "O atendimento hoje depende muito de resposta manual ou já tem algum fluxo automatizado?", "next_action": "ask_question"}
         return _progressive_automation_question(state)
     if service == "inteligencia_artificial":
         return _progressive_ai_question(state)
@@ -1364,9 +1414,12 @@ def question_category(text: str) -> str:
         return "current_problem"
     if "vendas/leads" in norm or "vender mais" in norm or "gerar leads" in norm or "foco e gerar" in norm:
         return "main_goal"
-    if "whatsapp" in norm and ("chegam" in norm or "chega" in norm or "por onde" in norm or ("instagram" in norm and "site" in norm)):
+    if (
+        "oportunidades comerciais" in norm
+        or ("whatsapp" in norm and ("chegam" in norm or "chega" in norm or "por onde" in norm or ("instagram" in norm and "site" in norm)))
+    ):
         return "lead_source"
-    if "manual" in norm or "ferramenta" in norm or "crm" in norm or "ja anunciam" in norm:
+    if "manual" in norm or "fluxo automatizado" in norm or "ferramenta" in norm or "crm" in norm or "ja anunciam" in norm:
         return "current_tools" if "anunciam" not in norm else "current_status"
     if "quantos leads" in norm or "quantas conversas" in norm or "entram por semana" in norm:
         return "volume"
@@ -1470,12 +1523,28 @@ def _non_repeating_recovery_question(state: Dict[str, Any]) -> Dict[str, Any]:
             return {"category": "current_problem", "question": SITE_PROBLEM_QUESTION, "next_action": "ask_question"}
     if service == "branding":
         return _progressive_branding_question(state)
-    return {"category": "current_problem", "question": "Qual trava mais atrapalha o avanço comercial hoje?", "next_action": "ask_question"}
+    return {"category": "current_problem", "question": "Qual gargalo comercial está mais claro para você hoje?", "next_action": "ask_question"}
 
 
 def _matches_recent_question(reply: str, state: Dict[str, Any]) -> bool:
     recent = flatten_state(state).get("recent_bot_questions") or []
     return any(is_duplicate_question(reply, question) for question in recent[-3:])
+
+
+ONE_TIME_QUESTIONS = [
+    "qual gargalo comercial esta mais claro para voce hoje",
+    "por qual canal voce mais recebe oportunidades comerciais hoje",
+    "o atendimento hoje depende muito de resposta manual",
+    "ja tem algum fluxo automatizado",
+]
+
+
+def _is_one_time_question_repeated(reply: str, state: Dict[str, Any]) -> bool:
+    norm = normalize_text(reply)
+    if not any(item in norm for item in ONE_TIME_QUESTIONS):
+        return False
+    recent = flatten_state(state).get("recent_bot_questions") or []
+    return any(any(item in normalize_text(question) for item in ONE_TIME_QUESTIONS) for question in recent)
 
 
 def validate_reply(reply: str, state: Dict[str, Any]) -> Dict[str, Any]:
@@ -1484,7 +1553,7 @@ def validate_reply(reply: str, state: Dict[str, Any]) -> Dict[str, Any]:
     category = question_category(reply)
     blocked = False
     reason = ""
-    if is_duplicate_question(reply, state.get("last_question_asked") or "") or _matches_recent_question(reply, state):
+    if is_duplicate_question(reply, state.get("last_question_asked") or "") or _matches_recent_question(reply, state) or _is_one_time_question_repeated(reply, state):
         blocked = True
         reason = "duplicate_last_question"
     elif is_forbidden_generic_reply(reply, state):
@@ -1497,6 +1566,15 @@ def validate_reply(reply: str, state: Dict[str, Any]) -> Dict[str, Any]:
         blocked = True
         reason = "known_service_interest"
     if blocked:
+        if should_handoff_now(state, []):
+            return {
+                "category": "handoff",
+                "question": "Perfeito. Já tenho contexto suficiente para direcionar você da melhor forma.",
+                "reply": "Perfeito. Já tenho contexto suficiente para direcionar você da melhor forma.",
+                "next_action": "handoff",
+                "blocked": True,
+                "reason": reason,
+            }
         if reason == "forbidden_generic_reply" and state.get("service_interest") == "site":
             next_q = _non_repeating_recovery_question(state)
         if is_duplicate_question(next_q.get("question") or "", state.get("last_question_asked") or "") or _matches_recent_question(next_q.get("question") or "", state):
@@ -1521,8 +1599,15 @@ def build_contextual_reply(
     question = (next_question or {}).get("question") or ""
     confirmation = ""
 
+    if after.get("solution") == "chatbot com IA" and signals.get("pain"):
+        confirmation = "Entendi. Já existe uma dor clara: o atendimento ainda depende muito do manual e isso trava vendas."
+    elif after.get("solution") == "chatbot com IA" and (signals.get("objective") or signals.get("main_goal") == "vendas/leads"):
+        confirmation = "Boa. Então ele precisa atuar no comercial, não só no suporte."
+    elif signals.get("solution") == "chatbot com IA":
+        confirmation = "Então o caminho é criar um agente de IA para atendimento."
+
     lead_source = signals.get("lead_source")
-    if lead_source:
+    if not confirmation and lead_source:
         source_norm = normalize_text(str(lead_source))
         if source_norm == "whatsapp":
             confirmation = "Faz sentido. Então o foco é melhorar o atendimento e a entrada de leads pelo WhatsApp."
@@ -1585,6 +1670,41 @@ def should_handoff(state: Dict[str, Any], message: str) -> bool:
     return bool(updates.get("handoff") or flatten_state(state).get("handoff"))
 
 
+def should_handoff_now(conversation_memory: Dict[str, Any] | None, messages: list | None = None) -> bool:
+    state = flatten_state(conversation_memory or {})
+    inbound_texts = _message_texts(messages, direction="in") or _message_texts(messages)
+    joined = normalize_text(" | ".join(inbound_texts))
+
+    if bool(state.get("handoff")) or _has_any(joined, ["humano", "atendente", "falar com alguem", "falar com alguém", "falar com a equipe", "julia", "pessoa"]):
+        return True
+
+    solution = state.get("solution")
+    service = state.get("primary_track") or state.get("service_interest") or state.get("intent")
+    if not service and _has_any(joined, ["chatbot", "chat bot", "inteligencia artificial", "inteligência artificial", "agente de ia"]):
+        service = "ia_no_negocio"
+
+    objective = state.get("objective") or state.get("desired_result") or state.get("main_goal")
+    if not objective and _has_any(joined, ["vendas", "vender", "vender mais", "mais vendas", "gerar leads"]):
+        objective = "vender mais"
+
+    pain = state.get("pain") or state.get("current_problem")
+    if normalize_text(pain) in {"atendimento", "vendas", "processo manual"} and not solution:
+        pain = ""
+    if not pain and _has_any(joined, ["falta de automacao", "falta da automacao", "sem automacao", "sem automação", "manual", "demora", "perda de leads"]):
+        pain = "falta de automação no atendimento"
+
+    process = state.get("process") or state.get("lead_source") or state.get("current_tools")
+    if not process and _has_any(joined, ["atendimento", "whatsapp", "vendas", "comercial", "chatbot"]):
+        process = "atendimento/vendas"
+
+    urgency = state.get("urgency")
+    if not urgency and _has_any(joined, ["urgente", "para ontem", "pra ontem", "o quanto antes", "ate dia", "até dia"]):
+        urgency = "alta"
+
+    score = sum(bool(item) for item in [service, objective, pain, process, urgency])
+    return score >= 3 and bool(urgency or (objective and pain and (process or solution)))
+
+
 def _commercial_field_count(state: Dict[str, Any]) -> int:
     state = flatten_state(state)
     keys = ["main_goal", "desired_result", "site_scope", "lead_source", "current_tools", "current_problem", "urgency", "budget_signal", "current_status"]
@@ -1593,6 +1713,8 @@ def _commercial_field_count(state: Dict[str, Any]) -> int:
 
 def should_offer_meeting(state: Dict[str, Any]) -> bool:
     state = flatten_state(state)
+    if should_handoff_now(state, []):
+        return True
     if has_enough_briefing_for_handoff(state):
         return True
     if get_next_question(state).get("next_action") == "offer_meeting":
@@ -1656,6 +1778,8 @@ def _safe_analysis_text(value: Any) -> str:
     norm = normalize_text(text)
     if not text:
         return ""
+    if norm in {"outro", "humano", "indefinido"}:
+        return ""
     if norm in RAW_LOW_SIGNAL_PHRASES or any(phrase in norm for phrase in RAW_LOW_SIGNAL_PHRASES):
         return ""
     return text
@@ -1704,12 +1828,27 @@ def build_internal_briefing(conversation_memory: Dict[str, Any] | None, messages
     inbound_texts = _message_texts(messages, direction="in") or _message_texts(messages)
     all_texts = _message_texts(messages)
     primary_track = state.get("primary_track") or state.get("service_interest") or state.get("intent") or ""
+    solution = state.get("solution")
+    objective = state.get("objective")
+    pain = state.get("pain")
+    process = state.get("process")
+    joined = normalize_text(" | ".join(inbound_texts))
+    if solution == "chatbot com IA" or _has_any(joined, ["chatbot", "chat bot", "agente de ia"]):
+        primary_track = "ia_no_negocio"
+        solution = solution or "chatbot com IA"
+        process = process or "atendimento/vendas"
+        if not objective and _has_any(joined, ["vendas", "vender", "vender mais", "mais vendas"]):
+            objective = "vender mais"
+        if not pain and _has_any(joined, ["falta de automacao", "falta da automacao", "sem automacao", "sem automação", "manual"]):
+            pain = "falta de automação no atendimento"
+    if normalize_text(primary_track) in {"outro", "humano"}:
+        primary_track = "ia_no_negocio" if solution == "chatbot com IA" else ""
     related_needs = _infer_related_needs(state, messages)
     channel = state.get("lead_source") or ("WhatsApp" if inbound_texts else "")
     business = state.get("business_type") or state.get("business_name")
-    goal = state.get("desired_result") or state.get("main_goal")
-    problem = state.get("current_problem") or state.get("current_status")
-    tools = state.get("current_tools")
+    goal = objective or state.get("desired_result") or state.get("main_goal")
+    problem = pain or state.get("current_problem") or state.get("current_status")
+    tools = process or state.get("current_tools")
     urgency = state.get("urgency")
     budget = state.get("budget_signal")
     asks_for_all = _contains_any_text(inbound_texts, ["tudo", "todas as frentes", "todas as frente", "me ajudem", "me ajuda"])
@@ -1725,25 +1864,33 @@ def build_internal_briefing(conversation_memory: Dict[str, Any] | None, messages
 
     front_label = _service_label(primary_track) if primary_track else "demanda integrada"
     related_labels = [_service_label(item) for item in related_needs if item and item != primary_track]
-    business_phrase = _safe_analysis_text(business) or "negócio ainda sem segmento explicitado"
-    goal_phrase = _safe_analysis_text(goal) or "aumento de clareza comercial e conversão"
+    business_phrase = _safe_analysis_text(business)
+    goal_phrase = _safe_analysis_text(goal) or ("vender mais" if solution == "chatbot com IA" else "avançar o resultado comercial")
     problem_phrase = _safe_analysis_text(problem) or "priorização e diagnóstico das principais travas"
     channel_phrase = _safe_analysis_text(channel) or "WhatsApp"
     tools_phrase = _safe_analysis_text(tools)
 
-    moment_parts = [
-        f"Lead com frente principal em {front_label}",
-        f"canal de entrada {channel_phrase}",
-    ]
-    if business_phrase:
-        moment_parts.append(f"negócio/produto: {business_phrase}")
-    if goal_phrase:
-        moment_parts.append(f"objetivo comercial: {goal_phrase}")
-    if related_labels:
-        moment_parts.append(f"frentes secundárias percebidas: {', '.join(related_labels)}")
-    moment = ". ".join(moment_parts) + "."
+    if solution == "chatbot com IA":
+        moment = (
+            "Lead busca criar um chatbot com inteligência artificial para automatizar o atendimento e apoiar vendas. "
+            f"A dor principal está na {problem_phrase}."
+        )
+    else:
+        moment_parts = [
+            f"Lead com frente principal em {front_label}",
+            f"canal de entrada {channel_phrase}",
+        ]
+        if business_phrase:
+            moment_parts.append(f"negócio/produto: {business_phrase}")
+        if goal_phrase:
+            moment_parts.append(f"objetivo comercial: {goal_phrase}")
+        if related_labels:
+            moment_parts.append(f"frentes secundárias percebidas: {', '.join(related_labels)}")
+        moment = ". ".join(moment_parts) + "."
 
-    if multi_front:
+    if solution == "chatbot com IA":
+        strategic = "Existe uma oportunidade clara de estruturar um atendimento automatizado com IA para qualificar contatos, reduzir operação manual e aumentar conversão."
+    elif multi_front:
         strategic = (
             "A demanda deve ser tratada como integrada, não como pedido isolado. "
             "O lead demonstra necessidade de organizar aquisição, comunicação, estrutura digital e conversão, "
@@ -1759,7 +1906,9 @@ def build_internal_briefing(conversation_memory: Dict[str, Any] | None, messages
 
     opportunity_needs = related_labels or ([_service_label(primary_track)] if primary_track else [])
     opportunity = "Atuação combinada em "
-    if multi_front:
+    if solution == "chatbot com IA":
+        opportunity += "agente de IA, automação de WhatsApp e estruturação do fluxo comercial."
+    elif multi_front:
         opportunity += "automação de WhatsApp, revisão da jornada comercial, comunicação da oferta e organização de campanhas."
     elif opportunity_needs:
         opportunity += f"{', '.join(opportunity_needs)}, conectando diagnóstico comercial com execução prática."
@@ -1807,6 +1956,10 @@ def build_internal_briefing(conversation_memory: Dict[str, Any] | None, messages
         "entry_channel": channel_phrase,
         "business": business_phrase,
         "commercial_goal": goal_phrase,
+        "solution": solution,
+        "objective": objective or goal_phrase,
+        "pain": pain or problem_phrase,
+        "process": process or tools_phrase,
         "pain_points": pain_points,
         "goals": goals,
         "urgency": urgency or ("alta" if high_urgency else None),

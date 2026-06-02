@@ -314,7 +314,7 @@ def test_all_service_buttons():
         if choice_id == "service_human":
             assert_equal("human handoff", step["state_after"]["handoff"], True)
             assert_true("human direct link", "https://wa.me/5511973510549" in step["reply"])
-            assert_true("human link has no prefilled text", "?text=" not in step["reply"])
+            assert_true("human link has prefilled text", "?text=" in step["reply"])
         else:
             assert_equal(f"{choice_id} not handoff", bool(step["state_after"]["handoff"]), False)
 
@@ -362,13 +362,13 @@ def test_real_meta_list_reply_automation_payload():
     assert_equal("choice_id", step1["normalized_choice"]["choice_id"], "service_automation")
     assert_equal("service_interest", state["service_interest"], "automacao_whatsapp")
     assert_true("reply interprets automation", "atendimento" in step1["reply"].lower())
-    assert_true("reply asks source", "WhatsApp, Instagram ou site" in step1["reply"])
+    assert_true("reply asks source", "Por qual canal você mais recebe oportunidades comerciais hoje?" in step1["reply"])
 
     step2 = pipeline_step(state, message="WhatsApp")
     state = step2["state_after"]
     assert_equal("lead_source", state["lead_source"], "WhatsApp")
-    assert_true("reply asks tools", "manualmente" in step2["reply"] and "automação" in step2["reply"])
-    assert_true("did not repeat source", "Hoje os contatos chegam mais pelo WhatsApp, Instagram ou site?" not in step2["reply"])
+    assert_true("reply asks tools", "manual" in step2["reply"] and "automatizado" in step2["reply"])
+    assert_true("did not repeat source", "Por qual canal você mais recebe oportunidades comerciais hoje?" not in step2["reply"])
 
 
 def test_progressive_discovery_whatsapp_manual_vender_mais():
@@ -430,7 +430,7 @@ def test_ai_repeat_is_blocked():
         state,
         {
             "lead_source": "WhatsApp",
-            "last_question_asked": "Hoje os contatos chegam mais pelo WhatsApp, Instagram ou site?",
+            "last_question_asked": "Por qual canal você mais recebe oportunidades comerciais hoje?",
             "last_question_category": "lead_source",
         },
     )
@@ -438,7 +438,7 @@ def test_ai_repeat_is_blocked():
         state,
         message="whatsapp",
         ai_result={
-            "reply": "Hoje os contatos chegam mais pelo WhatsApp, Instagram ou site?",
+            "reply": "Por qual canal você mais recebe oportunidades comerciais hoje?",
             "intent": "automacao_whatsapp",
             "next_action": "ask_question",
             "lead_fields": {"lead_source": "WhatsApp"},
@@ -553,7 +553,7 @@ def test_ai_three_channels_short_answer():
         {
             "main_goal": "atendimento",
             "current_problem": "atendimento",
-            "last_question_asked": "Hoje esses contatos chegam mais pelo WhatsApp, Instagram ou site?",
+            "last_question_asked": "Por qual canal você mais recebe oportunidades comerciais hoje?",
             "last_question_category": "lead_source",
         },
     )
@@ -613,7 +613,7 @@ def test_branding_growth_advances_to_frequency():
 def test_all_initial_buttons_have_consultive_tracks():
     cases = {
         "service_site": ("site_scope", "página"),
-        "service_automation": ("lead_source", "WhatsApp"),
+        "service_automation": ("lead_source", "oportunidades comerciais"),
         "service_ai": ("main_goal", "processo"),
         "service_traffic": ("current_status", "anunciam"),
         "service_branding": ("main_goal", "posicionamento"),
@@ -838,7 +838,7 @@ def test_ai_fields_do_not_turn_lead_source_into_current_tools():
         state,
         {
             "last_question_category": "lead_source",
-            "last_question_asked": "Hoje os contatos chegam mais pelo WhatsApp, Instagram ou site?",
+            "last_question_asked": "Por qual canal você mais recebe oportunidades comerciais hoje?",
         },
     )
     signals = {"lead_source": "WhatsApp", "funnel_stage": "qualificacao"}
@@ -925,19 +925,25 @@ def test_explicit_site_scope_change_allowed():
 
 
 def test_handoff_reply_includes_julia_link():
-    from app import JULIA_DIRECT_LINK, JULIA_HANDOFF_REPLY
+    from app import JULIA_DIRECT_LINK, build_handoff_lead_reply
 
-    expected = (
-        "Perfeito. Já tenho contexto suficiente para direcionar você da melhor forma.\n\n"
-        "Você pode continuar diretamente com a Julia:\n\n"
-        f"{JULIA_DIRECT_LINK}"
+    reply = build_handoff_lead_reply(
+        {
+            "primary_track": "ia_no_negocio",
+            "solution": "chatbot com IA",
+            "objective": "vender mais",
+            "pain": "falta de automação no atendimento",
+            "process": "atendimento/vendas",
+        }
     )
-    assert_equal("handoff exact reply", JULIA_HANDOFF_REPLY, expected)
-    assert_true("handoff has no encoded text", "?text=" not in JULIA_HANDOFF_REPLY)
-    assert_true("client has no strategic synthesis", "Síntese estratégica" not in JULIA_HANDOFF_REPLY)
-    assert_true("client has no opportunity", "Oportunidade percebida" not in JULIA_HANDOFF_REPLY)
-    assert_true("client has no commercial reading", "Leitura comercial" not in JULIA_HANDOFF_REPLY)
-    assert_true("client has no next step", "Próximo passo" not in JULIA_HANDOFF_REPLY)
+    assert_true("handoff has Julia link", f"{JULIA_DIRECT_LINK}?text=" in reply)
+    decoded = urllib.parse.unquote(reply.split("?text=", 1)[1])
+    assert_true("client mini briefing", "chatbot com IA" in reply)
+    assert_true("decoded mini briefing", "Quero criar um chatbot com IA para automatizar o atendimento e vender mais." in decoded)
+    assert_true("client has no strategic synthesis", "Síntese estratégica" not in reply)
+    assert_true("client has no opportunity", "Oportunidade percebida" not in reply)
+    assert_true("client has no commercial reading", "Leitura estratégica" not in reply)
+    assert_true("client has no next step", "Próximo movimento recomendado" not in reply)
 
 
 def test_prefilled_julia_link_contains_encoded_context():
@@ -994,6 +1000,61 @@ def test_internal_operation_briefing_without_link():
     assert_true("no wa link", "wa.me" not in message)
     assert_true("no crm style language", "Contato sinaliza aderência" not in message)
     assert_true("no generic ai language", "A frente mais aderente parece ser" not in message)
+
+
+def test_ai_chatbot_sales_flow_handoffs_without_repeating_questions():
+    from app import OPERATION_BRIEFING_NUMBERS, _build_julia_briefing_message
+
+    state = pipeline_step(sales_brain.default_lead_state(), list_id="service_ai")["state_after"]
+    replies = []
+    for message in [
+        "criar chatbot com inteligencia artificial",
+        "vendas",
+        "falta de automacao no atendimento",
+        "a falta da automacao de chatbot",
+        "quero vender mais",
+        "como eu falo com um humano",
+    ]:
+        step = pipeline_step(state, message=message)
+        replies.append(step["reply"])
+        state = step["state_after"]
+
+    flat = sales_brain.flatten_state(state)
+    assert_equal("primary_track", flat["primary_track"], "ia_no_negocio")
+    assert_equal("solution", flat["solution"], "chatbot com IA")
+    assert_equal("objective", flat["objective"], "vender mais")
+    assert_equal("pain", flat["pain"], "falta de automação no atendimento")
+    assert_equal("should handoff now", sales_brain.should_handoff_now(flat, [{"direction": "in", "text": "como eu falo com um humano"}]), True)
+    assert_true("client link with mini briefing", "https://wa.me/5511973510549?text=" in replies[-1])
+    decoded = urllib.parse.unquote(replies[-1].split("?text=", 1)[1])
+    assert_true("decoded chatbot", "chatbot com IA" in decoded)
+    assert_true("decoded vendas", "vender mais" in decoded)
+    assert_true("no repeated generic trava", sum("Qual trava mais atrapalha" in reply for reply in replies) == 0)
+    assert_true("no repeated lead source", sum("Por qual canal você mais recebe oportunidades comerciais hoje?" in reply for reply in replies) <= 1)
+    assert_true("no repeated manual automation", sum("Hoje vocês atendem manualmente" in reply for reply in replies) <= 1)
+    assert_equal("operation recipients", OPERATION_BRIEFING_NUMBERS, ["5511973510549", "5511972769605"])
+
+    briefing = sales_brain.build_internal_briefing(flat, [{"direction": "in", "text": msg} for msg in [
+        "criar chatbot com inteligencia artificial",
+        "vendas",
+        "falta de automacao no atendimento",
+        "a falta da automacao de chatbot",
+        "quero vender mais",
+        "como eu falo com um humano",
+    ]])
+    internal = _build_julia_briefing_message(
+        wa_id="5511972769605",
+        user={"nome": "Kleber Willians", "telefone": "5511972769605"},
+        result={"lead_temperature": "hot", "lead_fields": flat, "briefing": briefing},
+    )
+    assert_true("internal title", "✨ Novo contato qualificado pela Mugô" in internal)
+    assert_true("internal moment", "chatbot com inteligência artificial" in internal)
+    assert_true("internal opportunity", "agente de IA" in internal and "automação de WhatsApp" in internal)
+    lowered = sales_brain.normalize_text(internal)
+    assert_true("no outro", "outro" not in lowered)
+    assert_true("no humano", "humano" not in lowered)
+    assert_true("no generic contact", "contato iniciou conversa" not in lowered)
+    assert_true("no generic clarity", "aumento de clareza comercial e conversao" not in lowered)
 
 
 def test_internal_briefing_consolidates_long_integrated_flow():
@@ -1066,7 +1127,7 @@ def test_internal_briefing_transforms_vague_help_requests():
 
 
 def test_human_request_ends_with_single_client_reply_and_internal_context():
-    from app import JULIA_HANDOFF_REPLY, build_internal_briefing
+    from app import build_internal_briefing
 
     state = state_with_choice("service_automation")
     state = sales_brain.merge_state(
@@ -1079,7 +1140,7 @@ def test_human_request_ends_with_single_client_reply_and_internal_context():
         },
     )
     step = pipeline_step(state, message="quero falar com atendente")
-    assert_equal("reply fixed", step["reply"], JULIA_HANDOFF_REPLY)
+    assert_true("reply has mini link", "https://wa.me/5511973510549?text=" in step["reply"])
     assert_true("client no briefing title", "Novo contato qualificado" not in step["reply"])
     briefing = build_internal_briefing(step["state_after"], [{"direction": "in", "text": "quero falar com atendente"}])
     assert_true("briefing keeps context", "perda de leads" in str(briefing) or "vendas" in str(briefing))
@@ -1146,7 +1207,7 @@ def test_handoff_opening_varies_from_last_reply():
     third = build_handoff_lead_reply({"last_question_asked": second})
     assert_equal("fixed first", first, second)
     assert_equal("fixed second", second, third)
-    assert_true("fixed starts perfeito", first.startswith("Perfeito. Já tenho contexto suficiente"))
+    assert_true("fixed starts perfeito", first.startswith("Perfeito. Já entendi o cenário"))
 
 
 def test_followup_created_for_handoff():
@@ -1270,7 +1331,7 @@ def test_known_lead_source_blocks_repeat():
             "last_question_category": "lead_source",
         },
     )
-    result = sales_brain.validate_final_reply("Hoje os contatos chegam mais pelo WhatsApp, Instagram ou site?", state)
+    result = sales_brain.validate_final_reply("Por qual canal você mais recebe oportunidades comerciais hoje?", state)
     assert_equal("blocked", result["blocked"], True)
     assert_true("reason", result["reason"] in {"duplicate_last_question", "known_lead_source"})
     assert_equal("replacement category", result["category"], "current_tools")
@@ -1366,6 +1427,7 @@ def main():
         ("handoff_reply_includes_julia_link", test_handoff_reply_includes_julia_link),
         ("prefilled_julia_link_contains_encoded_context", test_prefilled_julia_link_contains_encoded_context),
         ("internal_operation_briefing_without_link", test_internal_operation_briefing_without_link),
+        ("ai_chatbot_sales_flow_handoffs_without_repeating_questions", test_ai_chatbot_sales_flow_handoffs_without_repeating_questions),
         ("internal_briefing_consolidates_long_integrated_flow", test_internal_briefing_consolidates_long_integrated_flow),
         ("internal_briefing_transforms_vague_help_requests", test_internal_briefing_transforms_vague_help_requests),
         ("human_request_ends_with_single_client_reply_and_internal_context", test_human_request_ends_with_single_client_reply_and_internal_context),

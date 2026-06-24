@@ -674,6 +674,11 @@ function AgendaTaskCard({ task, conv, owner, attendanceMeta, stage, onOpen, onDo
 export default function App() {
   const [view, setView] = useState("dashboard");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [leadPanelOpen, setLeadPanelOpen] = useState(() => {
+    if (typeof window === "undefined") return true;
+    return window.innerWidth >= 1280;
+  });
+  const [mobileChatOpen, setMobileChatOpen] = useState(false);
   const [convs, setConvs] = useState([]);
   const [selected, setSelected] = useState(null);
   const [msgs, setMsgs] = useState([]);
@@ -1777,6 +1782,7 @@ export default function App() {
     });
     setSelected(wa_id);
     setView("inbox");
+    setMobileChatOpen(true);
 
     requestAnimationFrame(() => {
       scrollSelectedConversationIntoView();
@@ -2394,8 +2400,15 @@ export default function App() {
     return () => window.cancelAnimationFrame(frame);
   }, [selectedConv]);
 
+  const shellClassName = [
+    "wbShell",
+    view === "inbox" ? "isInbox" : "",
+    leadPanelOpen ? "leadPanelOpen" : "leadPanelClosed",
+    mobileChatOpen ? "mobileChatOpen" : "mobileListOpen",
+  ].filter(Boolean).join(" ");
+
   return (
-    <div className="wbShell">
+    <div className={shellClassName}>
       <aside className="wbRail">
         <div className="wbBrand">
           <img src={logoMugo} alt="Mugô" />
@@ -2465,6 +2478,13 @@ export default function App() {
         </div>
 
         <div className="wbSidebarFilters">
+          <select className="wbMobileFilterSelect" value={inboxFilter} onChange={(e) => setInboxFilter(e.target.value)}>
+            <option value="todas">Todas</option>
+            <option value="minhas">Minhas</option>
+            <option value="nao_atribuidas">Não atribuídas</option>
+            <option value="resolvidas">Resolvidas</option>
+            <option value="responsavel">Por responsável</option>
+          </select>
           {[
             ["todas", "Todas"],
             ["minhas", "Minhas"],
@@ -2627,7 +2647,18 @@ export default function App() {
               </div>
             ) : null}
 
-            <button className="wbBtnGhost" onClick={() => setSidebarCollapsed((prev) => !prev)}>
+            {view === "inbox" ? (
+              <>
+                <button className="wbBtnGhost wbMobileBackBtn" onClick={() => setMobileChatOpen(false)}>
+                  Voltar para conversas
+                </button>
+                <button className="wbBtnGhost" onClick={() => setLeadPanelOpen((prev) => !prev)} disabled={!selected}>
+                  {leadPanelOpen ? "Ocultar painel" : "Abrir painel"}
+                </button>
+              </>
+            ) : null}
+
+            <button className="wbBtnGhost wbHeaderFilterToggle" onClick={() => setSidebarCollapsed((prev) => !prev)}>
               {sidebarCollapsed ? "Mostrar filtros" : "Ocultar filtros"}
             </button>
 
@@ -2646,60 +2677,60 @@ export default function App() {
 
             {view === "inbox" ? (
               <>
-                <button className="wbBtn" onClick={onAssumeConversation} disabled={!selected}>
+                <button className="wbBtn wbDesktopAction" onClick={onAssumeConversation} disabled={!selected}>
                   Assumir atendimento
                 </button>
 
                 {canManageAllConversations(currentRole) ? (
                   <>
-                    <select className="wbHeaderSelect" value={transferOwner} onChange={(e) => setTransferOwner(e.target.value)} disabled={!selected}>
+                    <select className="wbHeaderSelect wbDesktopAction" value={transferOwner} onChange={(e) => setTransferOwner(e.target.value)} disabled={!selected}>
                       <option value="">Sem responsável</option>
                       {responsibleOptions.map((owner) => (
                         <option key={owner} value={owner}>{owner}</option>
                       ))}
                     </select>
-                    <button className="wbBtnGhost" onClick={onTransferConversation} disabled={!selected || !transferOwner}>
+                    <button className="wbBtnGhost wbDesktopAction" onClick={onTransferConversation} disabled={!selected || !transferOwner}>
                       Transferir
                     </button>
                   </>
                 ) : null}
 
-                <select className="wbHeaderSelect" value={statusDraft} onChange={(e) => setStatusDraft(e.target.value)} disabled={!selected}>
+                <select className="wbHeaderSelect wbDesktopAction" value={statusDraft} onChange={(e) => setStatusDraft(e.target.value)} disabled={!selected}>
                   {CONVERSATION_STATUSES.map((status) => (
                     <option key={status} value={status}>{status}</option>
                   ))}
                 </select>
-                <button className="wbBtnGhost" onClick={onChangeConversationStatus} disabled={!selected || !statusDraft}>
+                <button className="wbBtnGhost wbDesktopAction" onClick={onChangeConversationStatus} disabled={!selected || !statusDraft}>
                   Alterar status
                 </button>
 
-                <button className="wbBtn" onClick={() => inputRef.current?.focus?.()} disabled={!selected}>
+                <button className="wbBtn wbDesktopAction" onClick={() => inputRef.current?.focus?.()} disabled={!selected}>
                   Nova mensagem
                 </button>
 
-                <button className="wbBtnGhost" onClick={onCreateTaskQuick} disabled={!selected}>
+                <button className="wbBtnGhost wbDesktopAction" onClick={onCreateTaskQuick} disabled={!selected}>
                   Nova tarefa
                 </button>
 
-                <button className="wbBtnGhost" onClick={openEditContact} disabled={!selected}>
+                <button className="wbBtnGhost wbDesktopAction" onClick={openEditContact} disabled={!selected}>
                   Editar contato
                 </button>
 
                 {currentRole === "admin" ? (
-                  <button className="wbBtnGhost" onClick={onArchiveConversation} disabled={!selected}>
+                  <button className="wbBtnGhost wbDesktopAction" onClick={onArchiveConversation} disabled={!selected}>
                     {isArchivedConversation(selectedConv) ? "Desarquivar" : "Arquivar"}
                   </button>
                 ) : null}
 
                 {selectedConv?.handoff_active || selectedConv?.operation_status === "handoff" ? (
-                  <button className="wbBtnGhost" onClick={onCloseHandoff}>
+                  <button className="wbBtnGhost wbDesktopAction" onClick={onCloseHandoff}>
                     Encerrar atendimento
                   </button>
                 ) : null}
 
                 {currentRole === "admin" ? (
                   <button
-                    className="wbBtnGhost"
+                    className="wbBtnGhost wbDesktopAction"
                     onClick={(e) => {
                       e.preventDefault();
                       e.stopPropagation();
@@ -3109,14 +3140,34 @@ export default function App() {
                 </section>
 
                 <footer className="wbComposer">
+                  <div className="wbComposerTools">
+                    {selectedHasDiagnosis ? (
+                      <button className="wbBtnGhost wbBtnGhostCompact" onClick={suggestContinueAttendanceMessage} disabled={!selected}>
+                        Usar diagnóstico
+                      </button>
+                    ) : (
+                      <button className="wbBtnGhost wbBtnGhostCompact" onClick={suggestMugoIntelligenceMessage} disabled={!selected}>
+                        Enviar Intelligence
+                      </button>
+                    )}
+                    <button className="wbBtnGhost wbBtnGhostCompact" onClick={onAssumeConversation} disabled={!selected}>
+                      Assumir
+                    </button>
+                  </div>
                   <div className="wbComposerInner">
-                    <input
+                    <textarea
                       ref={inputRef}
                       value={text}
                       onChange={(e) => setText(e.target.value)}
                       placeholder={selected ? "Escreva sua mensagem..." : "Selecione uma conversa para continuar o atendimento"}
                       disabled={!selected}
-                      onKeyDown={(e) => (e.key === "Enter" ? onSend() : null)}
+                      rows={2}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" && !e.shiftKey) {
+                          e.preventDefault();
+                          onSend();
+                        }
+                      }}
                     />
                     <button className="wbSend" onClick={onSend} disabled={!selected || !text.trim()}>
                       Enviar
@@ -3125,7 +3176,11 @@ export default function App() {
                 </footer>
               </div>
 
+              {leadPanelOpen ? (
               <aside className="wbRightPanel">
+                <button className="wbBtnGhost wbPanelClose" onClick={() => setLeadPanelOpen(false)}>
+                  Ocultar painel
+                </button>
                 <div className="wbSideBlock">
                   <div className="wbSideTitle">Dados do contato</div>
                   <div className="wbInfoGrid">
@@ -3206,6 +3261,7 @@ export default function App() {
                   <p className="wbSideNote">{selectedConv?.notes || selectedStrategicSnapshot.nextStep || "Sem observações internas ainda."}</p>
                 </div>
               </aside>
+              ) : null}
             </div>
           </section>
         ) : view === "kanban" ? (

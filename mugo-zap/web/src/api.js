@@ -158,6 +158,45 @@ export async function updateContact(wa_id, payload) {
   });
 }
 
+export async function assignConversation(wa_id, payload) {
+  return apiFetch(`/api/attendance/conversations/${encodeURIComponent(wa_id)}/assign`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload || {}),
+  });
+}
+
+export async function updateConversationStatus(wa_id, payload) {
+  return apiFetch(`/api/attendance/conversations/${encodeURIComponent(wa_id)}/status`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload || {}),
+  });
+}
+
+export async function listUsers() {
+  const r = await apiFetch("/api/users");
+  return Array.isArray(r?.items) ? r.items : [];
+}
+
+export async function createUser(payload) {
+  const r = await apiFetch("/api/users", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload || {}),
+  });
+  return r?.user || r;
+}
+
+export async function updateUser(id, payload) {
+  const r = await apiFetch(`/api/users/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload || {}),
+  });
+  return r?.user || r;
+}
+
 export async function listTasks(params = {}) {
   const qs = new URLSearchParams();
 
@@ -212,6 +251,43 @@ export async function getDashboardSummary() {
     leads_by_entry_type: {},
     leads_by_status: {},
   };
+}
+
+export async function getAttendanceMeta() {
+  const r = await apiFetch("/api/attendance/meta");
+  return r || { queues: [], statuses: [], welcome_message: "" };
+}
+
+export async function submitAttendanceDiagnosis(wa_id, payload) {
+  return apiFetch(`/api/attendance/conversations/${encodeURIComponent(wa_id)}/diagnosis`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload || {}),
+  });
+}
+
+export async function createAttendanceContact(payload) {
+  return apiFetch("/api/attendance/contacts", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload || {}),
+  });
+}
+
+export async function createAttendanceCollection(payload) {
+  return apiFetch("/api/attendance/collections", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload || {}),
+  });
+}
+
+export async function sendAttendanceCollectionReminder(wa_id, payload) {
+  return apiFetch(`/api/attendance/collections/${encodeURIComponent(wa_id)}/remind`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload || {}),
+  });
 }
 
 export async function runFollowups() {

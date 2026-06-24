@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import "./App.css";
 import { supabase } from "./lib/supabaseClient";
 
@@ -14,8 +14,18 @@ import {
   updateTask,
   sseUrl,
   deleteConversation,
+  assignConversation,
+  updateConversationStatus,
+  listUsers,
+  createUser,
+  updateUser,
   getDashboardSummary,
   getMe,
+  getAttendanceMeta,
+  submitAttendanceDiagnosis,
+  createAttendanceContact,
+  createAttendanceCollection,
+  sendAttendanceCollectionReminder,
 } from "./api";
 import logoMugo from "./assets/logo-mugo.png";
 
@@ -24,6 +34,24 @@ const LS_SEEN_KEY = "mugozap_seen_v1";
 
 const STAGES = ["Novo", "Qualificado", "Diagnóstico", "Proposta", "Negociação", "Fechado"];
 const TASK_COLS = ["Atrasadas", "Hoje", "Amanhã", "Esta semana", "Futuro", "Sem data"];
+const ATTENDANCE_TABS = ["inbox", "diagnostico", "contatos", "cobrancas"];
+const CONTACT_STATUSES = [
+  "Novo lead",
+  "Diagnóstico enviado",
+  "Diagnóstico concluído",
+  "Orçamento enviado",
+  "Cliente ativo",
+  "Suporte",
+  "Cobrança",
+];
+const COLLECTION_STATUSES = ["Em aberto", "Pago", "Atrasado"];
+const TEMPERATURES = ["Frio", "Morno", "Quente"];
+const USER_ROLES = ["admin", "gestor", "atendimento"];
+const CONVERSATION_STATUSES = ["Novo lead", "Diagnóstico enviado", "Diagnóstico concluído", "Orçamento enviado", "Cliente ativo", "Suporte", "Cobrança", "Resolvida"];
+const MUGO_INTELLIGENCE_MESSAGE =
+  "Para entendermos melhor seu momento e indicarmos o melhor caminho para sua empresa, faça nosso diagnóstico gratuito:\n\n" +
+  "https://intelligence.mugoagencia.com.br/\n\n" +
+  "Assim que você finalizar, seguimos seu atendimento por aqui.";
 
 function dbg(label, payload = null) {
   console.log("[MUGO_DEBUG]", label, payload);
@@ -54,6 +82,20 @@ function clip(text, max = 80) {
 
 function onlyDigits(v) {
   return String(v || "").replace(/\D/g, "");
+}
+
+function normalizeTemperatureLabel(value) {
+  const raw = String(value || "").trim().toLowerCase();
+  if (raw === "frio" || raw === "cold") return "Frio";
+  if (raw === "quente" || raw === "hot") return "Quente";
+  return raw ? "Morno" : "";
+}
+
+function temperatureBadgeClass(value) {
+  const temp = normalizeTemperatureLabel(value);
+  if (temp === "Quente") return "hot";
+  if (temp === "Frio") return "cold";
+  return temp ? "warm" : "";
 }
 
 function formatPhoneBR(v) {
@@ -195,13 +237,6 @@ function isTestConversation(conv) {
     phone.endsWith("0000") ||
     phone === "5511999999999"
   );
-}
-
-function matchesStatusFilter(conv, statusFilter) {
-  if (statusFilter === "todos") return true;
-  if (statusFilter === "arquivados") return isArchivedConversation(conv);
-  if (statusFilter === "ativos") return !isArchivedConversation(conv);
-  return String(conv?.operation_status || "").trim() === statusFilter;
 }
 
 function taskBucket(due_at) {
@@ -456,12 +491,184 @@ function getAttendanceModeMeta(mode) {
   return { label: "não definido", className: "wbBadge" };
 }
 
+function normalizeContactStatus(value) {
+  const s = String(value || "").trim();
+  return CONTACT_STATUSES.includes(s) ? s : "Novo lead";
+}
+
+function normalizeCollectionStatus(value) {
+  const s = String(value || "").trim();
+  return COLLECTION_STATUSES.includes(s) ? s : "Em aberto";
+}
+
+function normalizeRole(value) {
+  const role = String(value || "").trim().toLowerCase();
+  if (role === "admin") return "admin";
+  if (role === "gestor") return "gestor";
+  return "atendimento";
+}
+
+function canManageUsers(role) {
+  return normalizeRole(role) === "admin";
+}
+
+function canManageAllConversations(role) {
+  return ["admin", "gestor"].includes(normalizeRole(role));
+}
+
+function canAccessBilling(role) {
+  return ["admin", "gestor"].includes(normalizeRole(role));
+}
+
+function getConversationOwner(conv) {
+  return String(conv?.assigned_to || conv?.human_owner || conv?.owner || "").trim();
+}
+
+function userDisplayName(user) {
+  return String(user?.name || user?.email || "").trim();
+}
+
+function formatMoneyBR(value) {
+  const s = String(value || "").trim();
+  if (!s) return "";
+  if (s.startsWith("R$")) return s;
+  const n = Number(s.replace(/\./g, "").replace(",", "."));
+  if (Number.isFinite(n)) {
+    return n.toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
+  }
+  return s;
+}
+
+function formatDateBR(value) {
+  if (!value) return "";
+  const d = new Date(`${value}`.includes("T") ? value : `${value}T12:00:00`);
+  if (Number.isNaN(d.getTime())) return String(value || "");
+  return d.toLocaleDateString("pt-BR");
+}
+
+function getDiagnosisFromConv(conv, flowData = null) {
+  const data =
+    flowData ||
+    (typeof conv?.flow_data === "object"
+      ? conv.flow_data
+      : (() => {
+          try {
+            return conv?.flow_data ? JSON.parse(conv.flow_data) : {};
+          } catch {
+            return {};
+          }
+        })());
+  const diagnosis = data?.diagnosis_summary || data?.attendance_summary?.diagnosis || conv?.diagnosis || {};
+
+  return {
+    name: diagnosis.name || conv?.name || conv?.contact_name || "",
+    company: diagnosis.company || conv?.company || "",
+    phone: diagnosis.phone || conv?.telefone || conv?.phone || conv?.wa_id || "",
+    email: diagnosis.email || conv?.email || "",
+    segment: diagnosis.segment || conv?.segment || "",
+    score_overall: diagnosis.score_overall || conv?.score_overall || "",
+    score_marketing: diagnosis.score_marketing || "",
+    score_sales: diagnosis.score_sales || "",
+    score_automation: diagnosis.score_automation || "",
+    score_data: diagnosis.score_data || "",
+    score_relationship: diagnosis.score_relationship || "",
+    opportunity: diagnosis.opportunity || conv?.lead_theme || "",
+    recommended_service: diagnosis.recommended_service || conv?.service || "",
+    summary: diagnosis.summary || diagnosis.resumo_gerado || conv?.notes || "",
+    temperature: normalizeTemperatureLabel(diagnosis.temperature || conv?.lead_temperature || conv?.temperature || ""),
+  };
+}
+
+function hasDiagnosis(diagnosis) {
+  return Boolean(
+    diagnosis &&
+      [
+        diagnosis.name,
+        diagnosis.company,
+        diagnosis.email,
+        diagnosis.segment,
+        diagnosis.score_overall,
+        diagnosis.opportunity,
+        diagnosis.recommended_service,
+        diagnosis.summary,
+      ].some((item) => String(item || "").trim())
+  );
+}
+
+function buildContactPayloadFromConv(conv = {}) {
+  return {
+    name: conv.name || conv.contact_name || "",
+    company: conv.company || "",
+    telefone: conv.telefone || conv.phone || conv.wa_id || "",
+    wa_id: conv.wa_id || conv.telefone || "",
+    email: conv.email || "",
+    instagram: conv.instagram || "",
+    site: conv.site || conv.website || "",
+    service_interest: conv.service_interest || conv.lead_theme || "",
+    service_contracted: conv.service_contracted || conv.service || "",
+    owner: conv.assigned_to || conv.human_owner || conv.owner || "",
+    status: normalizeContactStatus(conv.status || conv.stage || conv.lead_stage || ""),
+    notes: conv.notes || "",
+  };
+}
+
+function buildCollectionReminderMessage(collection = {}) {
+  const amount = formatMoneyBR(collection.amount || collection.valor);
+  const due = formatDateBR(collection.due_date || collection.vencimento);
+  if (amount && due) {
+    return `Olá! Este é um lembrete de cobrança da Mugô no valor de ${amount}, com vencimento em ${due}. Favor confirmar o pagamento ou entrar em contato conosco.`;
+  }
+  if (amount) {
+    return `Olá! Este é um lembrete de cobrança da Mugô no valor de ${amount}. Favor confirmar o pagamento ou entrar em contato conosco.`;
+  }
+  return "Olá! Este é um lembrete de cobrança da Mugô. Favor confirmar o pagamento ou entrar em contato conosco.";
+}
+
 function sortByRecent(items) {
   return [...(items || [])].sort((a, b) => {
     const ta = getConversationLastActivityAt(a) ? new Date(getConversationLastActivityAt(a)).getTime() : 0;
     const tb = getConversationLastActivityAt(b) ? new Date(getConversationLastActivityAt(b)).getTime() : 0;
     return tb - ta;
   });
+}
+
+function AgendaTaskCard({ task, conv, owner, attendanceMeta, stage, onOpen, onDone, onDragStart }) {
+  return (
+    <div
+      className="wbCard"
+      draggable
+      onDragStart={(e) => onDragStart(e, task.id)}
+    >
+      <div className="wbCardTop">
+        <div className="wbAvatar small">{String(task.wa_id || "X").slice(0, 1)}</div>
+        <div className="wbCardTitle">{task.title}</div>
+        <div className="wbCardTime">{shortTime(task.due_at)}</div>
+      </div>
+
+      <div className="wbCardSub">{getDisplayName(conv) || formatPhoneBR(task.wa_id)}</div>
+      <div className="wbCardPreview">Vencimento: {nowLocalTime(task.due_at)}</div>
+
+      <div className="wbCardBadges">
+        {owner ? <span className="wbBadge">{normalizeOwnerLabel(owner)}</span> : null}
+        {stage ? <span className="wbBadge ok">{stage}</span> : null}
+        {conv?.source || conv?.last_source ? (
+          <span className="wbBadge">
+            {normalizeSourceLabel(conv?.source || conv?.last_source)}
+          </span>
+        ) : null}
+        <span className={attendanceMeta.className}>{attendanceMeta.label}</span>
+      </div>
+
+      <div className="wbCardBadges">
+        <button className="wbBtnGhost" onClick={() => onOpen(task.wa_id)} style={{ padding: "8px 10px" }}>
+          Abrir
+        </button>
+        <button className="wbBtn" onClick={() => onDone(task.id)} style={{ padding: "8px 10px" }}>
+          Concluir
+        </button>
+      </div>
+    </div>
+  );
 }
 
 export default function App() {
@@ -473,18 +680,16 @@ export default function App() {
   const [q, setQ] = useState("");
   const [text, setText] = useState("");
   const [err, setErr] = useState("");
-  const [sourceFilter, setSourceFilter] = useState("todos");
-  const [statusFilter, setStatusFilter] = useState("ativos");
-  const [ownerFilter, setOwnerFilter] = useState("todos");
-  const [testFilter, setTestFilter] = useState("todos");
   const [dashboardFilter, setDashboardFilter] = useState("todos");
+  const [inboxFilter, setInboxFilter] = useState("todas");
+  const [responsibleFilter, setResponsibleFilter] = useState("todos");
   const [refreshingAll, setRefreshingAll] = useState(false);
   const [refreshingTasksSummary, setRefreshingTasksSummary] = useState(false);
 
   const [loadingConvs, setLoadingConvs] = useState(true);
   const [loadingMsgs, setLoadingMsgs] = useState(false);
-  const [loadingTasks, setLoadingTasks] = useState(false);
-  const [loadingDashboard, setLoadingDashboard] = useState(false);
+  const [, setLoadingTasks] = useState(false);
+  const [, setLoadingDashboard] = useState(false);
   const [deletingConv, setDeletingConv] = useState(false);
 
   const [stages, setStages] = useState(() => loadJSON(LS_STAGE_KEY, {}));
@@ -508,6 +713,49 @@ export default function App() {
   const [editAttendanceMode, setEditAttendanceMode] = useState("hybrid");
   const [editSource, setEditSource] = useState("");
 
+  const [currentUser, setCurrentUser] = useState(null);
+  const currentRole = normalizeRole(currentUser?.role);
+  const [users, setUsers] = useState([]);
+  const [usersLoading, setUsersLoading] = useState(false);
+  const [userSaving, setUserSaving] = useState(false);
+  const [newUser, setNewUser] = useState({ name: "", email: "", role: "atendimento", password: "" });
+  const [transferOwner, setTransferOwner] = useState("");
+  const [statusDraft, setStatusDraft] = useState("Novo lead");
+
+  const [attendanceContact, setAttendanceContact] = useState(() => buildContactPayloadFromConv({}));
+  const [attendanceContactSaving, setAttendanceContactSaving] = useState(false);
+  const [diagnosisForm, setDiagnosisForm] = useState({
+    name: "",
+    company: "",
+    phone: "",
+    email: "",
+    segment: "",
+    score_overall: "",
+    score_marketing: "",
+    score_sales: "",
+    score_automation: "",
+    score_data: "",
+    score_relationship: "",
+    opportunity: "",
+    recommended_service: "",
+    summary: "",
+    temperature: "Morno",
+  });
+  const [diagnosisSaving, setDiagnosisSaving] = useState(false);
+  const [collections, setCollections] = useState([]);
+  const [collectionForm, setCollectionForm] = useState({
+    cliente: "",
+    empresa: "",
+    wa_id: "",
+    telefone: "",
+    amount: "",
+    due_date: "",
+    status: "Em aberto",
+    notes: "",
+  });
+  const [collectionSaving, setCollectionSaving] = useState(false);
+  const [reminderSending, setReminderSending] = useState(false);
+
   const [toast, setToast] = useState(null);
 
   const [dashboardSummary, setDashboardSummary] = useState({
@@ -521,6 +769,7 @@ export default function App() {
     leads_by_entry_type: {},
     leads_by_status: {},
   });
+  const [attendanceMeta, setAttendanceMeta] = useState({ queues: [], statuses: [], welcome_message: "" });
 
   const esRef = useRef(null);
   const inputRef = useRef(null);
@@ -533,6 +782,7 @@ export default function App() {
   const lastMessageCountRef = useRef(0);
   const knownConvIdsRef = useRef(new Set());
   const toastTimerRef = useRef(null);
+  const clientIdSeqRef = useRef(0);
 
   const selectedConv = useMemo(
     () => convs.find((c) => c.wa_id === selected) || null,
@@ -553,6 +803,28 @@ export default function App() {
   }, [selected]);
 
   useEffect(() => {
+    let active = true;
+
+    async function loadAttendanceMeta() {
+      try {
+        const meta = await getAttendanceMeta();
+        if (active) {
+          setAttendanceMeta(meta || { queues: [], statuses: [], welcome_message: "" });
+        }
+      } catch (e) {
+        if (active) {
+          console.warn("attendance meta unavailable", e);
+        }
+      }
+    }
+
+    loadAttendanceMeta();
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
     convsRef.current = convs;
   }, [convs]);
 
@@ -570,7 +842,7 @@ export default function App() {
     }
 
     setToast({
-      id: Date.now(),
+      id: `toast-${++clientIdSeqRef.current}`,
       message,
       actionLabel,
       action,
@@ -847,6 +1119,21 @@ export default function App() {
     }
   }
 
+  async function refreshUsers({ silent = false } = {}) {
+    if (!canManageAllConversations(currentRole)) return;
+    if (!silent) setUsersLoading(true);
+    setErr("");
+
+    try {
+      const items = await listUsers();
+      setUsers(items || []);
+    } catch (e) {
+      setErr(String(e.message || e));
+    } finally {
+      if (!silent) setUsersLoading(false);
+    }
+  }
+
   async function refreshAll({ keepSelected = true, silent = false } = {}) {
     await Promise.all([
       refreshConversations({ keepSelected, silent }),
@@ -893,9 +1180,13 @@ export default function App() {
     mountedRef.current = true;
 
     (async () => {
-      await getMe().catch(() => null);
+      const me = await getMe().catch(() => null);
+      if (me?.user) {
+        setCurrentUser(me.user);
+      }
       await refreshAll({ keepSelected: false });
     })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -960,16 +1251,21 @@ export default function App() {
         esRef.current = null;
       }
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
     messagesRequestSeqRef.current += 1;
     lastMessageCountRef.current = 0;
-    setMsgs([]);
+    const frame = window.requestAnimationFrame(() => {
+      setMsgs([]);
+      if (!selected) {
+        setLoadingMsgs(false);
+      }
+    });
 
     if (!selected) {
-      setLoadingMsgs(false);
-      return;
+      return () => window.cancelAnimationFrame(frame);
     }
     dbg("selected:change", {
       selected,
@@ -979,7 +1275,9 @@ export default function App() {
     refreshMessages(selected, { preserveScroll: false }).catch((e) => {
       setErr(String(e.message || e));
     });
-  }, [selected]);
+
+    return () => window.cancelAnimationFrame(frame);
+  }, [selected, selectedConv?.wa_id]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1002,6 +1300,7 @@ export default function App() {
       cancelled = true;
       window.clearInterval(timer);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -1030,37 +1329,23 @@ export default function App() {
   }, [selected, view]);
 
   useEffect(() => {
+    if (!canManageAllConversations(currentRole)) {
+      const frame = window.requestAnimationFrame(() => setUsers([]));
+      return () => window.cancelAnimationFrame(frame);
+    }
+    const frame = window.requestAnimationFrame(() => {
+      refreshUsers({ silent: true }).catch(() => null);
+    });
+    return () => window.cancelAnimationFrame(frame);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentRole]);
+
+  useEffect(() => {
     if (!selected) return;
     requestAnimationFrame(() => {
       scrollSelectedConversationIntoView();
     });
   }, [selected, convs, view]);
-
-  const sourceOptions = useMemo(() => {
-    const set = new Set();
-    convs.forEach((c) => {
-      const source = c?.source || c?.last_source;
-      if (source) set.add(source);
-    });
-    return ["todos", ...Array.from(set)];
-  }, [convs]);
-
-  const ownerOptions = useMemo(() => {
-    const set = new Set();
-    convs.forEach((c) => {
-      const owner = c?.assigned_to || c?.human_owner || c?.owner;
-      if (owner) set.add(owner);
-    });
-    return ["todos", ...Array.from(set)];
-  }, [convs]);
-
-  const statusOptions = useMemo(() => {
-    const set = new Set(["ativos", "todos", "arquivados"]);
-    convs.forEach((c) => {
-      if (c?.operation_status) set.add(c.operation_status);
-    });
-    return Array.from(set);
-  }, [convs]);
 
   const unreadCount = (conv) => {
     const lastAt = conv?.last_message_at || conv?.last_at;
@@ -1069,6 +1354,19 @@ export default function App() {
     if (!seenAt) return 1;
     return new Date(lastAt).getTime() > new Date(seenAt).getTime() ? 1 : 0;
   };
+
+  const responsibleOptions = useMemo(() => {
+    const names = new Set();
+    convs.forEach((conv) => {
+      const owner = getConversationOwner(conv);
+      if (owner) names.add(owner);
+    });
+    users.forEach((user) => {
+      const name = userDisplayName(user);
+      if (name) names.add(name);
+    });
+    return Array.from(names).sort((a, b) => a.localeCompare(b, "pt-BR"));
+  }, [convs, users]);
 
   const sidebarConvs = useMemo(() => {
     const terms = q
@@ -1107,11 +1405,33 @@ export default function App() {
       return terms.every((term) => searchable.includes(term));
     });
     console.debug(`sidebar:afterSearch total=${afterSearch.length}`);
-    const finalItems = sortByRecent(afterSearch);
+    const currentName = userDisplayName(currentUser).toLowerCase();
+    const currentEmail = String(currentUser?.email || "").toLowerCase();
+    const afterInboxFilter = afterSearch.filter((c) => {
+      const owner = getConversationOwner(c);
+      const ownerLower = owner.toLowerCase();
+      const resolved = isArchivedConversation(c) || ["resolvida", "resolvido", "resolved"].includes(String(c?.status || c?.stage || "").toLowerCase());
+
+      if (inboxFilter === "minhas") {
+        return ownerLower && (ownerLower === currentName || ownerLower === currentEmail);
+      }
+      if (inboxFilter === "nao_atribuidas") {
+        return !owner;
+      }
+      if (inboxFilter === "resolvidas") {
+        return resolved;
+      }
+      if (inboxFilter === "responsavel") {
+        return responsibleFilter === "todos" ? Boolean(owner) : owner === responsibleFilter;
+      }
+      return true;
+    });
+
+    const finalItems = sortByRecent(afterInboxFilter);
     console.debug(`sidebar:visible total=${finalItems.length}`);
 
     return finalItems;
-  }, [q, convs]);
+  }, [q, convs, inboxFilter, responsibleFilter, currentUser]);
 
   const visibleConvs = useMemo(() => {
     return sortByRecent(
@@ -1134,16 +1454,20 @@ export default function App() {
   const activeFilterCount = useMemo(() => {
     return [
       q.trim(),
+      inboxFilter !== "todas" ? inboxFilter : "",
+      inboxFilter === "responsavel" && responsibleFilter !== "todos" ? responsibleFilter : "",
     ].filter(Boolean).length;
-  }, [q]);
+  }, [q, inboxFilter, responsibleFilter]);
 
   function clearSidebarFilters() {
     setQ("");
+    setInboxFilter("todas");
+    setResponsibleFilter("todos");
   }
 
-  function getStageByConv(conv) {
+  const getStageByConv = useCallback((conv) => {
     return conv?.stage || conv?.lead_stage || stages?.[conv?.wa_id] || "Novo";
-  }
+  }, [stages]);
 
   function getStage(wa_id) {
     const conv = convs.find((c) => c.wa_id === wa_id);
@@ -1170,7 +1494,7 @@ export default function App() {
       handoff: dashboardSummary.handoffs_pending || convs.filter((c) => c.handoff_active).length,
       agendados: tasks.length,
     };
-  }, [convs, seen, dashboardSummary, tasks]);
+  }, [convs, dashboardSummary, tasks]);
 
   const sourceStats = useMemo(() => {
     const raw = dashboardSummary.leads_by_source || {};
@@ -1219,7 +1543,7 @@ export default function App() {
     if (!t || !selected) return;
 
     const optimisticMessage = {
-      id: `temp-${Date.now()}`,
+      id: `temp-message-${++clientIdSeqRef.current}`,
       direction: "out",
       text: t,
       created_at: new Date().toISOString(),
@@ -1408,7 +1732,7 @@ export default function App() {
     }
 
     return cols;
-  }, [visibleConvs, stages]);
+  }, [visibleConvs, getStageByConv]);
 
   function onDragStart(ev, wa_id) {
     ev.dataTransfer.setData("text/plain", wa_id);
@@ -1505,7 +1829,7 @@ export default function App() {
 
     const due_at = toIsoLocal(taskDate, taskTime);
     const optimisticTask = {
-      id: `temp-${Date.now()}`,
+      id: `temp-task-${++clientIdSeqRef.current}`,
       wa_id: selected,
       title: taskTitle.trim() || "Atendimento / Follow-up",
       due_at,
@@ -1651,6 +1975,108 @@ export default function App() {
     }
   }
 
+  async function onAssumeConversation() {
+    if (!selected || !currentUser) return;
+    const owner = userDisplayName(currentUser);
+    setErr("");
+    replaceConversationLocal({
+      wa_id: selected,
+      assigned_to: owner,
+      human_owner: owner,
+      owner,
+      attendance_mode: "human",
+      automation_paused: true,
+      bot_enabled: false,
+    });
+    try {
+      await assignConversation(selected, { assigned_to: owner });
+      await Promise.all([
+        refreshConversations({ keepSelected: true, silent: true }),
+        refreshMessages(selected, { preserveScroll: true, silent: true }),
+      ]);
+      showToast("Atendimento assumido.");
+    } catch (e) {
+      setErr(String(e.message || e));
+      await refreshConversations({ keepSelected: true, silent: true });
+    }
+  }
+
+  async function onTransferConversation() {
+    if (!selected || !transferOwner || !canManageAllConversations(currentRole)) return;
+    setErr("");
+    replaceConversationLocal({
+      wa_id: selected,
+      assigned_to: transferOwner,
+      human_owner: transferOwner,
+      owner: transferOwner,
+      attendance_mode: "human",
+    });
+    try {
+      await assignConversation(selected, { assigned_to: transferOwner });
+      await Promise.all([
+        refreshConversations({ keepSelected: true, silent: true }),
+        refreshMessages(selected, { preserveScroll: true, silent: true }),
+      ]);
+      showToast("Atendimento transferido.");
+    } catch (e) {
+      setErr(String(e.message || e));
+      await refreshConversations({ keepSelected: true, silent: true });
+    }
+  }
+
+  async function onChangeConversationStatus() {
+    if (!selected || !statusDraft) return;
+    setErr("");
+    replaceConversationLocal({
+      wa_id: selected,
+      status: statusDraft,
+      stage: statusDraft,
+      lead_stage: statusDraft.toLowerCase(),
+      closed_at: statusDraft === "Resolvida" ? new Date().toISOString() : selectedConv?.closed_at,
+    });
+    try {
+      await updateConversationStatus(selected, { status: statusDraft });
+      await Promise.all([
+        refreshConversations({ keepSelected: true, silent: true }),
+        refreshMessages(selected, { preserveScroll: true, silent: true }),
+        refreshDashboard({ silent: true }),
+      ]);
+      showToast("Status atualizado.");
+    } catch (e) {
+      setErr(String(e.message || e));
+      await refreshConversations({ keepSelected: true, silent: true });
+    }
+  }
+
+  async function onCreateUser() {
+    if (!canManageUsers(currentRole) || userSaving) return;
+    setUserSaving(true);
+    setErr("");
+    try {
+      await createUser(newUser);
+      setNewUser({ name: "", email: "", role: "atendimento", password: "" });
+      await refreshUsers({ silent: true });
+      showToast("Usuário criado.");
+    } catch (e) {
+      setErr(String(e.message || e));
+    } finally {
+      setUserSaving(false);
+    }
+  }
+
+  async function onUpdateUser(userId, patch) {
+    if (!canManageUsers(currentRole) || !userId) return;
+    setErr("");
+    setUsers((prev) => prev.map((user) => (user.id === userId ? { ...user, ...patch } : user)));
+    try {
+      await updateUser(userId, patch);
+      await refreshUsers({ silent: true });
+    } catch (e) {
+      setErr(String(e.message || e));
+      await refreshUsers({ silent: true });
+    }
+  }
+
   function onDragStartTask(ev, taskId) {
     ev.dataTransfer.setData("text/plain", `task:${taskId}`);
     ev.dataTransfer.effectAllowed = "move";
@@ -1703,12 +2129,270 @@ export default function App() {
     () => buildStrategicSnapshot(selectedConv, selectedFlowData, selectedStatusMeta),
     [selectedConv, selectedFlowData, selectedStatusMeta]
   );
+  const selectedDiagnosis = useMemo(
+    () => getDiagnosisFromConv(selectedConv, selectedFlowData),
+    [selectedConv, selectedFlowData]
+  );
+  const selectedHasDiagnosis = hasDiagnosis(selectedDiagnosis);
+  const selectedOpenCollections = useMemo(() => {
+    const selectedWaId = selectedConv?.wa_id || selected;
+    if (!selectedWaId) return [];
+    return collections.filter(
+      (item) =>
+        String(item.wa_id || item.telefone || "") === String(selectedWaId) &&
+        normalizeCollectionStatus(item.status) !== "Pago"
+    );
+  }, [collections, selectedConv?.wa_id, selected]);
+
+  useEffect(() => {
+    if (!selectedConv) return;
+
+    const contact = buildContactPayloadFromConv(selectedConv);
+    const diagnosis = getDiagnosisFromConv(selectedConv, selectedFlowData);
+    const frame = window.requestAnimationFrame(() => {
+      setAttendanceContact(contact);
+      setDiagnosisForm((prev) => ({
+        ...prev,
+        ...diagnosis,
+        name: diagnosis.name || contact.name,
+        company: diagnosis.company || contact.company,
+        phone: diagnosis.phone || contact.telefone,
+        temperature: diagnosis.temperature || prev.temperature || "Morno",
+      }));
+      setCollectionForm((prev) => ({
+        ...prev,
+        cliente: contact.name,
+        empresa: contact.company,
+        telefone: contact.telefone,
+        wa_id: contact.wa_id,
+      }));
+    });
+
+    return () => window.cancelAnimationFrame(frame);
+  }, [selectedConv, selectedFlowData]);
+
+  function updateAttendanceContactField(field, value) {
+    setAttendanceContact((prev) => ({ ...prev, [field]: value }));
+  }
+
+  function updateDiagnosisField(field, value) {
+    setDiagnosisForm((prev) => ({ ...prev, [field]: value }));
+  }
+
+  function updateCollectionField(field, value) {
+    setCollectionForm((prev) => ({ ...prev, [field]: value }));
+  }
+
+  function suggestMugoIntelligenceMessage() {
+    setText(MUGO_INTELLIGENCE_MESSAGE);
+    setView("inbox");
+    showToast("Mensagem do Mugô Intelligence pronta para aprovação.");
+    requestAnimationFrame(() => inputRef.current?.focus?.());
+  }
+
+  function suggestContinueAttendanceMessage() {
+    const opportunity = selectedDiagnosis.opportunity || "uma oportunidade estratégica de crescimento";
+    const service = selectedDiagnosis.recommended_service || "uma solução personalizada da Mugô";
+    setText(
+      "Obrigado por concluir seu diagnóstico.\n\n" +
+      `Analisamos suas respostas e vimos que a principal oportunidade da sua empresa está em: ${opportunity}.\n\n` +
+      `O caminho recomendado pela Mugô é: ${service}.\n\n` +
+      "Podemos seguir por aqui e te mostrar como isso funcionaria na prática?"
+    );
+    setView("inbox");
+    showToast("Mensagem de continuidade pronta para aprovação.");
+    requestAnimationFrame(() => inputRef.current?.focus?.());
+  }
+
+  async function saveAttendanceContact() {
+    if (attendanceContactSaving) return;
+
+    const waId = onlyDigits(attendanceContact.wa_id || attendanceContact.telefone);
+    if (!waId) {
+      setErr("Informe telefone ou wa_id para vincular o contato.");
+      return;
+    }
+
+    setErr("");
+    setAttendanceContactSaving(true);
+
+    const payload = {
+      ...attendanceContact,
+      wa_id: waId,
+      telefone: onlyDigits(attendanceContact.telefone || waId),
+      phone: onlyDigits(attendanceContact.telefone || waId),
+      service: attendanceContact.service_contracted || attendanceContact.service_interest,
+      service_contratado: attendanceContact.service_contracted,
+      responsible: attendanceContact.owner,
+      notes: attendanceContact.notes || `Status: ${attendanceContact.status || "Novo lead"}`,
+    };
+
+    try {
+      const result = await createAttendanceContact(payload);
+      prependOrReplaceConversationLocal({
+        ...(selectedConv || {}),
+        wa_id: waId,
+        name: payload.name,
+        telefone: payload.telefone,
+        company: payload.company,
+        email: payload.email,
+        instagram: payload.instagram,
+        site: payload.site,
+        service_interest: payload.service_interest,
+        service_contracted: payload.service_contracted,
+        assigned_to: payload.owner,
+        status: payload.status,
+        notes: payload.notes,
+        tags: Array.from(new Set([...(Array.isArray(selectedConv?.tags) ? selectedConv.tags : []), "salvo"])),
+      });
+      setSelected(waId);
+      await refreshConversations({ keepSelected: true, silent: true });
+      showToast(result?.ok ? "Contato salvo e vinculado à conversa." : "Contato salvo.");
+    } catch (e) {
+      setErr(String(e.message || e));
+    } finally {
+      setAttendanceContactSaving(false);
+    }
+  }
+
+  async function saveDiagnosis() {
+    if (diagnosisSaving) return;
+    const waId = onlyDigits(selected || diagnosisForm.phone || attendanceContact.wa_id || attendanceContact.telefone);
+    if (!waId) {
+      setErr("Selecione uma conversa ou informe telefone para salvar o diagnóstico.");
+      return;
+    }
+
+    setErr("");
+    setDiagnosisSaving(true);
+
+    try {
+      await submitAttendanceDiagnosis(waId, {
+        fields: diagnosisForm,
+        status: "Diagnóstico concluído",
+        queue: "Novos leads",
+        owner: attendanceContact.owner || selectedConv?.assigned_to || "",
+      });
+      replaceConversationLocal({
+        wa_id: waId,
+        name: diagnosisForm.name || selectedConv?.name,
+        telefone: onlyDigits(diagnosisForm.phone || selectedConv?.telefone || waId),
+        company: diagnosisForm.company,
+        email: diagnosisForm.email,
+        segment: diagnosisForm.segment,
+        lead_temperature: diagnosisForm.temperature,
+        lead_theme: diagnosisForm.opportunity || diagnosisForm.recommended_service,
+        stage: "Diagnóstico",
+        lead_stage: "diagnostico",
+        flow_data: {
+          ...(selectedFlowData || {}),
+          diagnosis_summary: diagnosisForm,
+        },
+      });
+      await Promise.all([
+        refreshConversations({ keepSelected: true, silent: true }),
+        refreshMessages(waId, { preserveScroll: true, silent: true }),
+        refreshDashboard({ silent: true }),
+      ]);
+      showToast("Diagnóstico salvo no atendimento.");
+    } catch (e) {
+      setErr(String(e.message || e));
+    } finally {
+      setDiagnosisSaving(false);
+    }
+  }
+
+  async function saveCollection() {
+    if (collectionSaving) return;
+    const waId = onlyDigits(collectionForm.wa_id || collectionForm.telefone);
+    if (!waId) {
+      setErr("Informe telefone ou wa_id para vincular a cobrança.");
+      return;
+    }
+
+    setErr("");
+    setCollectionSaving(true);
+
+    const item = {
+      ...collectionForm,
+      wa_id: waId,
+      telefone: onlyDigits(collectionForm.telefone || waId),
+      amount: collectionForm.amount,
+      due_date: collectionForm.due_date,
+      status: normalizeCollectionStatus(collectionForm.status),
+      id: `collection-${waId}-${collectionForm.due_date || "sem-data"}-${collections.length + 1}`,
+      created_at: new Date().toISOString(),
+    };
+
+    try {
+      const result = await createAttendanceCollection(item);
+      const saved = { ...item, ...(result?.collection || {}) };
+      setCollections((prev) => [saved, ...prev.filter((existing) => existing.id !== saved.id)]);
+      await Promise.all([
+        refreshTasks({ silent: true }),
+        refreshDashboard({ silent: true }),
+      ]);
+      showToast("Cobrança criada. O lembrete ficou disponível para aprovação.");
+    } catch (e) {
+      setErr(String(e.message || e));
+    } finally {
+      setCollectionSaving(false);
+    }
+  }
+
+  function markCollectionPaid(collectionId) {
+    setCollections((prev) =>
+      prev.map((item) => (item.id === collectionId ? { ...item, status: "Pago", paid_at: new Date().toISOString() } : item))
+    );
+    showToast("Cobrança marcada como paga.");
+  }
+
+  function prepareCollectionReminder(collection) {
+    setSelected(collection.wa_id || collection.telefone || selected);
+    setText(collection.message_suggestion || buildCollectionReminderMessage(collection));
+    setView("inbox");
+    showToast("Lembrete de cobrança pronto para aprovação.");
+    requestAnimationFrame(() => inputRef.current?.focus?.());
+  }
+
+  async function sendApprovedCollectionReminder(collection) {
+    if (reminderSending) return;
+    const waId = onlyDigits(collection.wa_id || collection.telefone || selected);
+    const message = text.trim() || collection.message_suggestion || buildCollectionReminderMessage(collection);
+    if (!waId || !message) return;
+
+    setReminderSending(true);
+    setErr("");
+
+    try {
+      await sendAttendanceCollectionReminder(waId, {
+        amount: collection.amount,
+        due_date: collection.due_date,
+        message,
+      });
+      setText("");
+      await refreshMessages(waId, { preserveScroll: false, silent: true });
+      showToast("Lembrete aprovado e enviado para a conversa.");
+    } catch (e) {
+      setErr(String(e.message || e));
+    } finally {
+      setReminderSending(false);
+    }
+  }
 
   useEffect(() => {
     if (!selectedConv?.wa_id) return;
     console.debug(`automation:status ${selectedConv.operation_status || ""}`);
     console.debug(`automation:step ${selectedFlowData.current_step || selectedConv.flow_state || ""}`);
   }, [selectedConv?.wa_id, selectedConv?.operation_status, selectedConv?.flow_state, selectedFlowData.current_step]);
+
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => {
+      setTransferOwner(getConversationOwner(selectedConv));
+      setStatusDraft(selectedConv?.status || selectedConv?.stage || "Novo lead");
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [selectedConv]);
 
   return (
     <div className="wbShell">
@@ -1723,14 +2407,27 @@ export default function App() {
         <button className={`wbRailBtn ${view === "inbox" ? "active" : ""}`} onClick={() => setView("inbox")} title="Inbox">
           💬
         </button>
+        <button className={`wbRailBtn ${view === "diagnostico" ? "active" : ""}`} onClick={() => setView("diagnostico")} title="Diagnóstico">
+          📊
+        </button>
+        <button className={`wbRailBtn ${view === "contatos" ? "active" : ""}`} onClick={() => setView("contatos")} title="Contatos">
+          👤
+        </button>
+        {canAccessBilling(currentRole) ? (
+          <button className={`wbRailBtn ${view === "cobrancas" ? "active" : ""}`} onClick={() => setView("cobrancas")} title="Cobranças">
+            💳
+          </button>
+        ) : null}
+        {canManageUsers(currentRole) ? (
+          <button className={`wbRailBtn ${view === "usuarios" ? "active" : ""}`} onClick={() => setView("usuarios")} title="Configurações">
+            ⚙
+          </button>
+        ) : null}
         <button className={`wbRailBtn ${view === "kanban" ? "active" : ""}`} onClick={() => setView("kanban")} title="Pipeline">
           🗂️
         </button>
         <button className={`wbRailBtn ${view === "agenda" ? "active" : ""}`} onClick={() => setView("agenda")} title="Agenda">
           🗓️
-        </button>
-        <button className={`wbRailBtn ${view === "contatos" ? "active" : ""}`} onClick={() => setView("contatos")} title="Contatos">
-          👤
         </button>
 
         <button className="wbRailBtn" onClick={handleLogout} title="Sair">
@@ -1765,6 +2462,33 @@ export default function App() {
             onChange={(e) => setQ(e.target.value)}
             placeholder="Buscar conversa por nome, telefone, mensagem ou WA ID..."
           />
+        </div>
+
+        <div className="wbSidebarFilters">
+          {[
+            ["todas", "Todas"],
+            ["minhas", "Minhas"],
+            ["nao_atribuidas", "Não atribuídas"],
+            ["resolvidas", "Resolvidas"],
+            ["responsavel", "Por responsável"],
+          ].map(([value, label]) => (
+            <button
+              key={value}
+              className={inboxFilter === value ? "active" : ""}
+              onClick={() => setInboxFilter(value)}
+              type="button"
+            >
+              {label}
+            </button>
+          ))}
+          {inboxFilter === "responsavel" ? (
+            <select value={responsibleFilter} onChange={(e) => setResponsibleFilter(e.target.value)}>
+              <option value="todos">Todos os responsáveis</option>
+              {responsibleOptions.map((owner) => (
+                <option key={owner} value={owner}>{owner}</option>
+              ))}
+            </select>
+          ) : null}
         </div>
 
         <div className="wbList">
@@ -1859,15 +2583,50 @@ export default function App() {
                 <div className="wbHeaderTitle">Agenda</div>
                 <div className="wbHeaderSub">Gerencie prazos, follow-ups e prioridades da operação.</div>
               </>
+            ) : view === "diagnostico" ? (
+              <>
+                <div className="wbHeaderTitle">Diagnóstico</div>
+                <div className="wbHeaderSub">Leitura do Mugô Intelligence vinculada ao atendimento selecionado.</div>
+              </>
+            ) : view === "cobrancas" ? (
+              <>
+                <div className="wbHeaderTitle">Cobranças</div>
+                <div className="wbHeaderSub">Controle inicial de vencimentos, status e lembretes aprovados pelo operador.</div>
+              </>
+            ) : view === "usuarios" ? (
+              <>
+                <div className="wbHeaderTitle">Configurações</div>
+                <div className="wbHeaderSub">Usuários, perfis e acesso da equipe Mugô.</div>
+              </>
             ) : (
               <>
-                <div className="wbHeaderTitle">Contatos salvos</div>
-                <div className="wbHeaderSub">Base de relacionamento da Mugô.</div>
+                <div className="wbHeaderTitle">Contatos</div>
+                <div className="wbHeaderSub">Cadastro, edição e vínculo de clientes por telefone ou wa_id.</div>
               </>
             )}
           </div>
 
           <div className="wbHeaderRight">
+            <div className="wbPrimaryTabs" aria-label="Navegação da central de atendimento">
+              {ATTENDANCE_TABS.filter((tab) => tab !== "cobrancas" || canAccessBilling(currentRole)).map((tab) => (
+                <button
+                  key={tab}
+                  className={view === tab ? "active" : ""}
+                  onClick={() => setView(tab)}
+                  type="button"
+                >
+                  {tab === "inbox" ? "Inbox" : tab === "diagnostico" ? "Diagnóstico" : tab === "contatos" ? "Contatos" : "Cobranças"}
+                </button>
+              ))}
+            </div>
+
+            {currentUser ? (
+              <div className="wbUserBadge">
+                <strong>{userDisplayName(currentUser)}</strong>
+                <span>{currentRole}</span>
+              </div>
+            ) : null}
+
             <button className="wbBtnGhost" onClick={() => setSidebarCollapsed((prev) => !prev)}>
               {sidebarCollapsed ? "Mostrar filtros" : "Ocultar filtros"}
             </button>
@@ -1887,6 +2646,33 @@ export default function App() {
 
             {view === "inbox" ? (
               <>
+                <button className="wbBtn" onClick={onAssumeConversation} disabled={!selected}>
+                  Assumir atendimento
+                </button>
+
+                {canManageAllConversations(currentRole) ? (
+                  <>
+                    <select className="wbHeaderSelect" value={transferOwner} onChange={(e) => setTransferOwner(e.target.value)} disabled={!selected}>
+                      <option value="">Sem responsável</option>
+                      {responsibleOptions.map((owner) => (
+                        <option key={owner} value={owner}>{owner}</option>
+                      ))}
+                    </select>
+                    <button className="wbBtnGhost" onClick={onTransferConversation} disabled={!selected || !transferOwner}>
+                      Transferir
+                    </button>
+                  </>
+                ) : null}
+
+                <select className="wbHeaderSelect" value={statusDraft} onChange={(e) => setStatusDraft(e.target.value)} disabled={!selected}>
+                  {CONVERSATION_STATUSES.map((status) => (
+                    <option key={status} value={status}>{status}</option>
+                  ))}
+                </select>
+                <button className="wbBtnGhost" onClick={onChangeConversationStatus} disabled={!selected || !statusDraft}>
+                  Alterar status
+                </button>
+
                 <button className="wbBtn" onClick={() => inputRef.current?.focus?.()} disabled={!selected}>
                   Nova mensagem
                 </button>
@@ -1899,9 +2685,11 @@ export default function App() {
                   Editar contato
                 </button>
 
-                <button className="wbBtnGhost" onClick={onArchiveConversation} disabled={!selected}>
-                  {isArchivedConversation(selectedConv) ? "Desarquivar" : "Arquivar"}
-                </button>
+                {currentRole === "admin" ? (
+                  <button className="wbBtnGhost" onClick={onArchiveConversation} disabled={!selected}>
+                    {isArchivedConversation(selectedConv) ? "Desarquivar" : "Arquivar"}
+                  </button>
+                ) : null}
 
                 {selectedConv?.handoff_active || selectedConv?.operation_status === "handoff" ? (
                   <button className="wbBtnGhost" onClick={onCloseHandoff}>
@@ -1909,18 +2697,20 @@ export default function App() {
                   </button>
                 ) : null}
 
-                <button
-                  className="wbBtnGhost"
-                  onClick={(e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    onDeleteConversation();
-                  }}
-                  disabled={!selected || deletingConv}
-                  title="Apagar conversa"
-                >
-                  {deletingConv ? "Apagando..." : "Apagar conversa"}
-                </button>
+                {currentRole === "admin" ? (
+                  <button
+                    className="wbBtnGhost"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      onDeleteConversation();
+                    }}
+                    disabled={!selected || deletingConv}
+                    title="Apagar conversa"
+                  >
+                    {deletingConv ? "Apagando..." : "Apagar conversa"}
+                  </button>
+                ) : null}
               </>
             ) : null}
 
@@ -2002,6 +2792,11 @@ export default function App() {
                 <div className="wbHeroText">
                   Acompanhe novos contatos, principais canais de aquisição, tarefas do dia e avance rapidamente para o atendimento.
                 </div>
+                {attendanceMeta.welcome_message ? (
+                  <div className="wbHeroText" style={{ marginTop: 8, whiteSpace: "pre-wrap" }}>
+                    {attendanceMeta.welcome_message}
+                  </div>
+                ) : null}
                 <div className="wbHeroActions">
                   <button className="wbBtn" onClick={() => setView("inbox")}>Abrir conversas</button>
                   <button className="wbBtnGhost" onClick={() => setView("kanban")}>Ver pipeline</button>
@@ -2272,60 +3067,146 @@ export default function App() {
               </section>
             ) : null}
 
-            <section className="wbChat" ref={chatScrollRef}>
-              {!selected ? (
-                <div className="wbChatEmpty">
-                  <div>
-                    <div className="wbChatEmptyTitle">Selecione uma conversa</div>
-                    <div className="wbChatEmptySub">O histórico e as novas mensagens aparecem aqui.</div>
-                  </div>
-                </div>
-              ) : loadingMsgs ? (
-                <div className="wbChatEmpty">
-                  <div>
-                    <div className="wbChatEmptyTitle">Carregando conversa...</div>
-                    <div className="wbChatEmptySub">Estamos preparando o histórico desta interação.</div>
-                  </div>
-                </div>
-              ) : !msgs.length ? (
-                <div className="wbChatEmpty">
-                  <div>
-                    <div className="wbChatEmptyTitle">Ainda não há mensagens</div>
-                    <div className="wbChatEmptySub">Quando a conversa começar, o histórico ficará disponível aqui.</div>
-                  </div>
-                </div>
-              ) : (
-                <div className="wbChatInner">
-                  {msgs.map((m) => {
-                    const mine = m.direction === "out";
-                    return (
-                      <div key={m.id} className={`wbBubbleRow ${mine ? "right" : "left"}`}>
-                        <div className={`wbBubble ${mine ? "out" : ""}`}>
-                          <div className="wbBubbleText">{m.text}</div>
-                          <div className="wbBubbleMeta">{nowLocalTime(m.created_at)}</div>
-                        </div>
+            <div className="wbInboxWorkspace">
+              <div className="wbConversationPane">
+                <section className="wbChat" ref={chatScrollRef}>
+                  {!selected ? (
+                    <div className="wbChatEmpty">
+                      <div>
+                        <div className="wbChatEmptyTitle">Selecione uma conversa</div>
+                        <div className="wbChatEmptySub">O histórico e as novas mensagens aparecem aqui.</div>
                       </div>
-                    );
-                  })}
-                </div>
-              )}
-            </section>
+                    </div>
+                  ) : loadingMsgs ? (
+                    <div className="wbChatEmpty">
+                      <div>
+                        <div className="wbChatEmptyTitle">Carregando conversa...</div>
+                        <div className="wbChatEmptySub">Estamos preparando o histórico desta interação.</div>
+                      </div>
+                    </div>
+                  ) : !msgs.length ? (
+                    <div className="wbChatEmpty">
+                      <div>
+                        <div className="wbChatEmptyTitle">Ainda não há mensagens</div>
+                        <div className="wbChatEmptySub">Quando a conversa começar, o histórico ficará disponível aqui.</div>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="wbChatInner">
+                      {msgs.map((m) => {
+                        const mine = m.direction === "out";
+                        return (
+                          <div key={m.id} className={`wbBubbleRow ${mine ? "right" : "left"}`}>
+                            <div className={`wbBubble ${mine ? "out" : ""}`}>
+                              <div className="wbBubbleText">{m.text}</div>
+                              <div className="wbBubbleMeta">{nowLocalTime(m.created_at)}</div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </section>
 
-            <footer className="wbComposer">
-              <div className="wbComposerInner">
-                <input
-                  ref={inputRef}
-                  value={text}
-                  onChange={(e) => setText(e.target.value)}
-                  placeholder={selected ? "Escreva sua mensagem..." : "Selecione uma conversa para continuar o atendimento"}
-                  disabled={!selected}
-                  onKeyDown={(e) => (e.key === "Enter" ? onSend() : null)}
-                />
-                <button className="wbSend" onClick={onSend} disabled={!selected || !text.trim()}>
-                  Enviar
-                </button>
+                <footer className="wbComposer">
+                  <div className="wbComposerInner">
+                    <input
+                      ref={inputRef}
+                      value={text}
+                      onChange={(e) => setText(e.target.value)}
+                      placeholder={selected ? "Escreva sua mensagem..." : "Selecione uma conversa para continuar o atendimento"}
+                      disabled={!selected}
+                      onKeyDown={(e) => (e.key === "Enter" ? onSend() : null)}
+                    />
+                    <button className="wbSend" onClick={onSend} disabled={!selected || !text.trim()}>
+                      Enviar
+                    </button>
+                  </div>
+                </footer>
               </div>
-            </footer>
+
+              <aside className="wbRightPanel">
+                <div className="wbSideBlock">
+                  <div className="wbSideTitle">Dados do contato</div>
+                  <div className="wbInfoGrid">
+                    <span>Nome</span><strong>{getDisplayName(selectedConv) || "Sem nome"}</strong>
+                    <span>Empresa</span><strong>{selectedConv?.company || attendanceContact.company || "Sem empresa"}</strong>
+                    <span>Telefone</span><strong>{formatPhoneBR(selectedConv?.telefone || selectedConv?.wa_id || selected)}</strong>
+                    <span>Email</span><strong>{selectedConv?.email || attendanceContact.email || "Sem email"}</strong>
+                    <span>Status</span><strong>{attendanceContact.status || getStage(selectedConv?.wa_id)}</strong>
+                  </div>
+                  <button className="wbBtnGhost wbSideAction" onClick={() => setView("contatos")} disabled={!selected}>
+                    Editar contato
+                  </button>
+                </div>
+
+                <div className="wbSideBlock">
+                  <div className="wbSideTitle">Diagnóstico Intelligence</div>
+                  {selectedHasDiagnosis ? (
+                    <>
+                      <div className="wbDiagnosisSideHero">
+                        <div>
+                          <span>Score geral</span>
+                          <strong>{selectedDiagnosis.score_overall || "sem score"}</strong>
+                        </div>
+                        <span className={`wbBadge temp ${temperatureBadgeClass(selectedDiagnosis.temperature)}`}>
+                          {selectedDiagnosis.temperature || "sem temperatura"}
+                        </span>
+                      </div>
+                      <div className="wbInfoGrid">
+                        <span>Oportunidade</span><strong>{selectedDiagnosis.opportunity || "sem leitura"}</strong>
+                        <span>Serviço</span><strong>{selectedDiagnosis.recommended_service || "sem recomendação"}</strong>
+                        <span>Resumo</span><strong>{selectedDiagnosis.summary || "sem resumo"}</strong>
+                      </div>
+                      <button className="wbBtn wbSideAction" onClick={suggestContinueAttendanceMessage} disabled={!selected}>
+                        Continuar atendimento
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <div className="wbEmptyHint">Ainda não há diagnóstico vinculado a este contato.</div>
+                      <button className="wbBtn wbSideAction" onClick={suggestMugoIntelligenceMessage} disabled={!selected}>
+                        Enviar Mugô Intelligence
+                      </button>
+                    </>
+                  )}
+                </div>
+
+                <div className="wbSideBlock">
+                  <div className="wbSideTitle">Cobranças em aberto</div>
+                  {selectedOpenCollections.length ? (
+                    <div className="wbMiniList">
+                      {selectedOpenCollections.map((collection) => (
+                        <div key={collection.id} className="wbMiniItem wbMiniItemStack">
+                          <div className="wbMiniTitle">{formatMoneyBR(collection.amount)}</div>
+                          <div className="wbMiniSub">
+                            Vence em {formatDateBR(collection.due_date)} • {collection.status}
+                          </div>
+                          <div className="wbSideActionsRow">
+                            <button className="wbBtnGhost" onClick={() => prepareCollectionReminder(collection)}>
+                              Gerar lembrete
+                            </button>
+                            <button className="wbBtn" onClick={() => sendApprovedCollectionReminder(collection)} disabled={reminderSending}>
+                              Enviar aprovado
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="wbEmptyHint">Nenhuma cobrança aberta vinculada.</div>
+                  )}
+                  <button className="wbBtnGhost wbSideAction" onClick={() => setView("cobrancas")} disabled={!selected}>
+                    Nova cobrança
+                  </button>
+                </div>
+
+                <div className="wbSideBlock">
+                  <div className="wbSideTitle">Observações internas</div>
+                  <p className="wbSideNote">{selectedConv?.notes || selectedStrategicSnapshot.nextStep || "Sem observações internas ainda."}</p>
+                </div>
+              </aside>
+            </div>
           </section>
         ) : view === "kanban" ? (
           <section className="wbKanban">
@@ -2408,57 +3289,372 @@ export default function App() {
                   </div>
 
                   <div className="wbColBody">
-                    {(taskCols[k] || []).map((t) => (
-                      (() => {
-                        const conv = conversationsById.get(t.wa_id);
-                        const owner = conv?.assigned_to || conv?.human_owner || "";
-                        const attendanceMeta = getAttendanceModeMeta(conv?.attendance_mode);
-                        const stage = conv ? getStageByConv(conv) : "";
-
-                        return (
-                          <div
-                            key={t.id}
-                            className="wbCard"
-                            draggable
-                            onDragStart={(e) => onDragStartTask(e, t.id)}
-                          >
-                            <div className="wbCardTop">
-                              <div className="wbAvatar small">{String(t.wa_id || "X").slice(0, 1)}</div>
-                              <div className="wbCardTitle">{t.title}</div>
-                              <div className="wbCardTime">{shortTime(t.due_at)}</div>
-                            </div>
-
-                            <div className="wbCardSub">{getDisplayName(conv) || formatPhoneBR(t.wa_id)}</div>
-                            <div className="wbCardPreview">Vencimento: {nowLocalTime(t.due_at)}</div>
-
-                            <div className="wbCardBadges">
-                              {owner ? <span className="wbBadge">{normalizeOwnerLabel(owner)}</span> : null}
-                              {stage ? <span className="wbBadge ok">{stage}</span> : null}
-                              {conv?.source || conv?.last_source ? (
-                                <span className="wbBadge">
-                                  {normalizeSourceLabel(conv?.source || conv?.last_source)}
-                                </span>
-                              ) : null}
-                              <span className={attendanceMeta.className}>{attendanceMeta.label}</span>
-                            </div>
-
-                            <div className="wbCardBadges">
-                              <button className="wbBtnGhost" onClick={() => openChat(t.wa_id)} style={{ padding: "8px 10px" }}>
-                                Abrir
-                              </button>
-                              <button className="wbBtn" onClick={() => onDoneTask(t.id)} style={{ padding: "8px 10px" }}>
-                                Concluir
-                              </button>
-                            </div>
-                          </div>
-                        );
-                      })()
-                    ))}
+                    {(taskCols[k] || []).map((t) => {
+                      const conv = conversationsById.get(t.wa_id);
+                      return (
+                        <AgendaTaskCard
+                          key={t.id}
+                          task={t}
+                          conv={conv}
+                          owner={conv?.assigned_to || conv?.human_owner || ""}
+                          attendanceMeta={getAttendanceModeMeta(conv?.attendance_mode)}
+                          stage={conv ? getStageByConv(conv) : ""}
+                          onOpen={openChat}
+                          onDone={onDoneTask}
+                          onDragStart={onDragStartTask}
+                        />
+                      );
+                    })}
 
                     {!taskCols[k]?.length ? <div className="wbColEmpty">Sem tarefas</div> : null}
                   </div>
                 </div>
               ))}
+            </div>
+          </section>
+        ) : view === "diagnostico" ? (
+          <section className="wbKanban">
+            <div className="wbAttendanceLayout">
+              <div className="wbCol wbAttendanceMain">
+                <div className="wbColHead">
+                  <div>
+                    <div className="wbSectionTitle">Diagnóstico do lead</div>
+                    <div className="wbSectionSub">{selected ? formatPhoneBR(selected) : "Selecione uma conversa para vincular o diagnóstico"}</div>
+                  </div>
+                  {selectedHasDiagnosis ? (
+                    <button className="wbBtn" onClick={suggestContinueAttendanceMessage} disabled={!selected}>
+                      Continuar atendimento
+                    </button>
+                  ) : (
+                    <button className="wbBtn" onClick={suggestMugoIntelligenceMessage} disabled={!selected}>
+                      Enviar Mugô Intelligence
+                    </button>
+                  )}
+                </div>
+
+                <div className="wbColBody">
+                  {selectedHasDiagnosis ? (
+                    <>
+                      <div className="wbDiagnosisHero">
+                        <div>
+                          <span>Score geral</span>
+                          <strong>{selectedDiagnosis.score_overall || "Não informado"}</strong>
+                        </div>
+                        <span className={`wbBadge temp ${temperatureBadgeClass(selectedDiagnosis.temperature)}`}>
+                          {selectedDiagnosis.temperature || "Sem temperatura"}
+                        </span>
+                      </div>
+                      <div className="wbDiagnosisGrid">
+                        {[
+                          ["Nome", selectedDiagnosis.name],
+                          ["Empresa", selectedDiagnosis.company],
+                          ["Telefone", formatPhoneBR(selectedDiagnosis.phone)],
+                          ["Email", selectedDiagnosis.email],
+                          ["Segmento", selectedDiagnosis.segment],
+                          ["Score marketing", selectedDiagnosis.score_marketing],
+                          ["Score vendas", selectedDiagnosis.score_sales],
+                          ["Score automação", selectedDiagnosis.score_automation],
+                          ["Score dados", selectedDiagnosis.score_data],
+                          ["Score relacionamento", selectedDiagnosis.score_relationship],
+                          ["Principal oportunidade", selectedDiagnosis.opportunity],
+                          ["Serviço recomendado", selectedDiagnosis.recommended_service],
+                          ["Resumo gerado", selectedDiagnosis.summary],
+                        ].map(([label, value]) => (
+                          <div key={label} className={label === "Resumo gerado" ? "wbDiagnosisItem wide" : "wbDiagnosisItem"}>
+                            <span>{label}</span>
+                            <strong>{value || "Não informado"}</strong>
+                          </div>
+                        ))}
+                      </div>
+                    </>
+                  ) : (
+                    <div className="wbEmpty">
+                      Nenhum diagnóstico encontrado para esta conversa.
+                      <div className="wbEmptyHint">Use o botão “Enviar Mugô Intelligence” para preparar a mensagem no atendimento.</div>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="wbCol">
+                <div className="wbColHead">
+                  <div>
+                    <div className="wbSectionTitle">Cadastro manual do diagnóstico</div>
+                    <div className="wbSectionSub">Preencha quando o resultado chegar por fora da integração automática</div>
+                  </div>
+                </div>
+                <div className="wbColBody">
+                  <div className="wbForm wbFormTight">
+                    <div className="wbFormRow">
+                      <label>Nome<input value={diagnosisForm.name} onChange={(e) => updateDiagnosisField("name", e.target.value)} /></label>
+                      <label>Empresa<input value={diagnosisForm.company} onChange={(e) => updateDiagnosisField("company", e.target.value)} /></label>
+                    </div>
+                    <div className="wbFormRow">
+                      <label>Telefone<input value={diagnosisForm.phone} onChange={(e) => updateDiagnosisField("phone", e.target.value)} /></label>
+                      <label>Email<input value={diagnosisForm.email} onChange={(e) => updateDiagnosisField("email", e.target.value)} /></label>
+                    </div>
+                    <label>Segmento<input value={diagnosisForm.segment} onChange={(e) => updateDiagnosisField("segment", e.target.value)} /></label>
+                    <div className="wbScoreGrid">
+                      <label>Score geral<input value={diagnosisForm.score_overall} onChange={(e) => updateDiagnosisField("score_overall", e.target.value)} /></label>
+                      <label>Marketing<input value={diagnosisForm.score_marketing} onChange={(e) => updateDiagnosisField("score_marketing", e.target.value)} /></label>
+                      <label>Vendas<input value={diagnosisForm.score_sales} onChange={(e) => updateDiagnosisField("score_sales", e.target.value)} /></label>
+                      <label>Automação<input value={diagnosisForm.score_automation} onChange={(e) => updateDiagnosisField("score_automation", e.target.value)} /></label>
+                      <label>Dados<input value={diagnosisForm.score_data} onChange={(e) => updateDiagnosisField("score_data", e.target.value)} /></label>
+                      <label>Relacionamento<input value={diagnosisForm.score_relationship} onChange={(e) => updateDiagnosisField("score_relationship", e.target.value)} /></label>
+                    </div>
+                    <label>Principal oportunidade<textarea value={diagnosisForm.opportunity} onChange={(e) => updateDiagnosisField("opportunity", e.target.value)} /></label>
+                    <label>Serviço recomendado<input value={diagnosisForm.recommended_service} onChange={(e) => updateDiagnosisField("recommended_service", e.target.value)} /></label>
+                    <label>
+                      Temperatura
+                      <select value={diagnosisForm.temperature} onChange={(e) => updateDiagnosisField("temperature", e.target.value)}>
+                        {TEMPERATURES.map((item) => <option key={item} value={item}>{item}</option>)}
+                      </select>
+                    </label>
+                    <label>Resumo gerado<textarea value={diagnosisForm.summary} onChange={(e) => updateDiagnosisField("summary", e.target.value)} /></label>
+                    <button className="wbBtn" onClick={saveDiagnosis} disabled={diagnosisSaving || !selected}>
+                      {diagnosisSaving ? "Salvando..." : "Salvar diagnóstico"}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </section>
+        ) : view === "contatos" ? (
+          <section className="wbKanban">
+            <div className="wbAttendanceLayout">
+              <div className="wbCol">
+                <div className="wbColHead">
+                  <div>
+                    <div className="wbSectionTitle">Cadastro e edição de contatos</div>
+                    <div className="wbSectionSub">Vincule cada cliente a uma conversa pelo telefone ou wa_id</div>
+                  </div>
+                </div>
+                <div className="wbColBody">
+                  <div className="wbForm wbFormTight">
+                    <div className="wbFormRow">
+                      <label>Nome<input value={attendanceContact.name} onChange={(e) => updateAttendanceContactField("name", e.target.value)} /></label>
+                      <label>Empresa<input value={attendanceContact.company} onChange={(e) => updateAttendanceContactField("company", e.target.value)} /></label>
+                    </div>
+                    <div className="wbFormRow">
+                      <label>Telefone<input value={attendanceContact.telefone} onChange={(e) => updateAttendanceContactField("telefone", e.target.value)} /></label>
+                      <label>wa_id<input value={attendanceContact.wa_id} onChange={(e) => updateAttendanceContactField("wa_id", e.target.value)} /></label>
+                    </div>
+                    <div className="wbFormRow">
+                      <label>Email<input value={attendanceContact.email} onChange={(e) => updateAttendanceContactField("email", e.target.value)} /></label>
+                      <label>Instagram<input value={attendanceContact.instagram} onChange={(e) => updateAttendanceContactField("instagram", e.target.value)} /></label>
+                    </div>
+                    <label>Site<input value={attendanceContact.site} onChange={(e) => updateAttendanceContactField("site", e.target.value)} /></label>
+                    <div className="wbFormRow">
+                      <label>Serviço de interesse<input value={attendanceContact.service_interest} onChange={(e) => updateAttendanceContactField("service_interest", e.target.value)} /></label>
+                      <label>Serviço contratado<input value={attendanceContact.service_contracted} onChange={(e) => updateAttendanceContactField("service_contracted", e.target.value)} /></label>
+                    </div>
+                    <div className="wbFormRow">
+                      <label>Responsável Mugô<input value={attendanceContact.owner} onChange={(e) => updateAttendanceContactField("owner", e.target.value)} /></label>
+                      <label>
+                        Status
+                        <select value={attendanceContact.status} onChange={(e) => updateAttendanceContactField("status", e.target.value)}>
+                          {CONTACT_STATUSES.map((item) => <option key={item} value={item}>{item}</option>)}
+                        </select>
+                      </label>
+                    </div>
+                    <label>Observações internas<textarea value={attendanceContact.notes} onChange={(e) => updateAttendanceContactField("notes", e.target.value)} /></label>
+                    <button className="wbBtn" onClick={saveAttendanceContact} disabled={attendanceContactSaving}>
+                      {attendanceContactSaving ? "Salvando..." : "Salvar contato"}
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <div className="wbCol">
+                <div className="wbColHead">
+                  <div>
+                    <div className="wbSectionTitle">Contatos da central</div>
+                    <div className="wbSectionSub">Conversas recentes e clientes salvos</div>
+                  </div>
+                  <div className="wbColCount">{visibleConvs.length}</div>
+                </div>
+                <div className="wbColBody">
+                  <div className="wbMiniList">
+                    {visibleConvs.slice(0, 18).map((contact) => (
+                      <div key={contact.wa_id} className="wbMiniItem">
+                        <div className="wbMiniItemMain">
+                          <div className="wbMiniTitle">{getDisplayName(contact)}</div>
+                          <div className="wbMiniSub">{formatPhoneBR(contact.telefone || contact.wa_id)} • {contact.status || getStageByConv(contact)}</div>
+                        </div>
+                        <button className="wbBtnGhost" onClick={() => {
+                          setSelected(contact.wa_id);
+                          setAttendanceContact(buildContactPayloadFromConv(contact));
+                        }}>
+                          Editar
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </section>
+        ) : view === "cobrancas" ? (
+          <section className="wbKanban">
+            <div className="wbAttendanceLayout">
+              <div className="wbCol">
+                <div className="wbColHead">
+                  <div>
+                    <div className="wbSectionTitle">Nova cobrança</div>
+                    <div className="wbSectionSub">Crie o controle e gere o lembrete para aprovação</div>
+                  </div>
+                </div>
+                <div className="wbColBody">
+                  <div className="wbForm wbFormTight">
+                    <div className="wbFormRow">
+                      <label>Cliente<input value={collectionForm.cliente} onChange={(e) => updateCollectionField("cliente", e.target.value)} /></label>
+                      <label>Empresa<input value={collectionForm.empresa} onChange={(e) => updateCollectionField("empresa", e.target.value)} /></label>
+                    </div>
+                    <div className="wbFormRow">
+                      <label>Telefone<input value={collectionForm.telefone} onChange={(e) => updateCollectionField("telefone", e.target.value)} /></label>
+                      <label>wa_id<input value={collectionForm.wa_id} onChange={(e) => updateCollectionField("wa_id", e.target.value)} /></label>
+                    </div>
+                    <div className="wbFormRow">
+                      <label>Valor<input value={collectionForm.amount} onChange={(e) => updateCollectionField("amount", e.target.value)} placeholder="R$ 0,00" /></label>
+                      <label>Data de vencimento<input type="date" value={collectionForm.due_date} onChange={(e) => updateCollectionField("due_date", e.target.value)} /></label>
+                    </div>
+                    <label>
+                      Status
+                      <select value={collectionForm.status} onChange={(e) => updateCollectionField("status", e.target.value)}>
+                        {COLLECTION_STATUSES.map((item) => <option key={item} value={item}>{item}</option>)}
+                      </select>
+                    </label>
+                    <label>Observações<textarea value={collectionForm.notes} onChange={(e) => updateCollectionField("notes", e.target.value)} /></label>
+                    <button className="wbBtn" onClick={saveCollection} disabled={collectionSaving}>
+                      {collectionSaving ? "Criando..." : "Criar cobrança"}
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <div className="wbCol">
+                <div className="wbColHead">
+                  <div>
+                    <div className="wbSectionTitle">Controle de cobranças</div>
+                    <div className="wbSectionSub">Lembretes só são enviados depois da aprovação</div>
+                  </div>
+                  <div className="wbColCount">{collections.length}</div>
+                </div>
+                <div className="wbColBody">
+                  {collections.length ? collections.map((collection) => (
+                    <div key={collection.id} className="wbCard">
+                      <div className="wbCardTop">
+                        <div className="wbAvatar small">{String(collection.cliente || collection.wa_id || "C").slice(0, 1)}</div>
+                        <div className="wbCardTitle">{collection.cliente || getDisplayName(conversationsById.get(collection.wa_id)) || "Cliente"}</div>
+                        <div className="wbCardTime">{formatDateBR(collection.due_date)}</div>
+                      </div>
+                      <div className="wbCardSub">{collection.empresa || "Sem empresa"} • {formatPhoneBR(collection.telefone || collection.wa_id)}</div>
+                      <div className="wbCardPreview">{formatMoneyBR(collection.amount)} • {collection.status} {collection.notes ? `• ${collection.notes}` : ""}</div>
+                      <div className="wbCardBadges">
+                        <button className="wbBtnGhost" onClick={() => setCollectionForm(collection)}>Editar</button>
+                        <button className="wbBtnGhost" onClick={() => markCollectionPaid(collection.id)} disabled={collection.status === "Pago"}>Marcar como paga</button>
+                        <button className="wbBtnGhost" onClick={() => prepareCollectionReminder(collection)}>Gerar lembrete</button>
+                        <button className="wbBtn" onClick={() => sendApprovedCollectionReminder(collection)} disabled={reminderSending}>Enviar lembrete aprovado</button>
+                      </div>
+                    </div>
+                  )) : (
+                    <div className="wbEmpty">
+                      Nenhuma cobrança criada nesta sessão.
+                      <div className="wbEmptyHint">Ao criar uma cobrança, ela também gera uma tarefa de acompanhamento.</div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          </section>
+        ) : view === "usuarios" ? (
+          <section className="wbKanban">
+            <div className="wbAttendanceLayout">
+              <div className="wbCol">
+                <div className="wbColHead">
+                  <div>
+                    <div className="wbSectionTitle">Usuários</div>
+                    <div className="wbSectionSub">Crie e mantenha acessos da equipe Mugô</div>
+                  </div>
+                  <button className="wbBtnGhost" onClick={() => refreshUsers()} disabled={usersLoading}>
+                    {usersLoading ? "Atualizando..." : "Atualizar"}
+                  </button>
+                </div>
+                <div className="wbColBody">
+                  {canManageUsers(currentRole) ? (
+                    <div className="wbForm wbFormTight">
+                      <div className="wbFormRow">
+                        <label>Nome<input value={newUser.name} onChange={(e) => setNewUser((prev) => ({ ...prev, name: e.target.value }))} /></label>
+                        <label>Email<input value={newUser.email} onChange={(e) => setNewUser((prev) => ({ ...prev, email: e.target.value }))} /></label>
+                      </div>
+                      <div className="wbFormRow">
+                        <label>
+                          Perfil
+                          <select value={newUser.role} onChange={(e) => setNewUser((prev) => ({ ...prev, role: e.target.value }))}>
+                            {USER_ROLES.map((role) => <option key={role} value={role}>{role}</option>)}
+                          </select>
+                        </label>
+                        <label>Senha inicial opcional<input type="password" value={newUser.password} onChange={(e) => setNewUser((prev) => ({ ...prev, password: e.target.value }))} /></label>
+                      </div>
+                      <button className="wbBtn" onClick={onCreateUser} disabled={userSaving || !newUser.email.trim()}>
+                        {userSaving ? "Criando..." : "Criar usuário"}
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="wbEmpty">Apenas Admin pode gerenciar usuários.</div>
+                  )}
+                </div>
+              </div>
+
+              <div className="wbCol">
+                <div className="wbColHead">
+                  <div>
+                    <div className="wbSectionTitle">Equipe cadastrada</div>
+                    <div className="wbSectionSub">Perfis ativos e permissões</div>
+                  </div>
+                  <div className="wbColCount">{users.length}</div>
+                </div>
+                <div className="wbColBody">
+                  {users.length ? users.map((user) => (
+                    <div key={user.id} className="wbCard">
+                      <div className="wbCardTop">
+                        <div className="wbAvatar small">{String(user.name || user.email || "U").slice(0, 1).toUpperCase()}</div>
+                        <input
+                          className="wbInlineInput"
+                          value={user.name || ""}
+                          onChange={(e) => setUsers((prev) => prev.map((item) => item.id === user.id ? { ...item, name: e.target.value } : item))}
+                          onBlur={(e) => onUpdateUser(user.id, { name: e.target.value })}
+                          disabled={!canManageUsers(currentRole)}
+                        />
+                        <span className={`wbBadge ${user.active ? "ok" : "paused"}`}>{user.active ? "ativo" : "inativo"}</span>
+                      </div>
+                      <div className="wbCardSub">{user.email}</div>
+                      <div className="wbCardBadges">
+                        <select
+                          className="wbHeaderSelect"
+                          value={normalizeRole(user.role)}
+                          onChange={(e) => onUpdateUser(user.id, { role: e.target.value })}
+                          disabled={!canManageUsers(currentRole)}
+                        >
+                          {USER_ROLES.map((role) => <option key={role} value={role}>{role}</option>)}
+                        </select>
+                        <button
+                          className="wbBtnGhost"
+                          onClick={() => onUpdateUser(user.id, { active: !user.active })}
+                          disabled={!canManageUsers(currentRole)}
+                        >
+                          {user.active ? "Desativar" : "Ativar"}
+                        </button>
+                      </div>
+                    </div>
+                  )) : (
+                    <div className="wbEmpty">
+                      Nenhum usuário retornado.
+                      <div className="wbEmptyHint">Aplique a migration de profiles se a tabela ainda não existir.</div>
+                    </div>
+                  )}
+                </div>
+              </div>
             </div>
           </section>
         ) : (

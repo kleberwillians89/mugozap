@@ -5,6 +5,7 @@ import uuid
 import urllib.parse
 import traceback
 import asyncio
+import hmac
 from pathlib import Path
 from typing import Any, Optional, List, Dict, Union
 from datetime import datetime, timezone, timedelta
@@ -34,6 +35,7 @@ ENV_PATH = _load_env()
 VERIFY_TOKEN = (os.getenv("WHATSAPP_VERIFY_TOKEN") or os.getenv("VERIFY_TOKEN") or "mugo_verify").strip()
 ALLOW_ORIGIN = (os.getenv("ALLOW_ORIGIN") or "").strip()
 PANEL_API_KEY = (os.getenv("PANEL_API_KEY") or "").strip()
+MUGO_INTELLIGENCE_WEBHOOK_SECRET = (os.getenv("MUGO_INTELLIGENCE_WEBHOOK_SECRET") or "").strip()
 
 SUPABASE_URL = (os.getenv("SUPABASE_URL") or "").strip().rstrip("/")
 SUPABASE_SERVICE_ROLE_KEY = (os.getenv("SUPABASE_SERVICE_ROLE_KEY") or "").strip()
@@ -351,6 +353,31 @@ from services.mugo_flow import apply_service_choice, handle_mugo_flow, is_servic
 from services import sales_brain
 from services.followup import process_followups
 from services.workspace import build_default_workspace, ensure_default_workspace, resolve_workspace_id
+from services.central_attendance import (
+    WELCOME_MESSAGE,
+    QUEUE_OPTIONS,
+    STATUS_OPTIONS,
+    build_collection_reminder_message,
+    build_diagnosis_summary,
+    build_summary_payload,
+    make_contact_profile,
+    normalize_queue,
+    normalize_status,
+)
+from services.profiles import (
+    ROLE_ADMIN,
+    ROLE_ATENDIMENTO,
+    ROLE_GESTOR,
+    can_access_billing,
+    can_manage_all_conversations,
+    can_manage_users,
+    create_profile,
+    get_profile_for_user,
+    list_profiles,
+    normalize_role,
+    profile_display_name,
+    update_profile,
+)
 
 app = FastAPI(title="MugôZap API")
 
@@ -497,7 +524,16 @@ async def get_current_user(
             "id": "panel-key",
             "email": "panel@mugo.internal",
             "name": "Painel Mugô",
-            "role": "admin",
+            "role": ROLE_ADMIN,
+            "profile": {
+                "id": "panel-key",
+                "auth_user_id": "panel-key",
+                "email": "panel@mugo.internal",
+                "name": "Painel Mugô",
+                "role": ROLE_ADMIN,
+                "active": True,
+                "workspace_id": requested_workspace_id,
+            },
             "auth_mode": "panel_key",
             "workspace_id": requested_workspace_id,
             "workspace": {
@@ -528,7 +564,144 @@ async def get_current_user(
         **build_default_workspace(),
         "id": internal_user["workspace_id"],
     }
+    profile = get_profile_for_user(internal_user, workspace_id=internal_user["workspace_id"])
+    if not profile.get("active", True):
+        raise HTTPException(status_code=403, detail="User inactive")
+    internal_user["profile"] = profile
+    internal_user["role"] = normalize_role(profile.get("role") or internal_user.get("role"))
+    internal_user["name"] = profile.get("name") or internal_user.get("name")
+    internal_user["email"] = profile.get("email") or internal_user.get("email")
     return internal_user
+
+
+def _conversation_owner(conv: Dict[str, Any] | None) -> str:
+    conv = conv or {}
+    return str(conv.get("assigned_to") or conv.get("human_owner") or conv.get("owner") or "").strip()
+
+
+def _normalize_integration_phone(value: Any) -> str:
+    return re.sub(r"\D+", "", str(value or ""))
+
+
+def _normalize_temperature(value: Any) -> str:
+    raw = str(value or "").strip().lower()
+    mapping = {
+        "frio": "Frio",
+        "cold": "Frio",
+        "morno": "Morno",
+        "warm": "Morno",
+        "quente": "Quente",
+        "hot": "Quente",
+    }
+    return mapping.get(raw, str(value or "").strip() or "Morno")
+
+
+def _score_int(value: Any) -> int:
+    match = re.search(r"\d+", str(value or ""))
+    if not match:
+        return 0
+    return max(0, min(100, int(match.group(0))))
+
+
+def _tag_from_service(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+    return f"servico-{slug}" if slug else ""
+
+
+def _find_conversation_by_phone(phone: str, workspace_id: str = "") -> Dict[str, Any] | None:
+    target = _normalize_integration_phone(phone)
+    if not target:
+        return None
+    suffixes = {target}
+    if target.startswith("55") and len(target) > 2:
+        suffixes.add(target[2:])
+
+    try:
+        items = list_conversations(limit=1000, workspace_id=workspace_id) or []
+    except Exception:
+        items = []
+
+    for item in items:
+        candidates = {
+            _normalize_integration_phone(item.get("wa_id")),
+            _normalize_integration_phone(item.get("telefone")),
+            _normalize_integration_phone(item.get("phone")),
+        }
+        candidates = {candidate for candidate in candidates if candidate}
+        if target in candidates:
+            return item
+        for candidate in candidates:
+            if any(candidate.endswith(suffix) or suffix.endswith(candidate) for suffix in suffixes):
+                return item
+    return None
+
+
+def _actor_names(user: Dict[str, Any] | None) -> set[str]:
+    user = user or {}
+    values = {
+        str(user.get("name") or "").strip().lower(),
+        str(user.get("email") or "").strip().lower(),
+        str((user.get("profile") or {}).get("name") or "").strip().lower(),
+        str((user.get("profile") or {}).get("email") or "").strip().lower(),
+    }
+    return {value for value in values if value}
+
+
+def _can_access_conversation(user: Dict[str, Any], conv: Dict[str, Any] | None) -> bool:
+    if can_manage_all_conversations(user):
+        return True
+    owner = _conversation_owner(conv).lower()
+    return not owner or owner in _actor_names(user)
+
+
+def _filter_visible_conversations(items: List[Dict[str, Any]], user: Dict[str, Any]) -> List[Dict[str, Any]]:
+    if can_manage_all_conversations(user):
+        return items
+    return [item for item in (items or []) if _can_access_conversation(user, item)]
+
+
+def _get_conversation_or_404(wa_id: str, workspace_id: str = "") -> Dict[str, Any]:
+    normalized = normalize_wa_id(wa_id)
+    items = list_conversations(limit=500, workspace_id=workspace_id) or []
+    for item in items:
+        if normalize_wa_id(item.get("wa_id")) == normalized:
+            return item
+    raise HTTPException(status_code=404, detail="Conversation not found")
+
+
+def _require_conversation_access(user: Dict[str, Any], wa_id: str) -> Dict[str, Any]:
+    conv = _get_conversation_or_404(wa_id, workspace_id=user.get("workspace_id"))
+    if not _can_access_conversation(user, conv):
+        raise HTTPException(status_code=403, detail="Conversation not available for this user")
+    return conv
+
+
+def _require_role(user: Dict[str, Any], roles: set[str]) -> None:
+    if normalize_role(user.get("role")) not in roles:
+        raise HTTPException(status_code=403, detail="Permission denied")
+
+
+def _audit_conversation(wa_id: str, user: Dict[str, Any], text: str, action: str = "audit") -> None:
+    try:
+        log_message(
+            wa_id,
+            "out",
+            f"[auditoria] {text}",
+            meta={
+                "src": "attendance_audit",
+                "action": action,
+                "actor_id": user.get("id"),
+                "actor_email": user.get("email"),
+                "actor_name": user.get("name"),
+                "created_at": _now_iso(),
+            },
+            workspace_id=user.get("workspace_id"),
+        )
+    except Exception as e:
+        print("AUDIT_LOG_ERROR:", repr(e))
 
 
 def _j(obj: Any) -> str:
@@ -2563,6 +2736,79 @@ async def api_me(
     return {"ok": True, "user": user}
 
 
+@app.get("/api/users")
+async def api_list_users(
+    authorization: str = Header(None),
+    x_panel_key: str = Header(None, alias="X-Panel-Key"),
+    x_workspace_id: str = Header(None, alias="X-Workspace-Id"),
+):
+    user = await get_current_user(
+        authorization=authorization,
+        x_panel_key=x_panel_key,
+        x_workspace_id=x_workspace_id,
+    )
+    if not can_manage_users(user):
+        raise HTTPException(status_code=403, detail="Only admins can manage users")
+    try:
+        users = list_profiles(workspace_id=user.get("workspace_id"))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Unable to list users: {str(e)}")
+    return {"ok": True, "items": users}
+
+
+@app.post("/api/users")
+async def api_create_user(
+    request: Request,
+    authorization: str = Header(None),
+    x_panel_key: str = Header(None, alias="X-Panel-Key"),
+    x_workspace_id: str = Header(None, alias="X-Workspace-Id"),
+):
+    user = await get_current_user(
+        authorization=authorization,
+        x_panel_key=x_panel_key,
+        x_workspace_id=x_workspace_id,
+    )
+    if not can_manage_users(user):
+        raise HTTPException(status_code=403, detail="Only admins can manage users")
+    payload = await request.json()
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Invalid payload")
+    try:
+        created = create_profile(payload, workspace_id=user.get("workspace_id"))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Unable to create user: {str(e)}")
+    return {"ok": True, "user": created}
+
+
+@app.patch("/api/users/{profile_id}")
+async def api_update_user(
+    profile_id: str,
+    request: Request,
+    authorization: str = Header(None),
+    x_panel_key: str = Header(None, alias="X-Panel-Key"),
+    x_workspace_id: str = Header(None, alias="X-Workspace-Id"),
+):
+    user = await get_current_user(
+        authorization=authorization,
+        x_panel_key=x_panel_key,
+        x_workspace_id=x_workspace_id,
+    )
+    if not can_manage_users(user):
+        raise HTTPException(status_code=403, detail="Only admins can manage users")
+    payload = await request.json()
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Invalid payload")
+    try:
+        updated = update_profile(profile_id, payload, workspace_id=user.get("workspace_id"))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Unable to update user: {str(e)}")
+    return {"ok": True, "user": updated}
+
+
 @app.get("/api/debug/ai-state/{wa_id}")
 async def api_debug_ai_state(
     wa_id: str,
@@ -2586,7 +2832,7 @@ async def api_debug_meta_env(
     x_panel_key: str = Header(None, alias="X-Panel-Key"),
     x_workspace_id: str = Header(None, alias="X-Workspace-Id"),
 ):
-    await get_current_user(
+    user = await get_current_user(
         authorization=authorization,
         x_panel_key=x_panel_key,
         x_workspace_id=x_workspace_id,
@@ -2607,7 +2853,7 @@ async def api_debug_send_test_whatsapp(
     x_panel_key: str = Header(None, alias="X-Panel-Key"),
     x_workspace_id: str = Header(None, alias="X-Workspace-Id"),
 ):
-    await get_current_user(
+    user = await get_current_user(
         authorization=authorization,
         x_panel_key=x_panel_key,
         x_workspace_id=x_workspace_id,
@@ -2938,7 +3184,7 @@ async def api_conversations(
         x_workspace_id=x_workspace_id,
     )
     items = list_conversations(limit=200, workspace_id=user.get("workspace_id")) or []
-    enriched = _enrich_conversation_items(items)
+    enriched = _filter_visible_conversations(_enrich_conversation_items(items), user)
     return {"ok": True, "items": enriched}
 
 
@@ -2954,6 +3200,7 @@ async def api_delete_conversation(
         x_panel_key=x_panel_key,
         x_workspace_id=x_workspace_id,
     )
+    _require_role(user, {ROLE_ADMIN})
 
     result = await delete_conversation_bundle(
         wa_id=wa_id,
@@ -2982,6 +3229,7 @@ async def api_messages(
         x_panel_key=x_panel_key,
         x_workspace_id=x_workspace_id,
     )
+    _require_conversation_access(user, wa_id)
     msgs = get_recent_messages(wa_id, limit=int(limit), workspace_id=user.get("workspace_id")) or []
     print(
         "API_MESSAGES:",
@@ -3011,6 +3259,7 @@ async def api_conversation_detail(
         x_panel_key=x_panel_key,
         x_workspace_id=x_workspace_id,
     )
+    _require_conversation_access(user, wa_id)
     msgs = get_recent_messages(wa_id, limit=200, workspace_id=user.get("workspace_id")) or []
     return {"ok": True, "messages": msgs}
 
@@ -3028,6 +3277,7 @@ async def api_send_message(
         x_panel_key=x_panel_key,
         x_workspace_id=x_workspace_id,
     )
+    _require_conversation_access(user, wa_id)
     workspace_id = user.get("workspace_id")
     payload = await request.json()
     text = (payload.get("text") or "").strip() if isinstance(payload, dict) else ""
@@ -3076,6 +3326,7 @@ async def api_close_handoff(
         x_panel_key=x_panel_key,
         x_workspace_id=x_workspace_id,
     )
+    _require_conversation_access(user, wa_id)
     workspace_id = user.get("workspace_id")
     flow_data = _flow_data(wa_id, workspace_id=workspace_id)
     ai_state = await get_ai_state(wa_id, workspace_id=workspace_id) or {}
@@ -3149,6 +3400,7 @@ async def api_update_contact(
         x_panel_key=x_panel_key,
         x_workspace_id=x_workspace_id,
     )
+    conv = _require_conversation_access(user, wa_id)
     payload = await request.json()
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="Invalid payload")
@@ -3182,6 +3434,15 @@ async def api_update_contact(
     if not data:
         raise HTTPException(status_code=400, detail="No fields to update")
 
+    if normalize_role(user.get("role")) == ROLE_ATENDIMENTO:
+        blocked = {"assigned_to", "human_owner", "owner", "closed_at"}
+        if blocked.intersection(data.keys()):
+            raise HTTPException(status_code=403, detail="Attendance users cannot transfer or archive conversations")
+        if _conversation_owner(conv).lower() not in _actor_names(user):
+            raise HTTPException(status_code=403, detail="Assume the conversation before changing it")
+    elif "closed_at" in data and normalize_role(user.get("role")) != ROLE_ADMIN:
+        raise HTTPException(status_code=403, detail="Only admins can archive conversations")
+
     if "stage" not in data:
         data["stage"] = "Novo"
 
@@ -3190,6 +3451,101 @@ async def api_update_contact(
 
     upsert_user(wa_id, workspace_id=user.get("workspace_id"), **data)
     return {"ok": True}
+
+
+@app.patch("/api/attendance/conversations/{wa_id}/assign")
+async def api_assign_conversation(
+    wa_id: str,
+    request: Request,
+    authorization: str = Header(None),
+    x_panel_key: str = Header(None, alias="X-Panel-Key"),
+    x_workspace_id: str = Header(None, alias="X-Workspace-Id"),
+):
+    user = await get_current_user(
+        authorization=authorization,
+        x_panel_key=x_panel_key,
+        x_workspace_id=x_workspace_id,
+    )
+    conv = _require_conversation_access(user, wa_id)
+    payload = await request.json()
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Invalid payload")
+
+    current_owner = _conversation_owner(conv)
+    requested_owner = str(payload.get("assigned_to") or payload.get("owner") or "").strip()
+    if not requested_owner:
+        requested_owner = profile_display_name(user)
+
+    role = normalize_role(user.get("role"))
+    if role == ROLE_ATENDIMENTO:
+        if current_owner and current_owner.lower() not in _actor_names(user):
+            raise HTTPException(status_code=403, detail="Conversation already assigned to another user")
+        if requested_owner.lower() not in _actor_names(user):
+            raise HTTPException(status_code=403, detail="Attendance users can only assume conversations for themselves")
+
+    patch = {
+        "assigned_to": requested_owner,
+        "human_owner": requested_owner,
+        "owner": requested_owner,
+        "attendance_mode": "human",
+        "automation_paused": True,
+        "bot_enabled": False,
+    }
+    upsert_user(wa_id, workspace_id=user.get("workspace_id"), **patch)
+
+    action_text = (
+        f"{profile_display_name(user)} assumiu o atendimento"
+        if not current_owner or current_owner == requested_owner
+        else f"{profile_display_name(user)} transferiu o atendimento de {current_owner} para {requested_owner}"
+    )
+    _audit_conversation(wa_id, user, action_text, action="assign")
+    return {"ok": True, "assignment": patch}
+
+
+@app.patch("/api/attendance/conversations/{wa_id}/status")
+async def api_update_conversation_status(
+    wa_id: str,
+    request: Request,
+    authorization: str = Header(None),
+    x_panel_key: str = Header(None, alias="X-Panel-Key"),
+    x_workspace_id: str = Header(None, alias="X-Workspace-Id"),
+):
+    user = await get_current_user(
+        authorization=authorization,
+        x_panel_key=x_panel_key,
+        x_workspace_id=x_workspace_id,
+    )
+    conv = _require_conversation_access(user, wa_id)
+    payload = await request.json()
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Invalid payload")
+
+    status = str(payload.get("status") or payload.get("stage") or "").strip()
+    if not status:
+        raise HTTPException(status_code=400, detail="Missing status")
+
+    role = normalize_role(user.get("role"))
+    if role == ROLE_ATENDIMENTO and _conversation_owner(conv).lower() not in _actor_names(user):
+        raise HTTPException(status_code=403, detail="Attendance users can only change status of their own conversations")
+
+    patch = {
+        "status": status,
+        "stage": status,
+        "lead_stage": status.lower(),
+    }
+    if status.lower() in {"resolvida", "resolvido", "resolved", "arquivada", "arquivado", "fechado"}:
+        patch["closed_at"] = _now_iso()
+    elif "closed_at" in conv and conv.get("closed_at"):
+        patch["closed_at"] = ""
+
+    upsert_user(wa_id, workspace_id=user.get("workspace_id"), **patch)
+    _audit_conversation(
+        wa_id,
+        user,
+        f"{profile_display_name(user)} alterou o status para {status}",
+        action="status",
+    )
+    return {"ok": True, "status": status}
 
 
 @app.get("/api/tasks")
@@ -3298,6 +3654,326 @@ async def api_update_task(
     return {"ok": res.get("ok", False), "item": res.get("item")}
 
 
+@app.get("/api/attendance/meta")
+async def api_attendance_meta(
+    authorization: str = Header(None),
+    x_panel_key: str = Header(None, alias="X-Panel-Key"),
+    x_workspace_id: str = Header(None, alias="X-Workspace-Id"),
+):
+    user = await get_current_user(
+        authorization=authorization,
+        x_panel_key=x_panel_key,
+        x_workspace_id=x_workspace_id,
+    )
+    return {
+        "ok": True,
+        "queues": QUEUE_OPTIONS,
+        "statuses": STATUS_OPTIONS,
+        "welcome_message": WELCOME_MESSAGE,
+    }
+
+
+@app.post("/api/integrations/mugo-intelligence/lead")
+async def api_mugo_intelligence_lead(
+    request: Request,
+    x_mugo_webhook_secret: str = Header(None, alias="X-Mugo-Webhook-Secret"),
+    x_workspace_id: str = Header(None, alias="X-Workspace-Id"),
+):
+    if not MUGO_INTELLIGENCE_WEBHOOK_SECRET:
+        raise HTTPException(status_code=500, detail="Mugô Intelligence webhook secret not configured")
+    if not x_mugo_webhook_secret or not hmac.compare_digest(
+        str(x_mugo_webhook_secret),
+        MUGO_INTELLIGENCE_WEBHOOK_SECRET,
+    ):
+        raise HTTPException(status_code=401, detail="Invalid webhook secret")
+
+    payload = await request.json()
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Invalid payload")
+
+    workspace_id = resolve_workspace_id(explicit_workspace_id=x_workspace_id) or build_default_workspace().get("id")
+    diagnosis = build_diagnosis_summary(payload)
+    phone = _normalize_integration_phone(diagnosis.get("phone") or payload.get("wa_id") or payload.get("telefone"))
+    if not phone:
+        raise HTTPException(status_code=400, detail="Missing telefone")
+
+    matched_conv = _find_conversation_by_phone(phone, workspace_id=workspace_id)
+    wa_id = normalize_wa_id((matched_conv or {}).get("wa_id") or phone)
+    existing_flow = {}
+    if matched_conv:
+        raw_flow = matched_conv.get("flow_data") or {}
+        if isinstance(raw_flow, dict):
+            existing_flow = raw_flow
+        elif isinstance(raw_flow, str):
+            try:
+                existing_flow = json.loads(raw_flow) if raw_flow.strip() else {}
+            except Exception:
+                existing_flow = {}
+
+    temperature = _normalize_temperature(diagnosis.get("temperature"))
+    recommended_service = diagnosis.get("recommended_service") or ""
+    service_tag = _tag_from_service(recommended_service)
+    existing_tags = matched_conv.get("tags") if matched_conv else []
+    if not isinstance(existing_tags, list):
+        existing_tags = []
+    tags = [str(tag).strip() for tag in existing_tags if str(tag).strip()]
+    for tag in ["mugo-intelligence", service_tag]:
+        if tag and tag not in tags:
+            tags.append(tag)
+
+    summary = build_summary_payload(
+        existing={
+            "wa_id": wa_id,
+            "workspace_id": workspace_id,
+            "status": "Diagnóstico concluído",
+            "queue": "Novos leads",
+            "owner": (matched_conv or {}).get("owner") or (matched_conv or {}).get("assigned_to") or "",
+        },
+        diagnosis=diagnosis,
+        queue="Novos leads",
+        status="Diagnóstico concluído",
+        owner=(matched_conv or {}).get("owner") or (matched_conv or {}).get("assigned_to") or "",
+    )
+    flow_data = {
+        **existing_flow,
+        "diagnosis_summary": diagnosis,
+        "attendance_summary": summary,
+        "mugo_intelligence": {
+            "lead_id": diagnosis.get("lead_id") or payload.get("lead_id") or "",
+            "received_at": _now_iso(),
+            "payload": payload,
+        },
+    }
+
+    upserted = upsert_user(
+        wa_id,
+        workspace_id=workspace_id,
+        name=diagnosis.get("name") or (matched_conv or {}).get("name") or "",
+        telefone=phone,
+        company=diagnosis.get("company") or (matched_conv or {}).get("company") or "",
+        email=diagnosis.get("email") or (matched_conv or {}).get("email") or "",
+        segment=diagnosis.get("segment") or (matched_conv or {}).get("segment") or "",
+        instagram=diagnosis.get("instagram") or (matched_conv or {}).get("instagram") or "",
+        site=diagnosis.get("site") or (matched_conv or {}).get("site") or "",
+        linkedin=diagnosis.get("linkedin") or (matched_conv or {}).get("linkedin") or "",
+        google_business=diagnosis.get("google_business") or (matched_conv or {}).get("google_business") or "",
+        service=recommended_service or (matched_conv or {}).get("service") or "",
+        service_interest=recommended_service or (matched_conv or {}).get("service_interest") or "",
+        status="Diagnóstico concluído",
+        stage="Diagnóstico",
+        lead_stage="diagnostico",
+        notes=diagnosis.get("summary") or "Diagnóstico Mugô Intelligence recebido",
+        source="Mugô Intelligence",
+        last_source=diagnosis.get("origin") or payload.get("origem_lead") or "Mugô Intelligence",
+        campaign=diagnosis.get("utm_campaign") or payload.get("utm_campaign") or "",
+        tags=tags,
+        lead_score=_score_int(diagnosis.get("score_overall")),
+        lead_temperature=temperature,
+        lead_theme=diagnosis.get("opportunity") or recommended_service or "diagnóstico",
+        priority=3 if temperature == "Quente" else 2 if temperature == "Morno" else 1,
+        flow_data=flow_data,
+        entry_type="mugo_intelligence",
+        inbound_type="mugo_intelligence",
+        last_at=_now_iso(),
+        last_text="Diagnóstico Mugô Intelligence recebido",
+    )
+
+    log_message(
+        wa_id,
+        "out",
+        "Diagnóstico Mugô Intelligence recebido",
+        meta={
+            "src": "mugo_intelligence",
+            "event": "diagnosis_received",
+            "lead_id": diagnosis.get("lead_id") or payload.get("lead_id") or "",
+            "matched_existing_conversation": bool(matched_conv),
+        },
+        workspace_id=workspace_id,
+    )
+
+    return {
+        "ok": True,
+        "wa_id": wa_id,
+        "matched_existing_conversation": bool(matched_conv),
+        "contact": upserted,
+        "diagnosis": diagnosis,
+    }
+
+
+@app.post("/api/attendance/conversations/{wa_id}/diagnosis")
+async def api_store_diagnosis(
+    wa_id: str,
+    request: Request,
+    authorization: str = Header(None),
+    x_panel_key: str = Header(None, alias="X-Panel-Key"),
+    x_workspace_id: str = Header(None, alias="X-Workspace-Id"),
+):
+    user = await get_current_user(
+        authorization=authorization,
+        x_panel_key=x_panel_key,
+        x_workspace_id=x_workspace_id,
+    )
+    _require_conversation_access(user, wa_id)
+    workspace_id = user.get("workspace_id")
+    payload = await request.json()
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Invalid payload")
+
+    diagnosis = build_diagnosis_summary(payload)
+    summary = build_summary_payload(
+        existing={
+            "wa_id": normalize_wa_id(wa_id),
+            "workspace_id": workspace_id,
+            "status": "Diagnóstico concluído",
+            "queue": "Novos leads",
+        },
+        diagnosis=diagnosis,
+        queue=payload.get("queue") or "Novos leads",
+        status=payload.get("status") or "Diagnóstico concluído",
+        owner=payload.get("owner") or user.get("name") or user.get("email") or "",
+    )
+
+    upsert_user(
+        wa_id,
+        workspace_id=workspace_id,
+        stage="Diagnóstico",
+        lead_stage="diagnostico",
+        notes=(payload.get("notes") or "Diagnóstico concluído no Mugô Intelligence").strip(),
+        status=summary.get("status"),
+        queue=summary.get("queue"),
+        owner=summary.get("owner"),
+        lead_temperature=diagnosis.get("temperature") or "frio",
+        lead_theme=diagnosis.get("opportunity") or diagnosis.get("recommended_service") or "diagnóstico",
+        flow_data={"diagnosis_summary": diagnosis, "attendance_summary": summary},
+    )
+    try:
+        log_message(
+            wa_id,
+            "out",
+            "Recebemos seu diagnóstico e já encaminhamos o resumo para a equipe da Mugô. Em breve um atendente assumirá o atendimento por aqui.",
+            meta={"src": "central_attendance", "event": "diagnosis_received"},
+            workspace_id=workspace_id,
+        )
+    except Exception:
+        pass
+
+    return {"ok": True, "summary": summary}
+
+
+@app.post("/api/attendance/contacts")
+async def api_create_contact(
+    request: Request,
+    authorization: str = Header(None),
+    x_panel_key: str = Header(None, alias="X-Panel-Key"),
+    x_workspace_id: str = Header(None, alias="X-Workspace-Id"),
+):
+    user = await get_current_user(
+        authorization=authorization,
+        x_panel_key=x_panel_key,
+        x_workspace_id=x_workspace_id,
+    )
+    payload = await request.json()
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Invalid payload")
+
+    profile = make_contact_profile(payload)
+    wa_id = normalize_wa_id(payload.get("wa_id") or payload.get("telefone") or "")
+    if not wa_id:
+        raise HTTPException(status_code=400, detail="Missing wa_id")
+
+    upsert_user(
+        wa_id,
+        workspace_id=user.get("workspace_id"),
+        name=profile.get("name") or payload.get("name") or "Cliente",
+        telefone=profile.get("telefone") or wa_id,
+        stage="Cliente ativo",
+        lead_stage="cliente_ativo",
+        notes=profile.get("notes") or "Cliente migrado para a central de atendimento",
+        status=profile.get("status"),
+        queue=profile.get("queue"),
+        owner=profile.get("owner"),
+        service=profile.get("service"),
+    )
+    return {"ok": True, "contact": profile}
+
+
+@app.post("/api/attendance/collections")
+async def api_create_collection(
+    request: Request,
+    authorization: str = Header(None),
+    x_panel_key: str = Header(None, alias="X-Panel-Key"),
+    x_workspace_id: str = Header(None, alias="X-Workspace-Id"),
+):
+    user = await get_current_user(
+        authorization=authorization,
+        x_panel_key=x_panel_key,
+        x_workspace_id=x_workspace_id,
+    )
+    if not can_access_billing(user):
+        raise HTTPException(status_code=403, detail="Billing is restricted to admin and gestor roles")
+    workspace_id = user.get("workspace_id")
+    payload = await request.json()
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Invalid payload")
+
+    wa_id = normalize_wa_id(payload.get("wa_id") or "")
+    if not wa_id:
+        raise HTTPException(status_code=400, detail="Missing wa_id")
+
+    item = {
+        "workspace_id": workspace_id,
+        "wa_id": wa_id,
+        "amount": str(payload.get("amount") or "").strip(),
+        "due_date": str(payload.get("due_date") or "").strip(),
+        "status": normalize_status(payload.get("status") or "Cobrança em aberto"),
+        "message_suggestion": build_collection_reminder_message(payload.get("amount"), payload.get("due_date")),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        create_task(
+            wa_id,
+            f"Cobrança: {item['amount'] or 'valor a definir'}",
+            item.get("due_date") or datetime.now(timezone.utc).isoformat(),
+            workspace_id=workspace_id,
+        )
+    except Exception:
+        pass
+
+    return {"ok": True, "collection": item}
+
+
+@app.post("/api/attendance/collections/{wa_id}/remind")
+async def api_send_collection_reminder(
+    wa_id: str,
+    request: Request,
+    authorization: str = Header(None),
+    x_panel_key: str = Header(None, alias="X-Panel-Key"),
+    x_workspace_id: str = Header(None, alias="X-Workspace-Id"),
+):
+    user = await get_current_user(
+        authorization=authorization,
+        x_panel_key=x_panel_key,
+        x_workspace_id=x_workspace_id,
+    )
+    if not can_access_billing(user):
+        raise HTTPException(status_code=403, detail="Billing is restricted to admin and gestor roles")
+    _require_conversation_access(user, wa_id)
+    workspace_id = user.get("workspace_id")
+    payload = await request.json()
+    if not isinstance(payload, dict):
+        payload = {}
+
+    message = (payload.get("message") or build_collection_reminder_message(payload.get("amount"), payload.get("due_date"))).strip()
+    ok = safe_send(
+        normalize_wa_id(wa_id),
+        message,
+        meta={"src": "central_attendance", "event": "collection_reminder"},
+        workspace_id=workspace_id,
+        cid="collection-reminder",
+    )
+    return {"ok": ok, "message": message}
+
+
 @app.get("/api/dashboard/summary")
 async def api_dashboard_summary(
     authorization: str = Header(None),
@@ -3311,7 +3987,10 @@ async def api_dashboard_summary(
     )
     workspace_id = user.get("workspace_id")
 
-    items = _enrich_conversation_items(list_conversations(limit=500, workspace_id=workspace_id) or [])
+    items = _filter_visible_conversations(
+        _enrich_conversation_items(list_conversations(limit=500, workspace_id=workspace_id) or []),
+        user,
+    )
     tasks = list_tasks(status="open", limit=500, workspace_id=workspace_id) or []
 
     now_iso = datetime.now(timezone.utc).isoformat()
@@ -3396,7 +4075,16 @@ async def sse_events(token: str = Query(""), workspace_id: str = Query("")):
     if not _is_allowed_internal_user(user):
         raise HTTPException(status_code=403, detail="User not allowed in internal panel")
 
-    resolved_workspace_id = resolve_workspace_id(explicit_workspace_id=workspace_id, user=user)
+    internal_user = _build_internal_user_payload(user)
+    resolved_workspace_id = resolve_workspace_id(explicit_workspace_id=workspace_id, user=internal_user)
+    profile = get_profile_for_user(internal_user, workspace_id=resolved_workspace_id)
+    if not profile.get("active", True):
+        raise HTTPException(status_code=403, detail="User inactive")
+    internal_user["profile"] = profile
+    internal_user["role"] = normalize_role(profile.get("role") or internal_user.get("role"))
+    internal_user["name"] = profile.get("name") or internal_user.get("name")
+    internal_user["email"] = profile.get("email") or internal_user.get("email")
+    internal_user["workspace_id"] = resolved_workspace_id
 
     async def event_gen():
         yield "event: ready\ndata: ok\n\n"
@@ -3404,7 +4092,7 @@ async def sse_events(token: str = Query(""), workspace_id: str = Query("")):
         while True:
             try:
                 items = list_conversations(limit=200, workspace_id=resolved_workspace_id) or []
-                enriched = _enrich_conversation_items(items)
+                enriched = _filter_visible_conversations(_enrich_conversation_items(items), internal_user)
                 payload = json.dumps({"type": "conversations", "items": enriched}, ensure_ascii=False)
                 yield f"event: conversations\ndata: {payload}\n\n"
             except Exception as e:

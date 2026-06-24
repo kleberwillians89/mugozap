@@ -61,3 +61,5 @@ As variáveis mais importantes são:
 - Frontend: `cd web && npm run build`
 
 Checklist detalhado em [DEPLOY.md](/Users/klebs/Desktop/mugozap/mugo-zap/DEPLOY.md).
+
+Setup de producao com multiusuario em [SETUP_PRODUCAO.md](SETUP_PRODUCAO.md).

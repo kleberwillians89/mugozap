@@ -451,6 +451,28 @@ button{
   color: #8b6513;
 }
 
+.wbBadge.temp{
+  white-space: nowrap;
+}
+
+.wbBadge.temp.hot{
+  background: rgba(178, 34, 52, 0.10);
+  border-color: rgba(178, 34, 52, 0.18);
+  color: #8c1b2a;
+}
+
+.wbBadge.temp.warm{
+  background: rgba(199, 152, 48, 0.14);
+  border-color: rgba(199, 152, 48, 0.22);
+  color: #8b6513;
+}
+
+.wbBadge.temp.cold{
+  background: rgba(12, 65, 96, 0.08);
+  border-color: rgba(12, 65, 96, 0.14);
+  color: var(--mugo-blue);
+}
+
 .wbEmpty{
   padding: 18px 14px;
   color: var(--text-soft);
@@ -528,6 +550,73 @@ button{
   min-width: 0;
 }
 
+.wbPrimaryTabs{
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px;
+  border-radius: 999px;
+  border: 1px solid var(--stroke);
+  background: rgba(255,255,255,.78);
+  box-shadow: var(--shadow-xs);
+}
+
+.wbPrimaryTabs button{
+  border: 0;
+  background: transparent;
+  color: var(--text-soft);
+  cursor: pointer;
+  border-radius: 999px;
+  padding: 8px 12px;
+  font-size: 12px;
+  font-weight: 900;
+  white-space: nowrap;
+}
+
+.wbPrimaryTabs button.active{
+  background: var(--mugo-blue);
+  color: #fff;
+}
+
+.wbUserBadge{
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--stroke);
+  background: rgba(255,255,255,.86);
+  color: var(--mugo-blue);
+  box-shadow: var(--shadow-xs);
+}
+
+.wbUserBadge strong{
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+.wbUserBadge span{
+  color: var(--text-faint);
+  font-size: 11px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.wbHeaderSelect{
+  min-height: 40px;
+  max-width: 190px;
+  border: 1px solid var(--stroke);
+  background: rgba(255,255,255,.94);
+  color: var(--mugo-blue);
+  border-radius: 999px;
+  padding: 8px 12px;
+  font-size: 12px;
+  font-weight: 800;
+}
+
 .wbCrmBar{
   display: grid;
   grid-template-columns: 1.5fr repeat(4, minmax(0, 1fr));
@@ -542,6 +631,123 @@ button{
   display: flex;
   flex-direction: column;
   overflow: hidden;
+}
+
+.wbSidebarFilters{
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 0 14px 12px;
+}
+
+.wbSidebarFilters button,
+.wbSidebarFilters select{
+  border: 1px solid var(--stroke);
+  background: rgba(255,255,255,.88);
+  color: var(--text-soft);
+  border-radius: 999px;
+  padding: 8px 10px;
+  font-size: 11px;
+  font-weight: 900;
+  cursor: pointer;
+}
+
+.wbSidebarFilters button.active{
+  background: var(--mugo-blue);
+  color: #fff;
+}
+
+.wbSidebarFilters select{
+  width: 100%;
+  border-radius: 12px;
+}
+
+.wbInboxWorkspace{
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 340px;
+  gap: 0;
+  overflow: hidden;
+}
+
+.wbConversationPane{
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.wbRightPanel{
+  min-width: 0;
+  overflow: auto;
+  padding: 16px 18px 22px;
+  border-left: 1px solid var(--stroke);
+  background: rgba(255,255,255,.64);
+}
+
+.wbSideBlock{
+  border: 1px solid rgba(12,65,96,.10);
+  background: rgba(255,255,255,.90);
+  border-radius: 8px;
+  padding: 14px;
+  box-shadow: var(--shadow-xs);
+  margin-bottom: 12px;
+}
+
+.wbSideTitle{
+  color: var(--mugo-blue);
+  font-size: 13px;
+  font-weight: 900;
+  margin-bottom: 10px;
+}
+
+.wbInfoGrid{
+  display: grid;
+  grid-template-columns: minmax(86px, auto) minmax(0, 1fr);
+  gap: 8px 10px;
+  align-items: start;
+}
+
+.wbInfoGrid span{
+  color: var(--text-faint);
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.wbInfoGrid strong{
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.wbSideAction{
+  width: 100%;
+  margin-top: 12px;
+}
+
+.wbSideActionsRow{
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.wbSideActionsRow .wbBtn,
+.wbSideActionsRow .wbBtnGhost{
+  padding: 8px 10px;
+  font-size: 12px;
+}
+
+.wbSideNote{
+  margin: 0;
+  color: var(--text-soft);
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .wbCrmCard{
@@ -696,7 +902,7 @@ button{
 
 .wbKpis{
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 14px;
   padding: 16px 28px 0;
   flex-shrink: 0;
@@ -992,6 +1198,23 @@ button{
   gap: 8px;
 }
 
+.wbInlineInput{
+  width: 100%;
+  min-width: 0;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text);
+  font-weight: 900;
+  outline: none;
+  border-radius: 8px;
+  padding: 8px;
+}
+
+.wbInlineInput:focus{
+  border-color: var(--stroke-strong);
+  background: #fff;
+}
+
 .wbColEmpty{
   padding: 8px 4px 2px;
   font-size: 12px;
@@ -1202,6 +1425,103 @@ button{
   min-height: 100%;
 }
 
+.wbAttendanceLayout{
+  display: grid;
+  grid-template-columns: minmax(0, 1.08fr) minmax(360px, .92fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.wbAttendanceMain{
+  min-height: 420px;
+}
+
+.wbFormTight{
+  margin-top: 0;
+}
+
+.wbDiagnosisGrid{
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.wbDiagnosisHero,
+.wbDiagnosisSideHero{
+  border: 1px solid rgba(12,65,96,.10);
+  background: linear-gradient(180deg, #fff, #fbfdff);
+  border-radius: 8px;
+  padding: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.wbDiagnosisHero span,
+.wbDiagnosisSideHero span{
+  color: var(--text-faint);
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.wbDiagnosisHero strong,
+.wbDiagnosisSideHero strong{
+  display: block;
+  color: var(--mugo-blue);
+  font-size: 28px;
+  line-height: 1;
+  font-weight: 900;
+  margin-top: 4px;
+}
+
+.wbDiagnosisSideHero{
+  padding: 12px;
+}
+
+.wbDiagnosisSideHero strong{
+  font-size: 22px;
+}
+
+.wbDiagnosisItem{
+  border: 1px solid rgba(12,65,96,.08);
+  background: linear-gradient(180deg, #fff, #fbfdff);
+  border-radius: 8px;
+  padding: 12px;
+  min-height: 72px;
+}
+
+.wbDiagnosisItem.wide{
+  grid-column: 1 / -1;
+}
+
+.wbDiagnosisItem span{
+  display: block;
+  margin-bottom: 6px;
+  color: var(--text-faint);
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.wbDiagnosisItem strong{
+  display: block;
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.wbScoreGrid{
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.wbMiniItemStack{
+  display: block;
+}
+
 /* modal */
 .wbModalOverlay{
   position: fixed;
@@ -1409,6 +1729,7 @@ button{
 
   .wbKpis{
     padding: 14px 20px 0;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .wbCrmBar{
@@ -1421,6 +1742,20 @@ button{
 
   .wbComposer{
     padding: 12px 20px 16px;
+  }
+
+  .wbInboxWorkspace{
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .wbRightPanel{
+    border-left: 0;
+    border-top: 1px solid var(--stroke);
+    max-height: 420px;
+  }
+
+  .wbAttendanceLayout{
+    grid-template-columns: 1fr;
   }
 }
 
@@ -1494,6 +1829,25 @@ button{
 
   .wbFormRow{
     grid-template-columns: 1fr;
+  }
+
+  .wbScoreGrid,
+  .wbDiagnosisGrid{
+    grid-template-columns: 1fr;
+  }
+
+  .wbPrimaryTabs{
+    width: 100%;
+    overflow-x: auto;
+    justify-content: flex-start;
+  }
+
+  .wbPrimaryTabs button{
+    flex: 0 0 auto;
+  }
+
+  .wbRightPanel{
+    max-height: none;
   }
 
   .wbComposerInner{

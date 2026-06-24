@@ -155,6 +155,13 @@ def list_profiles(workspace_id: str = "") -> List[Dict[str, Any]]:
     )
     resp = _CLIENT.get(url, headers=_headers())
     if resp.status_code != 200:
+        text = resp.text or ""
+        if resp.status_code == 404 and (
+            "PGRST205" in text
+            or "Could not find the table" in text
+            or "does not exist" in text.lower()
+        ):
+            return []
         raise RuntimeError(resp.text)
     return [_normalize_profile(row) for row in (resp.json() or [])]
 

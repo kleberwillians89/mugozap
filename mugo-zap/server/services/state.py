@@ -78,6 +78,24 @@ def _safe_json(v: Any, fallback: Any):
     return fallback
 
 
+def _has_value(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (list, dict)):
+        return bool(value)
+    return True
+
+
+def _merge_non_empty(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+    merged = dict(base or {})
+    for key, value in (override or {}).items():
+        if _has_value(value) or not _has_value(merged.get(key)):
+            merged[key] = value
+    return merged
+
+
 def _normalize_tags(v: Any) -> List[str]:
     if v is None:
         return []
@@ -809,8 +827,15 @@ def list_conversations(limit: int = 200, workspace_id: str = "") -> List[Dict[st
             if ur.status_code == 200:
                 rows = ur.json() or []
                 if rows:
-                    users_rows = rows
-                    break
+                    users_by_wa_id: Dict[str, Dict[str, Any]] = {
+                        (row.get("wa_id") or "").strip(): row for row in users_rows if (row.get("wa_id") or "").strip()
+                    }
+                    for row in rows:
+                        wa_id = (row.get("wa_id") or "").strip()
+                        if not wa_id:
+                            continue
+                        users_by_wa_id[wa_id] = _merge_non_empty(users_by_wa_id.get(wa_id) or {}, row)
+                    users_rows = list(users_by_wa_id.values())
     except Exception:
         users_rows = []
 
@@ -820,8 +845,15 @@ def list_conversations(limit: int = 200, workspace_id: str = "") -> List[Dict[st
             if cr.status_code == 200:
                 rows = cr.json() or []
                 if rows:
-                    conv_rows = rows
-                    break
+                    conv_by_wa_id: Dict[str, Dict[str, Any]] = {
+                        (row.get("wa_id") or "").strip(): row for row in conv_rows if (row.get("wa_id") or "").strip()
+                    }
+                    for row in rows:
+                        wa_id = (row.get("wa_id") or "").strip()
+                        if not wa_id:
+                            continue
+                        conv_by_wa_id[wa_id] = _merge_non_empty(conv_by_wa_id.get(wa_id) or {}, row)
+                    conv_rows = list(conv_by_wa_id.values())
     except Exception:
         conv_rows = []
 
@@ -889,14 +921,14 @@ def list_conversations(limit: int = 200, workspace_id: str = "") -> List[Dict[st
     for row in conv_rows:
         wa_id = (row.get("wa_id") or "").strip()
         if wa_id:
-            merged_base_by[wa_id] = row
+            merged_base_by[wa_id] = _merge_non_empty(merged_base_by.get(wa_id) or {}, row)
 
     for row in users_rows:
         wa_id = (row.get("wa_id") or "").strip()
         if not wa_id:
             continue
         current = merged_base_by.get(wa_id) or {}
-        merged_base_by[wa_id] = {**current, **row}
+        merged_base_by[wa_id] = _merge_non_empty(current, row)
 
     base_rows = list(merged_base_by.values())
 

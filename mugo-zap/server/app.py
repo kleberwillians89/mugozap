@@ -676,8 +676,6 @@ def _supabase_upsert_service_row(
     last_error = ""
     for conflict_target in conflict_targets:
         row_payload = dict(payload)
-        if conflict_target == "wa_id":
-            row_payload.pop("workspace_id", None)
         url = f"{SUPABASE_URL}/rest/v1/{table}?on_conflict={urllib.parse.quote(conflict_target)}"
         try:
             with httpx.Client(timeout=httpx.Timeout(connect=6.0, read=12.0, write=12.0, pool=12.0)) as client:

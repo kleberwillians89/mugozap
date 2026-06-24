@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import unicodedata
 from typing import Any, Dict, List, Optional
 
 WELCOME_MESSAGE = (
@@ -9,6 +10,13 @@ WELCOME_MESSAGE = (
     "https://intelligence.mugoagencia.com.br/\n\n"
     "Assim que você finalizar, seguimos seu atendimento por aqui."
 )
+
+INTELLIGENCE_COMPLETION_CONFIRMATION = (
+    "Perfeito, recebemos sua confirmação do Diagnóstico Mugô. "
+    "Vou deixar seu atendimento marcado como diagnóstico concluído para a equipe da Mugô seguir por aqui."
+)
+
+INTELLIGENCE_COMPLETION_HISTORY_EVENT = "Diagnóstico Mugô Intelligence concluído pelo lead no WhatsApp"
 
 QUEUE_OPTIONS = [
     "Novos leads",
@@ -29,6 +37,18 @@ STATUS_OPTIONS = [
     "Cobrança paga",
     "Cobrança atrasada",
 ]
+
+
+def _plain_text(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    return " ".join(text.split())
+
+
+def is_mugo_intelligence_completion_message(value: Any) -> bool:
+    text = _plain_text(value)
+    return "acabei de concluir o diagnostico mugo" in text
 
 
 def normalize_queue(value: Any) -> str:

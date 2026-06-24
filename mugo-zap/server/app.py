@@ -355,6 +355,8 @@ from services import sales_brain
 from services.followup import process_followups
 from services.workspace import build_default_workspace, ensure_default_workspace, resolve_workspace_id
 from services.central_attendance import (
+    INTELLIGENCE_COMPLETION_CONFIRMATION,
+    INTELLIGENCE_COMPLETION_HISTORY_EVENT,
     WELCOME_MESSAGE,
     build_welcome_summary,
     QUEUE_OPTIONS,
@@ -362,6 +364,7 @@ from services.central_attendance import (
     build_collection_reminder_message,
     build_diagnosis_summary,
     build_summary_payload,
+    is_mugo_intelligence_completion_message,
     make_contact_profile,
     normalize_queue,
     normalize_status,
@@ -719,6 +722,143 @@ def _send_intelligence_invite_if_needed(
         last_text=WELCOME_MESSAGE[:900],
         last_at=sent_at,
     )
+    return True
+
+
+def _build_internal_diagnosis_completion_alert(wa_id: str, user: Dict[str, Any], resolved_name: str) -> str:
+    company = str((user or {}).get("company") or "").strip()
+    parts = [
+        "Diagnóstico Mugô Intelligence concluído.",
+        "",
+        f"Lead: {resolved_name or (user or {}).get('name') or wa_id}",
+        f"Telefone: {wa_id}",
+    ]
+    if company:
+        parts.append(f"Empresa: {company}")
+    parts.extend([
+        "Status: Diagnóstico concluído",
+        "Origem: Mugô Intelligence",
+        "",
+        "Abrir no MugôZap para continuar o atendimento.",
+    ])
+    return "\n".join(parts)
+
+
+def _handle_mugo_intelligence_completion_reply(
+    wa_id: str,
+    user: Dict[str, Any],
+    existing_conv: Dict[str, Any],
+    *,
+    resolved_name: str = "",
+    workspace_id: str = "",
+    cid: str = "",
+) -> bool:
+    now = _now_iso()
+    current = {**(existing_conv or {}), **(user or {})}
+    flow_data = _flow_data(wa_id, workspace_id=workspace_id)
+    notified_at = (
+        current.get("internal_diagnosis_notified_at")
+        or (existing_conv or {}).get("internal_diagnosis_notified_at")
+        or flow_data.get("internal_diagnosis_notified_at")
+    )
+    confirmation_sent_at = flow_data.get("intelligence_completion_confirmation_sent_at")
+
+    merged_flow = {
+        **flow_data,
+        "automation_stage": "intelligence_completed",
+        "intelligence_completed_at": flow_data.get("intelligence_completed_at") or now,
+        "mugo_intelligence_completion_reply_at": now,
+    }
+
+    if confirmation_sent_at:
+        merged_flow["intelligence_completion_confirmation_sent_at"] = confirmation_sent_at
+
+    upsert_user(
+        wa_id,
+        workspace_id=workspace_id,
+        name=resolved_name or current.get("name") or "",
+        telefone=current.get("telefone") or wa_id,
+        status="Diagnóstico concluído",
+        stage="Diagnóstico concluído",
+        lead_stage="diagnostico",
+        source=current.get("source") or "Mugô Intelligence",
+        last_source="Mugô Intelligence",
+        origem_lead="Mugô Intelligence",
+        fila=current.get("fila") or "Novos leads",
+        automation_stage="intelligence_completed",
+        flow_data=merged_flow,
+        last_at=now,
+    )
+
+    log_message(
+        wa_id,
+        "out",
+        INTELLIGENCE_COMPLETION_HISTORY_EVENT,
+        meta={
+            "src": "mugo_intelligence",
+            "event": "diagnosis_completion_reply",
+            "cid": cid,
+        },
+        workspace_id=workspace_id,
+    )
+
+    if not confirmation_sent_at:
+        ok = safe_send(
+            wa_id,
+            INTELLIGENCE_COMPLETION_CONFIRMATION,
+            meta={
+                "event": "mugo_intelligence_completion_confirmation",
+                "cid": cid,
+                "src": "whatsapp",
+            },
+            workspace_id=workspace_id,
+            cid=cid,
+        )
+        if ok:
+            merged_flow["intelligence_completion_confirmation_sent_at"] = now
+            upsert_user(
+                wa_id,
+                workspace_id=workspace_id,
+                automation_stage="intelligence_completed",
+                flow_data=merged_flow,
+                last_out_at=now,
+            )
+    else:
+        _log_outbound_skipped(cid or "webhook", wa_id, "duplicate_intelligence_completion_confirmation")
+
+    if not notified_at:
+        alert_text = _build_internal_diagnosis_completion_alert(wa_id, current, resolved_name)
+        internal_alert_sent = False
+        for number in OPERATION_BRIEFING_NUMBERS:
+            if not number or number == wa_id:
+                continue
+            if safe_send(
+                number,
+                alert_text,
+                meta={
+                    "event": "internal_diagnosis_completed_alert",
+                    "cid": cid,
+                    "lead_wa_id": wa_id,
+                    "src": "mugo_intelligence",
+                },
+                workspace_id=workspace_id,
+                cid=cid,
+            ):
+                internal_alert_sent = True
+
+        if internal_alert_sent:
+            merged_flow["internal_diagnosis_notified_at"] = now
+            upsert_user(
+                wa_id,
+                workspace_id=workspace_id,
+                internal_diagnosis_notified_at=now,
+                automation_stage="intelligence_completed",
+                flow_data=merged_flow,
+            )
+    else:
+        _log_outbound_skipped(cid or "webhook", wa_id, "duplicate_internal_diagnosis_alert")
+
+    print(f"[{cid}] WEBHOOK:mugo_intelligence_completion_reply_handled wa_id={wa_id}")
     return True
 
 
@@ -4694,6 +4834,7 @@ async def _process_webhook_payload(data: dict, cid: str):
             attendance_mode=attendance_mode,
             welcome_sent_at=existing_conv.get("welcome_sent_at") or None,
             intelligence_sent_at=existing_conv.get("intelligence_sent_at") or None,
+            internal_diagnosis_notified_at=existing_conv.get("internal_diagnosis_notified_at") or None,
             automation_stage=existing_conv.get("automation_stage") or None,
         )
 
@@ -4729,6 +4870,17 @@ async def _process_webhook_payload(data: dict, cid: str):
             },
             event="state_change",
         )
+
+        if is_mugo_intelligence_completion_message(user_text):
+            _handle_mugo_intelligence_completion_reply(
+                wa_id,
+                user,
+                existing_conv,
+                resolved_name=resolved_name,
+                workspace_id=workspace_id,
+                cid=cid,
+            )
+            return
 
         if not choice_id:
             invitation_user = {

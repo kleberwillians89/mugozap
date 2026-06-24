@@ -12,8 +12,8 @@ WELCOME_MESSAGE = (
 )
 
 INTELLIGENCE_COMPLETION_CONFIRMATION = (
-    "Perfeito, recebemos sua confirmação do Diagnóstico Mugô. "
-    "Vou deixar seu atendimento marcado como diagnóstico concluído para a equipe da Mugô seguir por aqui."
+    "Recebemos sua confirmação do Diagnóstico Mugô.\n\n"
+    "Nosso time já está analisando suas respostas e entraremos em contato o mais breve possível."
 )
 
 INTELLIGENCE_COMPLETION_HISTORY_EVENT = "Diagnóstico Mugô Intelligence concluído pelo lead no WhatsApp"
@@ -30,6 +30,7 @@ QUEUE_OPTIONS = [
 STATUS_OPTIONS = [
     "Novo lead",
     "Diagnóstico enviado",
+    "Diagnóstico recebido",
     "Diagnóstico concluído",
     "Briefing recebido",
     "Cliente ativo",
@@ -82,6 +83,9 @@ def normalize_status(value: Any) -> str:
         "diagnóstico concluído": "Diagnóstico concluído",
         "diagnostico_concluido": "Diagnóstico concluído",
         "diagnostico": "Diagnóstico concluído",
+        "diagnostico recebido": "Diagnóstico recebido",
+        "diagnóstico recebido": "Diagnóstico recebido",
+        "diagnostico_recebido": "Diagnóstico recebido",
         "briefing recebido": "Briefing recebido",
         "briefing_recebido": "Briefing recebido",
         "welcome_completed": "Briefing recebido",
@@ -129,7 +133,17 @@ def build_diagnosis_summary(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]
     )
     return {
         "lead_id": str(fields.get("lead_id") or payload.get("lead_id") or "").strip(),
-        "name": str(fields.get("name") or fields.get("nome") or payload.get("name") or payload.get("nome") or "").strip(),
+        "name": str(
+            fields.get("name")
+            or fields.get("nome")
+            or fields.get("responsavel")
+            or fields.get("responsible")
+            or payload.get("name")
+            or payload.get("nome")
+            or payload.get("responsavel")
+            or payload.get("responsible")
+            or ""
+        ).strip(),
         "company": str(fields.get("company") or fields.get("empresa") or payload.get("company") or payload.get("empresa") or "").strip(),
         "phone": str(fields.get("phone") or fields.get("telefone") or payload.get("phone") or payload.get("telefone") or "").strip(),
         "email": str(fields.get("email") or payload.get("email") or "").strip(),

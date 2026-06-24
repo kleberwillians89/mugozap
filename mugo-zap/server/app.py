@@ -659,11 +659,16 @@ def _load_flow_dict(value: Any) -> Dict[str, Any]:
 def _should_send_intelligence_invite(user: Dict[str, Any], flow_data: Dict[str, Any]) -> tuple[bool, str]:
     status = str((user or {}).get("status") or (user or {}).get("stage") or "").strip().lower()
     automation_stage = str((user or {}).get("automation_stage") or (flow_data or {}).get("automation_stage") or "").strip()
+    origem_lead = str((user or {}).get("origem_lead") or (user or {}).get("source") or "").strip().lower()
     if (user or {}).get("welcome_sent_at") or (flow_data or {}).get("welcome_sent_at"):
         return False, "welcome_already_sent"
     if _conversation_owner(user):
         return False, "has_human_owner"
-    if status == "diagnóstico concluído" or automation_stage == "intelligence_completed":
+    if (
+        status in {"diagnóstico recebido", "diagnóstico concluído"}
+        or automation_stage in {"intelligence_received", "intelligence_completed"}
+        or origem_lead == "mugô intelligence"
+    ):
         return False, "diagnosis_completed"
     return True, "ok"
 
@@ -3896,6 +3901,137 @@ async def api_attendance_meta(
     }
 
 
+def _persist_mugo_intelligence_diagnosis(
+    payload: Dict[str, Any],
+    *,
+    workspace_id: str,
+    status: str,
+    automation_stage: str,
+    history_text: str,
+    history_event: str,
+) -> Dict[str, Any]:
+    diagnosis = build_diagnosis_summary(payload)
+    phone = _normalize_integration_phone(diagnosis.get("phone") or payload.get("wa_id") or payload.get("telefone"))
+    if not phone:
+        raise HTTPException(status_code=400, detail="Missing telefone")
+
+    matched_conv = _find_conversation_by_phone(phone, workspace_id=workspace_id)
+    wa_id = normalize_wa_id((matched_conv or {}).get("wa_id") or phone)
+    existing_flow = _load_flow_dict((matched_conv or {}).get("flow_data"))
+    received_at = _now_iso()
+
+    temperature = _normalize_temperature(diagnosis.get("temperature"))
+    recommended_service = diagnosis.get("recommended_service") or ""
+    service_tag = _tag_from_service(recommended_service)
+    existing_tags = matched_conv.get("tags") if matched_conv else []
+    if not isinstance(existing_tags, list):
+        existing_tags = []
+    tags = [str(tag).strip() for tag in existing_tags if str(tag).strip()]
+    for tag in ["mugo-intelligence", service_tag]:
+        if tag and tag not in tags:
+            tags.append(tag)
+
+    owner = (matched_conv or {}).get("owner") or (matched_conv or {}).get("assigned_to") or ""
+    summary = build_summary_payload(
+        existing={
+            "wa_id": wa_id,
+            "workspace_id": workspace_id,
+            "status": status,
+            "queue": "Novos leads",
+            "owner": owner,
+        },
+        diagnosis=diagnosis,
+        queue="Novos leads",
+        status=status,
+        owner=owner,
+    )
+    flow_data = {
+        **existing_flow,
+        "diagnosis_summary": diagnosis,
+        "attendance_summary": summary,
+        "automation_stage": automation_stage,
+        "intelligence_received_at": existing_flow.get("intelligence_received_at") or received_at,
+        "mugo_intelligence": {
+            "lead_id": diagnosis.get("lead_id") or payload.get("lead_id") or "",
+            "received_at": received_at,
+            "payload": payload,
+        },
+    }
+    if automation_stage == "intelligence_completed":
+        flow_data["intelligence_completed_at"] = existing_flow.get("intelligence_completed_at") or received_at
+
+    upserted = upsert_user(
+        wa_id,
+        workspace_id=workspace_id,
+        name=diagnosis.get("name") or (matched_conv or {}).get("name") or "",
+        telefone=phone,
+        company=diagnosis.get("company") or (matched_conv or {}).get("company") or "",
+        email=diagnosis.get("email") or (matched_conv or {}).get("email") or "",
+        segment=diagnosis.get("segment") or (matched_conv or {}).get("segment") or "",
+        segmento=diagnosis.get("segment") or (matched_conv or {}).get("segmento") or "",
+        instagram=diagnosis.get("instagram") or (matched_conv or {}).get("instagram") or "",
+        site=diagnosis.get("site") or (matched_conv or {}).get("site") or "",
+        linkedin=diagnosis.get("linkedin") or (matched_conv or {}).get("linkedin") or "",
+        google_business=diagnosis.get("google_business") or (matched_conv or {}).get("google_business") or "",
+        service=recommended_service or (matched_conv or {}).get("service") or "",
+        service_interest=recommended_service or (matched_conv or {}).get("service_interest") or "",
+        status=status,
+        stage=status,
+        lead_stage="diagnostico",
+        notes=diagnosis.get("summary") or history_text,
+        source="Mugô Intelligence",
+        last_source=diagnosis.get("origin") or payload.get("origem_lead") or "Mugô Intelligence",
+        origem_lead="Mugô Intelligence",
+        fila="Novos leads",
+        campaign=diagnosis.get("utm_campaign") or payload.get("utm_campaign") or "",
+        tags=tags,
+        lead_score=_score_int(diagnosis.get("score_overall")),
+        lead_temperature=temperature,
+        lead_theme=diagnosis.get("opportunity") or recommended_service or "diagnóstico",
+        priority=3 if temperature == "Quente" else 2 if temperature == "Morno" else 1,
+        automation_stage=automation_stage,
+        diagnosis_summary=diagnosis,
+        score_geral=diagnosis.get("score_overall") or "",
+        score_marketing=diagnosis.get("score_marketing") or "",
+        score_vendas=diagnosis.get("score_sales") or "",
+        score_automacao=diagnosis.get("score_automation") or "",
+        score_dados=diagnosis.get("score_data") or "",
+        score_relacionamento=diagnosis.get("score_relationship") or "",
+        temperatura=temperature,
+        principal_oportunidade=diagnosis.get("opportunity") or "",
+        servico_mugo_recomendado=recommended_service or "",
+        resumo_gerado=diagnosis.get("summary") or "",
+        respostas_completas=diagnosis.get("full_answers") or {},
+        intelligence_received_at=flow_data.get("intelligence_received_at") or received_at,
+        flow_data=flow_data,
+        entry_type="mugo_intelligence",
+        inbound_type="mugo_intelligence",
+        last_at=received_at,
+        last_text=history_text,
+    )
+
+    log_message(
+        wa_id,
+        "out",
+        history_text,
+        meta={
+            "src": "mugo_intelligence",
+            "event": history_event,
+            "lead_id": diagnosis.get("lead_id") or payload.get("lead_id") or "",
+            "matched_existing_conversation": bool(matched_conv),
+        },
+        workspace_id=workspace_id,
+    )
+
+    return {
+        "ok": True,
+        "wa_id": wa_id,
+        "matched_existing_conversation": bool(matched_conv),
+        "contact": upserted,
+        "diagnosis": diagnosis,
+    }
+
+
 @app.post("/api/integrations/mugo-intelligence/lead")
 async def api_mugo_intelligence_lead(
     request: Request,
@@ -3910,127 +4046,54 @@ async def api_mugo_intelligence_lead(
     ):
         raise HTTPException(status_code=401, detail="Invalid webhook secret")
 
-    payload = await request.json()
+    workspace_id = resolve_workspace_id(explicit_workspace_id=x_workspace_id) or build_default_workspace().get("id")
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(status_code=422, detail="Invalid payload")
     if not isinstance(payload, dict):
-        raise HTTPException(status_code=400, detail="Invalid payload")
+        raise HTTPException(status_code=422, detail="Invalid payload")
+
+    return _persist_mugo_intelligence_diagnosis(
+        payload,
+        workspace_id=workspace_id,
+        status="Diagnóstico concluído",
+        automation_stage="intelligence_completed",
+        history_text="Diagnóstico Mugô Intelligence recebido",
+        history_event="diagnosis_received",
+    )
+
+
+@app.post("/webhooks/mugo-intelligence")
+async def webhook_mugo_intelligence(
+    request: Request,
+    x_mugo_webhook_secret: str = Header(None, alias="X-Mugo-Webhook-Secret"),
+    x_workspace_id: str = Header(None, alias="X-Workspace-Id"),
+):
+    if not MUGO_INTELLIGENCE_WEBHOOK_SECRET:
+        raise HTTPException(status_code=500, detail="Mugô Intelligence webhook secret not configured")
+    if not x_mugo_webhook_secret or not hmac.compare_digest(
+        str(x_mugo_webhook_secret),
+        MUGO_INTELLIGENCE_WEBHOOK_SECRET,
+    ):
+        raise HTTPException(status_code=401, detail="Invalid webhook secret")
+
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(status_code=422, detail="Invalid payload")
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=422, detail="Invalid payload")
 
     workspace_id = resolve_workspace_id(explicit_workspace_id=x_workspace_id) or build_default_workspace().get("id")
-    diagnosis = build_diagnosis_summary(payload)
-    phone = _normalize_integration_phone(diagnosis.get("phone") or payload.get("wa_id") or payload.get("telefone"))
-    if not phone:
-        raise HTTPException(status_code=400, detail="Missing telefone")
-
-    matched_conv = _find_conversation_by_phone(phone, workspace_id=workspace_id)
-    wa_id = normalize_wa_id((matched_conv or {}).get("wa_id") or phone)
-    existing_flow = {}
-    if matched_conv:
-        raw_flow = matched_conv.get("flow_data") or {}
-        if isinstance(raw_flow, dict):
-            existing_flow = raw_flow
-        elif isinstance(raw_flow, str):
-            try:
-                existing_flow = json.loads(raw_flow) if raw_flow.strip() else {}
-            except Exception:
-                existing_flow = {}
-
-    temperature = _normalize_temperature(diagnosis.get("temperature"))
-    recommended_service = diagnosis.get("recommended_service") or ""
-    service_tag = _tag_from_service(recommended_service)
-    existing_tags = matched_conv.get("tags") if matched_conv else []
-    if not isinstance(existing_tags, list):
-        existing_tags = []
-    tags = [str(tag).strip() for tag in existing_tags if str(tag).strip()]
-    for tag in ["mugo-intelligence", service_tag]:
-        if tag and tag not in tags:
-            tags.append(tag)
-
-    summary = build_summary_payload(
-        existing={
-            "wa_id": wa_id,
-            "workspace_id": workspace_id,
-            "status": "Diagnóstico concluído",
-            "queue": "Novos leads",
-            "owner": (matched_conv or {}).get("owner") or (matched_conv or {}).get("assigned_to") or "",
-        },
-        diagnosis=diagnosis,
-        queue="Novos leads",
-        status="Diagnóstico concluído",
-        owner=(matched_conv or {}).get("owner") or (matched_conv or {}).get("assigned_to") or "",
-    )
-    flow_data = {
-        **existing_flow,
-        "diagnosis_summary": diagnosis,
-        "attendance_summary": summary,
-        "automation_stage": "intelligence_completed",
-        "intelligence_completed_at": _now_iso(),
-        "mugo_intelligence": {
-            "lead_id": diagnosis.get("lead_id") or payload.get("lead_id") or "",
-            "received_at": _now_iso(),
-            "payload": payload,
-        },
-    }
-
-    upserted = upsert_user(
-        wa_id,
+    return _persist_mugo_intelligence_diagnosis(
+        payload,
         workspace_id=workspace_id,
-        name=diagnosis.get("name") or (matched_conv or {}).get("name") or "",
-        telefone=phone,
-        company=diagnosis.get("company") or (matched_conv or {}).get("company") or "",
-        email=diagnosis.get("email") or (matched_conv or {}).get("email") or "",
-        segment=diagnosis.get("segment") or (matched_conv or {}).get("segment") or "",
-        instagram=diagnosis.get("instagram") or (matched_conv or {}).get("instagram") or "",
-        site=diagnosis.get("site") or (matched_conv or {}).get("site") or "",
-        linkedin=diagnosis.get("linkedin") or (matched_conv or {}).get("linkedin") or "",
-        google_business=diagnosis.get("google_business") or (matched_conv or {}).get("google_business") or "",
-        service=recommended_service or (matched_conv or {}).get("service") or "",
-        service_interest=recommended_service or (matched_conv or {}).get("service_interest") or "",
-        status="Diagnóstico concluído",
-        stage="Diagnóstico",
-        lead_stage="diagnostico",
-        notes=diagnosis.get("summary") or "Diagnóstico Mugô Intelligence recebido",
-        source="Mugô Intelligence",
-        last_source=diagnosis.get("origin") or payload.get("origem_lead") or "Mugô Intelligence",
-        origem_lead=diagnosis.get("origin") or payload.get("origem_lead") or "Mugô Intelligence",
-        fila="Novos leads",
-        campaign=diagnosis.get("utm_campaign") or payload.get("utm_campaign") or "",
-        tags=tags,
-        lead_score=_score_int(diagnosis.get("score_overall")),
-        lead_temperature=temperature,
-        lead_theme=diagnosis.get("opportunity") or recommended_service or "diagnóstico",
-        priority=3 if temperature == "Quente" else 2 if temperature == "Morno" else 1,
-        automation_stage="intelligence_completed",
-        diagnosis_summary=diagnosis,
-        score_geral=diagnosis.get("score_overall") or "",
-        temperatura=temperature,
-        principal_oportunidade=diagnosis.get("opportunity") or "",
-        servico_mugo_recomendado=recommended_service or "",
-        flow_data=flow_data,
-        entry_type="mugo_intelligence",
-        inbound_type="mugo_intelligence",
-        last_at=_now_iso(),
-        last_text="Diagnóstico Mugô Intelligence recebido",
+        status="Diagnóstico recebido",
+        automation_stage="intelligence_received",
+        history_text="Diagnóstico Mugô Intelligence recebido via webhook",
+        history_event="diagnosis_webhook_received",
     )
-
-    log_message(
-        wa_id,
-        "out",
-        "Diagnóstico Mugô Intelligence recebido",
-        meta={
-            "src": "mugo_intelligence",
-            "event": "diagnosis_received",
-            "lead_id": diagnosis.get("lead_id") or payload.get("lead_id") or "",
-            "matched_existing_conversation": bool(matched_conv),
-        },
-        workspace_id=workspace_id,
-    )
-
-    return {
-        "ok": True,
-        "wa_id": wa_id,
-        "matched_existing_conversation": bool(matched_conv),
-        "contact": upserted,
-        "diagnosis": diagnosis,
-    }
 
 
 @app.post("/api/integrations/mugo-welcome/lead")

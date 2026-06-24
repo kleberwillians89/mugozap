@@ -751,11 +751,11 @@ button{
 }
 
 .wbCrmCard{
-  border-radius: 18px;
+  border-radius: 8px;
   border: 1px solid var(--stroke);
   background: rgba(255,255,255,.88);
   box-shadow: var(--shadow-xs);
-  padding: 14px 16px;
+  padding: 10px 12px;
 }
 
 .wbCrmLabel{
@@ -769,6 +769,24 @@ button{
   font-size: 15px;
   font-weight: 800;
   color: var(--mugo-blue);
+}
+
+.wbCrmSelect{
+  width: 100%;
+  min-width: 0;
+  border: 1px solid rgba(12,65,96,.14);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--mugo-blue);
+  font-size: 13px;
+  font-weight: 850;
+  padding: 8px 10px;
+  outline: none;
+}
+
+.wbCrmSelect:focus{
+  border-color: var(--mugo-blue);
+  box-shadow: 0 0 0 3px rgba(12,65,96,.10);
 }
 
 .wbCrmBadges{
@@ -1222,6 +1240,14 @@ button{
 }
 
 /* dashboard extra */
+.wbDashboardScroll{
+  height: calc(100dvh - 174px);
+  min-height: 0;
+  overflow-y: auto;
+  padding-bottom: 24px;
+  scrollbar-gutter: stable;
+}
+
 .wbDashboardGrid{
   display: grid;
   grid-template-columns: 1.25fr .95fr;
@@ -1262,6 +1288,12 @@ button{
   display: flex;
   flex-direction: column;
   gap: 10px;
+}
+
+.wbDashboardColTall .wbMiniList{
+  max-height: 360px;
+  overflow-y: auto;
+  padding-right: 4px;
 }
 
 .wbMiniItem{
@@ -1494,6 +1526,12 @@ button{
 
 .wbDiagnosisItem.wide{
   grid-column: 1 / -1;
+}
+
+.wbDiagnosisItem.wide strong{
+  max-height: 150px;
+  overflow-y: auto;
+  white-space: pre-wrap;
 }
 
 .wbDiagnosisItem span{

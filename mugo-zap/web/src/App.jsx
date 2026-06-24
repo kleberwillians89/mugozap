@@ -33,6 +33,13 @@ const LS_STAGE_KEY = "mugozap_stages_v1";
 const LS_SEEN_KEY = "mugozap_seen_v1";
 
 const STAGES = ["Novo", "Qualificado", "Diagnóstico", "Proposta", "Negociação", "Fechado"];
+const PIPELINE_OPTIONS = ["Novo lead", "Diagnóstico recebido", "Em atendimento", "Agendado", "Resolvido"];
+const ATTENDANCE_MODE_OPTIONS = [
+  { value: "bot", label: "Bot ativo" },
+  { value: "human", label: "Atendimento humano" },
+  { value: "paused", label: "Automação pausada" },
+];
+const ORIGIN_OPTIONS = ["Mugô Intelligence", "Mugô Welcome", "WhatsApp direto", "Indicação", "Manual"];
 const TASK_COLS = ["Atrasadas", "Hoje", "Amanhã", "Esta semana", "Futuro", "Sem data"];
 const ATTENDANCE_TABS = ["inbox", "diagnostico", "contatos", "cobrancas"];
 const CONTACT_STATUSES = [
@@ -48,7 +55,7 @@ const CONTACT_STATUSES = [
 const COLLECTION_STATUSES = ["Em aberto", "Pago", "Atrasado"];
 const TEMPERATURES = ["Frio", "Morno", "Quente"];
 const USER_ROLES = ["admin", "gestor", "atendimento"];
-const CONVERSATION_STATUSES = ["Novo lead", "Diagnóstico enviado", "Diagnóstico concluído", "Briefing recebido", "Orçamento enviado", "Cliente ativo", "Suporte", "Cobrança", "Resolvida"];
+const CONVERSATION_STATUSES = ["Novo lead", "Diagnóstico enviado", "Diagnóstico recebido", "Diagnóstico concluído", "Briefing recebido", "Em atendimento", "Agendado", "Orçamento enviado", "Cliente ativo", "Suporte", "Cobrança", "Resolvida"];
 const MUGO_INTELLIGENCE_MESSAGE =
   "Para entendermos melhor seu momento e indicarmos o melhor caminho para sua empresa, faça nosso diagnóstico gratuito:\n\n" +
   "https://intelligence.mugoagencia.com.br/\n\n" +
@@ -83,6 +90,22 @@ function clip(text, max = 80) {
 
 function onlyDigits(v) {
   return String(v || "").replace(/\D/g, "");
+}
+
+function firstValue(...values) {
+  for (const value of values) {
+    if (value === 0) return "0";
+    const text = String(value ?? "").trim();
+    if (text) return text;
+  }
+  return "";
+}
+
+function formatDiagnosisScore(value) {
+  const text = firstValue(value);
+  if (!text) return "";
+  if (text.includes("/")) return text;
+  return `${text}/100`;
 }
 
 function normalizeTemperatureLabel(value) {
@@ -195,11 +218,14 @@ function normalizeSourceLabel(source) {
     indicacao: "Indicação",
     organico: "Orgânico",
     whatsapp: "WhatsApp",
+    "whatsapp direto": "WhatsApp direto",
     instagram: "Instagram",
     facebook: "Facebook",
     paid: "Pago",
     organic: "Orgânico",
     human: "Humano",
+    "Mugô Intelligence": "Mugô Intelligence",
+    "Mugô Welcome": "Mugô Welcome",
   };
 
   return map[s] || s;
@@ -480,13 +506,16 @@ function getAttendanceModeMeta(mode) {
   const value = String(mode || "").trim().toLowerCase();
 
   if (value === "human") {
-    return { label: "humano", className: "wbBadge human" };
+    return { label: "Atendimento humano", className: "wbBadge human" };
   }
   if (value === "hybrid") {
     return { label: "híbrido", className: "wbBadge warn" };
   }
+  if (value === "paused") {
+    return { label: "Automação pausada", className: "wbBadge warn" };
+  }
   if (value === "bot") {
-    return { label: "bot", className: "wbBadge ok" };
+    return { label: "Bot ativo", className: "wbBadge ok" };
   }
 
   return { label: "não definido", className: "wbBadge" };
@@ -562,21 +591,24 @@ function getDiagnosisFromConv(conv, flowData = null) {
   const diagnosis = data?.diagnosis_summary || data?.attendance_summary?.diagnosis || conv?.diagnosis || {};
 
   return {
-    name: diagnosis.name || conv?.name || conv?.contact_name || "",
-    company: diagnosis.company || conv?.company || "",
-    phone: diagnosis.phone || conv?.telefone || conv?.phone || conv?.wa_id || "",
-    email: diagnosis.email || conv?.email || "",
-    segment: diagnosis.segment || conv?.segment || "",
-    score_overall: diagnosis.score_overall || conv?.score_overall || "",
-    score_marketing: diagnosis.score_marketing || "",
-    score_sales: diagnosis.score_sales || "",
-    score_automation: diagnosis.score_automation || "",
-    score_data: diagnosis.score_data || "",
-    score_relationship: diagnosis.score_relationship || "",
-    opportunity: diagnosis.opportunity || conv?.lead_theme || "",
-    recommended_service: diagnosis.recommended_service || conv?.service || "",
-    summary: diagnosis.summary || diagnosis.resumo_gerado || conv?.notes || "",
-    temperature: normalizeTemperatureLabel(diagnosis.temperature || conv?.lead_temperature || conv?.temperature || ""),
+    name: firstValue(diagnosis.name, diagnosis.nome, conv?.name, conv?.contact_name),
+    company: firstValue(diagnosis.company, diagnosis.empresa, conv?.company, conv?.empresa),
+    phone: firstValue(diagnosis.phone, diagnosis.telefone, conv?.telefone, conv?.phone, conv?.wa_id),
+    email: firstValue(diagnosis.email, conv?.email),
+    segment: firstValue(diagnosis.segment, diagnosis.segmento, conv?.segmento, conv?.segment),
+    score_overall: firstValue(diagnosis.score_overall, diagnosis.score_geral, conv?.score_geral, conv?.score_overall),
+    score_marketing: firstValue(diagnosis.score_marketing, conv?.score_marketing),
+    score_sales: firstValue(diagnosis.score_sales, diagnosis.score_vendas, conv?.score_vendas),
+    score_automation: firstValue(diagnosis.score_automation, diagnosis.score_automacao, conv?.score_automacao),
+    score_data: firstValue(diagnosis.score_data, diagnosis.score_dados, conv?.score_dados),
+    score_relationship: firstValue(diagnosis.score_relationship, diagnosis.score_relacionamento, conv?.score_relacionamento),
+    opportunity: firstValue(diagnosis.opportunity, diagnosis.principal_oportunidade, conv?.principal_oportunidade, conv?.lead_theme),
+    recommended_service: firstValue(diagnosis.recommended_service, diagnosis.servico_mugo_recomendado, conv?.servico_mugo_recomendado, conv?.service),
+    summary: firstValue(diagnosis.summary, diagnosis.resumo_gerado, conv?.resumo_gerado, conv?.notes),
+    temperature: normalizeTemperatureLabel(firstValue(diagnosis.temperature, diagnosis.temperatura, conv?.temperatura, conv?.lead_temperature, conv?.temperature)),
+    origin: firstValue(conv?.origem_lead, diagnosis.origem_lead, conv?.source, conv?.last_source),
+    automation_stage: firstValue(conv?.automation_stage, data?.automation_stage),
+    received_at: firstValue(conv?.intelligence_received_at, diagnosis.intelligence_received_at, data?.intelligence_received_at),
   };
 }
 
@@ -2098,6 +2130,97 @@ export default function App() {
     }
   }
 
+  async function onUpdateConversationField(field, value) {
+    if (!selected || !selectedConv) return;
+
+    const nextValue = String(value || "").trim();
+    if (!nextValue) return;
+
+    let optimistic = { wa_id: selected };
+    let payload = {};
+
+    if (field === "pipeline") {
+      optimistic = {
+        ...optimistic,
+        stage: nextValue,
+        status: nextValue,
+        lead_stage: nextValue.toLowerCase(),
+      };
+      payload = {
+        stage: nextValue,
+        status: nextValue,
+        lead_stage: nextValue.toLowerCase(),
+      };
+      setStageLocal(selected, nextValue);
+    } else if (field === "mode") {
+      const paused = nextValue === "paused";
+      const human = nextValue === "human";
+      optimistic = {
+        ...optimistic,
+        attendance_mode: nextValue,
+        automation_paused: paused || human,
+        bot_enabled: nextValue === "bot",
+      };
+      payload = {
+        attendance_mode: nextValue,
+        automation_paused: paused || human,
+        bot_enabled: nextValue === "bot",
+      };
+    } else if (field === "origin") {
+      optimistic = {
+        ...optimistic,
+        origem_lead: nextValue,
+        source: nextValue,
+        last_source: nextValue,
+      };
+      payload = {
+        origem_lead: nextValue,
+        source: nextValue,
+        last_source: nextValue,
+      };
+    }
+
+    if (!Object.keys(payload).length) return;
+
+    setErr("");
+    replaceConversationLocal(optimistic);
+    try {
+      await updateContact(selected, payload);
+      await refreshConversations({ keepSelected: true, silent: true });
+      showToast("Atendimento atualizado.");
+    } catch (e) {
+      setErr(String(e.message || e));
+      await refreshConversations({ keepSelected: true, silent: true });
+    }
+  }
+
+  async function onUpdateConversationOwner(value) {
+    if (!selected) return;
+    const owner = String(value || "").trim();
+    if (owner === "__assume__") {
+      await onAssumeConversation();
+      return;
+    }
+    if (!canManageAllConversations(currentRole)) return;
+
+    setErr("");
+    replaceConversationLocal({
+      wa_id: selected,
+      assigned_to: owner,
+      human_owner: owner,
+      owner,
+      attendance_mode: owner ? "human" : selectedMode,
+    });
+    try {
+      await assignConversation(selected, { assigned_to: owner });
+      await refreshConversations({ keepSelected: true, silent: true });
+      showToast(owner ? "Responsável atualizado." : "Responsável removido.");
+    } catch (e) {
+      setErr(String(e.message || e));
+      await refreshConversations({ keepSelected: true, silent: true });
+    }
+  }
+
   async function onCreateUser() {
     if (!canManageUsers(currentRole) || userSaving) return;
     setUserSaving(true);
@@ -2164,7 +2287,11 @@ export default function App() {
 
   const selectedStatusMeta = getOperationStatusMeta(selectedConv?.operation_status);
   const selectedAttendanceMeta = getAttendanceModeMeta(selectedConv?.attendance_mode);
-  const selectedOwner = selectedConv?.assigned_to || selectedConv?.human_owner || "Sem responsável";
+  const selectedPipeline = selectedConv ? firstValue(selectedConv.stage, selectedConv.lead_stage, selectedConv.status, "Novo lead") : "";
+  const selectedMode = ["bot", "human", "paused"].includes(String(selectedConv?.attendance_mode || "").toLowerCase())
+    ? String(selectedConv?.attendance_mode || "").toLowerCase()
+    : "bot";
+  const selectedOrigin = selectedConv ? firstValue(selectedConv.origem_lead, selectedConv.source, selectedConv.last_source, "WhatsApp direto") : "";
   const selectedFlowData = useMemo(() => {
     const value = selectedConv?.flow_data;
     if (!value) return {};
@@ -2246,14 +2373,22 @@ export default function App() {
   }
 
   function suggestContinueAttendanceMessage() {
-    const opportunity = selectedDiagnosis.opportunity || "uma oportunidade estratégica de crescimento";
-    const service = selectedDiagnosis.recommended_service || "uma solução personalizada da Mugô";
-    setText(
-      "Obrigado por concluir seu diagnóstico.\n\n" +
-      `Analisamos suas respostas e vimos que a principal oportunidade da sua empresa está em: ${opportunity}.\n\n` +
-      `O caminho recomendado pela Mugô é: ${service}.\n\n` +
-      "Podemos seguir por aqui e te mostrar como isso funcionaria na prática?"
-    );
+    const opportunity = firstValue(selectedDiagnosis.opportunity);
+    const service = firstValue(selectedDiagnosis.recommended_service);
+    const message = opportunity && service
+      ? (
+          "Recebemos seu Diagnóstico Mugô.\n\n" +
+          "Com base nas suas respostas, identificamos uma oportunidade clara para evoluir sua operação:\n\n" +
+          `${opportunity}\n\n` +
+          "O caminho recomendado pela Mugô é:\n\n" +
+          `${service}\n\n` +
+          "Nosso time vai analisar seu cenário com mais profundidade e seguir por aqui com uma orientação prática sobre os próximos passos."
+        )
+      : (
+          "Recebemos seu Diagnóstico Mugô.\n\n" +
+          "Nosso time vai analisar suas respostas com cuidado e seguir por aqui com uma orientação prática sobre os próximos passos."
+        );
+    setText(message);
     setView("inbox");
     showToast("Mensagem de continuidade pronta para aprovação.");
     requestAnimationFrame(() => inputRef.current?.focus?.());
@@ -2865,7 +3000,7 @@ export default function App() {
               </div>
             </div>
 
-          <section className="wbKanban">
+          <section className="wbKanban wbDashboardScroll">
             <div className="wbDashboardHero">
               <div className="wbHeroCard">
                 <div className="wbHeroEyebrow">Operação Mugô</div>
@@ -3129,23 +3264,57 @@ export default function App() {
                 </div>
                 <div className="wbCrmCard">
                   <div className="wbCrmLabel">Pipeline Mugô</div>
-                  <div className="wbCrmValue">{getStage(selectedConv.wa_id)}</div>
+                  <select
+                    className="wbCrmSelect"
+                    value={PIPELINE_OPTIONS.includes(selectedPipeline) ? selectedPipeline : "Novo lead"}
+                    onChange={(e) => onUpdateConversationField("pipeline", e.target.value)}
+                    disabled={!selected}
+                  >
+                    {PIPELINE_OPTIONS.map((option) => (
+                      <option key={option} value={option}>{option}</option>
+                    ))}
+                  </select>
                 </div>
                 <div className="wbCrmCard">
                   <div className="wbCrmLabel">Responsável</div>
-                  <div className="wbCrmValue">{selectedOwner}</div>
+                  <select
+                    className="wbCrmSelect"
+                    value={selectedConv?.assigned_to || selectedConv?.human_owner || ""}
+                    onChange={(e) => onUpdateConversationOwner(e.target.value)}
+                    disabled={!selected}
+                  >
+                    <option value="">Sem responsável</option>
+                    {!selectedConv?.assigned_to && !selectedConv?.human_owner ? <option value="__assume__">Assumir atendimento</option> : null}
+                    {responsibleOptions.map((owner) => (
+                      <option key={owner} value={owner}>{owner}</option>
+                    ))}
+                  </select>
                 </div>
                 <div className="wbCrmCard">
                   <div className="wbCrmLabel">Modo</div>
-                  <div className="wbCrmBadges">
-                    <span className={selectedAttendanceMeta.className}>{selectedAttendanceMeta.label}</span>
-                  </div>
+                  <select
+                    className="wbCrmSelect"
+                    value={selectedMode}
+                    onChange={(e) => onUpdateConversationField("mode", e.target.value)}
+                    disabled={!selected}
+                  >
+                    {ATTENDANCE_MODE_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>{option.label}</option>
+                    ))}
+                  </select>
                 </div>
                 <div className="wbCrmCard">
                   <div className="wbCrmLabel">Origem</div>
-                  <div className="wbCrmValue">
-                    {normalizeSourceLabel(selectedConv?.source || selectedConv?.last_source || "Sem origem")}
-                  </div>
+                  <select
+                    className="wbCrmSelect"
+                    value={ORIGIN_OPTIONS.includes(selectedOrigin) ? selectedOrigin : "Manual"}
+                    onChange={(e) => onUpdateConversationField("origin", e.target.value)}
+                    disabled={!selected}
+                  >
+                    {ORIGIN_OPTIONS.map((option) => (
+                      <option key={option} value={option}>{option}</option>
+                    ))}
+                  </select>
                 </div>
               </section>
             ) : null}
@@ -3254,15 +3423,18 @@ export default function App() {
                       <div className="wbDiagnosisSideHero">
                         <div>
                           <span>Score geral</span>
-                          <strong>{selectedDiagnosis.score_overall || "sem score"}</strong>
+                          <strong>{formatDiagnosisScore(selectedDiagnosis.score_overall) || "Não informado"}</strong>
                         </div>
                         <span className={`wbBadge temp ${temperatureBadgeClass(selectedDiagnosis.temperature)}`}>
                           {selectedDiagnosis.temperature || "sem temperatura"}
                         </span>
                       </div>
                       <div className="wbInfoGrid">
+                        <span>Segmento</span><strong>{selectedDiagnosis.segment || "sem segmento"}</strong>
                         <span>Oportunidade</span><strong>{selectedDiagnosis.opportunity || "sem leitura"}</strong>
                         <span>Serviço</span><strong>{selectedDiagnosis.recommended_service || "sem recomendação"}</strong>
+                        <span>Origem</span><strong>{normalizeSourceLabel(selectedDiagnosis.origin)}</strong>
+                        <span>Recebido</span><strong>{selectedDiagnosis.received_at ? nowLocalTime(selectedDiagnosis.received_at) : "sem data"}</strong>
                         <span>Resumo</span><strong>{selectedDiagnosis.summary || "sem resumo"}</strong>
                       </div>
                       <button className="wbBtn wbSideAction" onClick={suggestContinueAttendanceMessage} disabled={!selected}>
@@ -3465,7 +3637,7 @@ export default function App() {
                       <div className="wbDiagnosisHero">
                         <div>
                           <span>Score geral</span>
-                          <strong>{selectedDiagnosis.score_overall || "Não informado"}</strong>
+                          <strong>{formatDiagnosisScore(selectedDiagnosis.score_overall) || "Não informado"}</strong>
                         </div>
                         <span className={`wbBadge temp ${temperatureBadgeClass(selectedDiagnosis.temperature)}`}>
                           {selectedDiagnosis.temperature || "Sem temperatura"}
@@ -3485,6 +3657,8 @@ export default function App() {
                           ["Score relacionamento", selectedDiagnosis.score_relationship],
                           ["Principal oportunidade", selectedDiagnosis.opportunity],
                           ["Serviço recomendado", selectedDiagnosis.recommended_service],
+                          ["Origem", normalizeSourceLabel(selectedDiagnosis.origin)],
+                          ["Recebido em", selectedDiagnosis.received_at ? nowLocalTime(selectedDiagnosis.received_at) : ""],
                           ["Resumo gerado", selectedDiagnosis.summary],
                         ].map(([label, value]) => (
                           <div key={label} className={label === "Resumo gerado" ? "wbDiagnosisItem wide" : "wbDiagnosisItem"}>

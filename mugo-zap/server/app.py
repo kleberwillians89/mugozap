@@ -355,9 +355,9 @@ from services import sales_brain
 from services.followup import process_followups
 from services.workspace import build_default_workspace, ensure_default_workspace, resolve_workspace_id
 from services.central_attendance import (
-    INTELLIGENCE_COMPLETION_CONFIRMATION,
     INTELLIGENCE_COMPLETION_HISTORY_EVENT,
     WELCOME_MESSAGE,
+    build_intelligence_completion_confirmation,
     build_welcome_summary,
     QUEUE_OPTIONS,
     STATUS_OPTIONS,
@@ -812,6 +812,20 @@ def _build_internal_diagnosis_completion_alert(wa_id: str, user: Dict[str, Any],
     return "\n".join(parts)
 
 
+def _diagnosis_text_field(current: Dict[str, Any], flow_data: Dict[str, Any], *keys: str) -> str:
+    diagnosis = (flow_data or {}).get("diagnosis_summary")
+    if not isinstance(diagnosis, dict):
+        diagnosis = {}
+    for key in keys:
+        value = current.get(key)
+        if value is None:
+            value = diagnosis.get(key)
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
+
+
 def _handle_mugo_intelligence_completion_reply(
     wa_id: str,
     user: Dict[str, Any],
@@ -858,22 +872,16 @@ def _handle_mugo_intelligence_completion_reply(
         last_at=now,
     )
 
-    log_message(
-        wa_id,
-        "out",
-        INTELLIGENCE_COMPLETION_HISTORY_EVENT,
-        meta={
-            "src": "mugo_intelligence",
-            "event": "diagnosis_completion_reply",
-            "cid": cid,
-        },
-        workspace_id=workspace_id,
-    )
+    print(f"[{cid}] INTERNAL_EVENT:{INTELLIGENCE_COMPLETION_HISTORY_EVENT} wa_id={wa_id}")
 
     if not confirmation_sent_at:
+        confirmation_text = build_intelligence_completion_confirmation(
+            _diagnosis_text_field(current, flow_data, "principal_oportunidade", "opportunity"),
+            _diagnosis_text_field(current, flow_data, "servico_mugo_recomendado", "recommended_service"),
+        )
         ok = safe_send(
             wa_id,
-            INTELLIGENCE_COMPLETION_CONFIRMATION,
+            confirmation_text,
             meta={
                 "event": "mugo_intelligence_completion_confirmation",
                 "cid": cid,
@@ -3699,6 +3707,7 @@ async def api_update_contact(
     allowed = {
         "name": str,
         "telefone": str,
+        "status": str,
         "stage": str,
         "lead_stage": str,
         "notes": str,
@@ -3707,6 +3716,8 @@ async def api_update_contact(
         "assigned_to": str,
         "source": str,
         "last_source": str,
+        "origem_lead": str,
+        "fila": str,
         "campaign": str,
         "entry_type": str,
         "inbound_type": str,
@@ -3733,9 +3744,6 @@ async def api_update_contact(
             raise HTTPException(status_code=403, detail="Assume the conversation before changing it")
     elif "closed_at" in data and normalize_role(user.get("role")) != ROLE_ADMIN:
         raise HTTPException(status_code=403, detail="Only admins can archive conversations")
-
-    if "stage" not in data:
-        data["stage"] = "Novo"
 
     if "lead_stage" not in data and data.get("stage"):
         data["lead_stage"] = str(data["stage"]).strip().lower()
@@ -4055,17 +4063,10 @@ def _persist_mugo_intelligence_diagnosis(
     _supabase_upsert_service_row(SUPABASE_TABLE_CONVERSATIONS, conversation_payload)
     _supabase_upsert_service_row(SUPABASE_TABLE_USERS, user_payload)
 
-    log_message(
-        wa_id,
-        "out",
-        history_text,
-        meta={
-            "src": "mugo_intelligence",
-            "event": history_event,
-            "lead_id": diagnosis.get("lead_id") or payload.get("lead_id") or "",
-            "matched_existing_conversation": bool(matched_conv),
-        },
-        workspace_id=workspace_id,
+    print(
+        "[webhook] INTERNAL_EVENT:"
+        f"{history_text} wa_id={wa_id} event={history_event} "
+        f"matched_existing_conversation={bool(matched_conv)}"
     )
 
     return {

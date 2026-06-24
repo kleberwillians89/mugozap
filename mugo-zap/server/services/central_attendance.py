@@ -11,11 +11,6 @@ WELCOME_MESSAGE = (
     "Assim que você finalizar, seguimos seu atendimento por aqui."
 )
 
-INTELLIGENCE_COMPLETION_CONFIRMATION = (
-    "Recebemos sua confirmação do Diagnóstico Mugô.\n\n"
-    "Nosso time já está analisando suas respostas e entraremos em contato o mais breve possível."
-)
-
 INTELLIGENCE_COMPLETION_HISTORY_EVENT = "Diagnóstico Mugô Intelligence concluído pelo lead no WhatsApp"
 
 QUEUE_OPTIONS = [
@@ -50,6 +45,32 @@ def _plain_text(value: Any) -> str:
 def is_mugo_intelligence_completion_message(value: Any) -> bool:
     text = _plain_text(value)
     return "acabei de concluir o diagnostico mugo" in text
+
+
+def _has_real_diagnosis_text(value: Any) -> bool:
+    text = str(value or "").strip()
+    plain = _plain_text(text)
+    return bool(text) and plain not in {"indefinido", "sem recomendacao", "sem leitura", "nao informado"}
+
+
+def build_intelligence_completion_confirmation(opportunity: Any = "", recommended_service: Any = "") -> str:
+    opportunity_text = str(opportunity or "").strip()
+    service_text = str(recommended_service or "").strip()
+
+    if _has_real_diagnosis_text(opportunity_text) and _has_real_diagnosis_text(service_text):
+        return (
+            "Recebemos seu Diagnóstico Mugô.\n\n"
+            "Com base nas suas respostas, identificamos uma oportunidade clara para evoluir sua operação:\n\n"
+            f"{opportunity_text}\n\n"
+            "O caminho recomendado pela Mugô é:\n\n"
+            f"{service_text}\n\n"
+            "Nosso time vai analisar seu cenário com mais profundidade e seguir por aqui com uma orientação prática sobre os próximos passos."
+        )
+
+    return (
+        "Recebemos seu Diagnóstico Mugô.\n\n"
+        "Nosso time vai analisar suas respostas com cuidado e seguir por aqui com uma orientação prática sobre os próximos passos."
+    )
 
 
 def normalize_queue(value: Any) -> str:

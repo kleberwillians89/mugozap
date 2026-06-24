@@ -644,6 +644,71 @@ def _find_conversation_by_phone(phone: str, workspace_id: str = "") -> Dict[str,
     return None
 
 
+def _supabase_service_headers(prefer: str = "return=representation") -> Dict[str, str]:
+    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+        raise HTTPException(
+            status_code=500,
+            detail={"ok": False, "error": "Supabase service credentials not configured"},
+        )
+    headers = {
+        "apikey": SUPABASE_SERVICE_ROLE_KEY,
+        "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+        "Content-Type": "application/json",
+    }
+    if prefer:
+        headers["Prefer"] = prefer
+    return headers
+
+
+def _supabase_upsert_service_row(
+    table: str,
+    payload: Dict[str, Any],
+    *,
+    conflict: str = "workspace_id,wa_id",
+) -> Dict[str, Any]:
+    if not table:
+        raise HTTPException(status_code=500, detail={"ok": False, "error": "Missing Supabase table"})
+
+    conflict_targets = [conflict]
+    if conflict != "wa_id":
+        conflict_targets.append("wa_id")
+
+    last_error = ""
+    for conflict_target in conflict_targets:
+        row_payload = dict(payload)
+        if conflict_target == "wa_id":
+            row_payload.pop("workspace_id", None)
+        url = f"{SUPABASE_URL}/rest/v1/{table}?on_conflict={urllib.parse.quote(conflict_target)}"
+        try:
+            with httpx.Client(timeout=httpx.Timeout(connect=6.0, read=12.0, write=12.0, pool=12.0)) as client:
+                resp = client.post(
+                    url,
+                    headers=_supabase_service_headers("resolution=merge-duplicates,return=representation"),
+                    content=json.dumps(row_payload, ensure_ascii=False),
+                )
+        except Exception as exc:
+            last_error = str(exc)
+            continue
+
+        if resp.status_code in (200, 201):
+            rows = resp.json() or []
+            return rows[0] if rows else row_payload
+
+        last_error = f"{resp.status_code}: {resp.text}"
+        if conflict_target != "wa_id":
+            continue
+        break
+
+    raise HTTPException(
+        status_code=500,
+        detail={
+            "ok": False,
+            "error": f"Failed to upsert {table}",
+            "detail": last_error,
+        },
+    )
+
+
 def _load_flow_dict(value: Any) -> Dict[str, Any]:
     if isinstance(value, dict):
         return value
@@ -3960,55 +4025,37 @@ def _persist_mugo_intelligence_diagnosis(
     if automation_stage == "intelligence_completed":
         flow_data["intelligence_completed_at"] = existing_flow.get("intelligence_completed_at") or received_at
 
-    upserted = upsert_user(
-        wa_id,
-        workspace_id=workspace_id,
-        name=diagnosis.get("name") or (matched_conv or {}).get("name") or "",
-        telefone=phone,
-        company=diagnosis.get("company") or (matched_conv or {}).get("company") or "",
-        email=diagnosis.get("email") or (matched_conv or {}).get("email") or "",
-        segment=diagnosis.get("segment") or (matched_conv or {}).get("segment") or "",
-        segmento=diagnosis.get("segment") or (matched_conv or {}).get("segmento") or "",
-        instagram=diagnosis.get("instagram") or (matched_conv or {}).get("instagram") or "",
-        site=diagnosis.get("site") or (matched_conv or {}).get("site") or "",
-        linkedin=diagnosis.get("linkedin") or (matched_conv or {}).get("linkedin") or "",
-        google_business=diagnosis.get("google_business") or (matched_conv or {}).get("google_business") or "",
-        service=recommended_service or (matched_conv or {}).get("service") or "",
-        service_interest=recommended_service or (matched_conv or {}).get("service_interest") or "",
-        status=status,
-        stage=status,
-        lead_stage="diagnostico",
-        notes=diagnosis.get("summary") or history_text,
-        source="Mugô Intelligence",
-        last_source=diagnosis.get("origin") or payload.get("origem_lead") or "Mugô Intelligence",
-        origem_lead="Mugô Intelligence",
-        fila="Novos leads",
-        campaign=diagnosis.get("utm_campaign") or payload.get("utm_campaign") or "",
-        tags=tags,
-        lead_score=_score_int(diagnosis.get("score_overall")),
-        lead_temperature=temperature,
-        lead_theme=diagnosis.get("opportunity") or recommended_service or "diagnóstico",
-        priority=3 if temperature == "Quente" else 2 if temperature == "Morno" else 1,
-        automation_stage=automation_stage,
-        diagnosis_summary=diagnosis,
-        score_geral=diagnosis.get("score_overall") or "",
-        score_marketing=diagnosis.get("score_marketing") or "",
-        score_vendas=diagnosis.get("score_sales") or "",
-        score_automacao=diagnosis.get("score_automation") or "",
-        score_dados=diagnosis.get("score_data") or "",
-        score_relacionamento=diagnosis.get("score_relationship") or "",
-        temperatura=temperature,
-        principal_oportunidade=diagnosis.get("opportunity") or "",
-        servico_mugo_recomendado=recommended_service or "",
-        resumo_gerado=diagnosis.get("summary") or "",
-        respostas_completas=diagnosis.get("full_answers") or {},
-        intelligence_received_at=flow_data.get("intelligence_received_at") or received_at,
-        flow_data=flow_data,
-        entry_type="mugo_intelligence",
-        inbound_type="mugo_intelligence",
-        last_at=received_at,
-        last_text=history_text,
-    )
+    base_payload = {
+        "workspace_id": workspace_id,
+        "wa_id": wa_id,
+        "telefone": wa_id,
+        "segmento": diagnosis.get("segment") or (matched_conv or {}).get("segmento") or "",
+        "origem_lead": "Mugô Intelligence",
+        "automation_stage": automation_stage,
+        "score_geral": diagnosis.get("score_overall") or "",
+        "score_marketing": diagnosis.get("score_marketing") or "",
+        "score_vendas": diagnosis.get("score_sales") or "",
+        "score_automacao": diagnosis.get("score_automation") or "",
+        "score_dados": diagnosis.get("score_data") or "",
+        "score_relacionamento": diagnosis.get("score_relationship") or "",
+        "principal_oportunidade": diagnosis.get("opportunity") or "",
+        "servico_mugo_recomendado": recommended_service or "",
+        "resumo_gerado": diagnosis.get("summary") or "",
+        "respostas_completas": diagnosis.get("full_answers") or {},
+        "intelligence_received_at": flow_data.get("intelligence_received_at") or received_at,
+    }
+
+    conversation_payload = {
+        **base_payload,
+        "status": "open",
+    }
+    user_payload = {
+        **base_payload,
+        "stage": status,
+    }
+
+    _supabase_upsert_service_row(SUPABASE_TABLE_CONVERSATIONS, conversation_payload)
+    _supabase_upsert_service_row(SUPABASE_TABLE_USERS, user_payload)
 
     log_message(
         wa_id,
@@ -4026,9 +4073,7 @@ def _persist_mugo_intelligence_diagnosis(
     return {
         "ok": True,
         "wa_id": wa_id,
-        "matched_existing_conversation": bool(matched_conv),
-        "contact": upserted,
-        "diagnosis": diagnosis,
+        "saved": True,
     }
 
 

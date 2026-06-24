@@ -21,7 +21,9 @@ QUEUE_OPTIONS = [
 
 STATUS_OPTIONS = [
     "Novo lead",
+    "Diagnóstico enviado",
     "Diagnóstico concluído",
+    "Briefing recebido",
     "Cliente ativo",
     "Cobrança em aberto",
     "Cobrança paga",
@@ -60,6 +62,9 @@ def normalize_status(value: Any) -> str:
         "diagnóstico concluído": "Diagnóstico concluído",
         "diagnostico_concluido": "Diagnóstico concluído",
         "diagnostico": "Diagnóstico concluído",
+        "briefing recebido": "Briefing recebido",
+        "briefing_recebido": "Briefing recebido",
+        "welcome_completed": "Briefing recebido",
         "cliente ativo": "Cliente ativo",
         "cliente_ativo": "Cliente ativo",
         "cliente": "Cliente ativo",
@@ -124,6 +129,40 @@ def build_diagnosis_summary(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]
         "summary": str(fields.get("summary") or fields.get("resumo_gerado") or payload.get("summary") or payload.get("resumo_gerado") or "").strip(),
         "full_answers": full_answers,
         "temperature": str(fields.get("temperature") or fields.get("temperatura") or payload.get("temperature") or payload.get("temperatura") or "").strip(),
+        "origin": str(fields.get("origin") or fields.get("origem_lead") or payload.get("origin") or payload.get("origem_lead") or "").strip(),
+        "utm_source": str(fields.get("utm_source") or payload.get("utm_source") or "").strip(),
+        "utm_medium": str(fields.get("utm_medium") or payload.get("utm_medium") or "").strip(),
+        "utm_campaign": str(fields.get("utm_campaign") or payload.get("utm_campaign") or "").strip(),
+    }
+
+
+def build_welcome_summary(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if not isinstance(payload, dict):
+        payload = {}
+
+    fields = payload.get("fields") if isinstance(payload.get("fields"), dict) else payload
+    return {
+        "lead_id": str(fields.get("lead_id") or payload.get("lead_id") or "").strip(),
+        "company": str(fields.get("company") or fields.get("empresa") or payload.get("company") or payload.get("empresa") or "").strip(),
+        "responsible": str(fields.get("responsible") or fields.get("responsavel") or payload.get("responsible") or payload.get("responsavel") or "").strip(),
+        "phone": str(fields.get("phone") or fields.get("telefone") or payload.get("phone") or payload.get("telefone") or "").strip(),
+        "email": str(fields.get("email") or payload.get("email") or "").strip(),
+        "cnpj": str(fields.get("cnpj") or payload.get("cnpj") or "").strip(),
+        "site": str(fields.get("site") or payload.get("site") or "").strip(),
+        "instagram": str(fields.get("instagram") or payload.get("instagram") or "").strip(),
+        "services": str(fields.get("services") or fields.get("servicos") or payload.get("services") or payload.get("servicos") or "").strip(),
+        "target_audience": str(fields.get("target_audience") or fields.get("publico_alvo") or payload.get("target_audience") or payload.get("publico_alvo") or "").strip(),
+        "differentials": str(fields.get("differentials") or fields.get("diferenciais") or payload.get("differentials") or payload.get("diferenciais") or "").strip(),
+        "goals": str(fields.get("goals") or fields.get("objetivos") or payload.get("goals") or payload.get("objetivos") or "").strip(),
+        "metrics": str(fields.get("metrics") or fields.get("metricas") or payload.get("metrics") or payload.get("metricas") or "").strip(),
+        "voice_tone": str(fields.get("voice_tone") or fields.get("tom_de_voz") or payload.get("voice_tone") or payload.get("tom_de_voz") or "").strip(),
+        "competitors": str(fields.get("competitors") or fields.get("concorrentes") or payload.get("competitors") or payload.get("concorrentes") or "").strip(),
+        "references": str(fields.get("references") or fields.get("referencias") or payload.get("references") or payload.get("referencias") or "").strip(),
+        "frequency": str(fields.get("frequency") or fields.get("frequencia") or payload.get("frequency") or payload.get("frequencia") or "").strip(),
+        "challenges": str(fields.get("challenges") or fields.get("desafios") or payload.get("challenges") or payload.get("desafios") or "").strip(),
+        "budget": str(fields.get("budget") or fields.get("orcamento") or payload.get("budget") or payload.get("orcamento") or "").strip(),
+        "deadline": str(fields.get("deadline") or fields.get("prazo") or payload.get("deadline") or payload.get("prazo") or "").strip(),
+        "notes": str(fields.get("notes") or fields.get("observacoes") or payload.get("notes") or payload.get("observacoes") or "").strip(),
         "origin": str(fields.get("origin") or fields.get("origem_lead") or payload.get("origin") or payload.get("origem_lead") or "").strip(),
         "utm_source": str(fields.get("utm_source") or payload.get("utm_source") or "").strip(),
         "utm_medium": str(fields.get("utm_medium") or payload.get("utm_medium") or "").strip(),

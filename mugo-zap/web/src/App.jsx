@@ -39,6 +39,7 @@ const CONTACT_STATUSES = [
   "Novo lead",
   "Diagnóstico enviado",
   "Diagnóstico concluído",
+  "Briefing recebido",
   "Orçamento enviado",
   "Cliente ativo",
   "Suporte",
@@ -47,7 +48,7 @@ const CONTACT_STATUSES = [
 const COLLECTION_STATUSES = ["Em aberto", "Pago", "Atrasado"];
 const TEMPERATURES = ["Frio", "Morno", "Quente"];
 const USER_ROLES = ["admin", "gestor", "atendimento"];
-const CONVERSATION_STATUSES = ["Novo lead", "Diagnóstico enviado", "Diagnóstico concluído", "Orçamento enviado", "Cliente ativo", "Suporte", "Cobrança", "Resolvida"];
+const CONVERSATION_STATUSES = ["Novo lead", "Diagnóstico enviado", "Diagnóstico concluído", "Briefing recebido", "Orçamento enviado", "Cliente ativo", "Suporte", "Cobrança", "Resolvida"];
 const MUGO_INTELLIGENCE_MESSAGE =
   "Para entendermos melhor seu momento e indicarmos o melhor caminho para sua empresa, faça nosso diagnóstico gratuito:\n\n" +
   "https://intelligence.mugoagencia.com.br/\n\n" +
@@ -577,6 +578,49 @@ function getDiagnosisFromConv(conv, flowData = null) {
     summary: diagnosis.summary || diagnosis.resumo_gerado || conv?.notes || "",
     temperature: normalizeTemperatureLabel(diagnosis.temperature || conv?.lead_temperature || conv?.temperature || ""),
   };
+}
+
+function getWelcomeFromConv(conv, flowData = null) {
+  const data =
+    flowData ||
+    (typeof conv?.flow_data === "object"
+      ? conv.flow_data
+      : (() => {
+          try {
+            return conv?.flow_data ? JSON.parse(conv.flow_data) : {};
+          } catch {
+            return {};
+          }
+        })());
+  const briefing = data?.welcome_summary || data?.briefing_summary || conv?.welcome_summary || conv?.briefing_summary || {};
+  return {
+    company: briefing.company || briefing.empresa || conv?.company || "",
+    responsible: briefing.responsible || briefing.responsavel || conv?.responsavel || "",
+    site: briefing.site || conv?.site || "",
+    instagram: briefing.instagram || conv?.instagram || "",
+    services: briefing.services || briefing.servicos || conv?.service || conv?.service_interest || "",
+    goals: briefing.goals || briefing.objetivos || conv?.objetivos || "",
+    budget: briefing.budget || briefing.orcamento || conv?.orcamento || "",
+    deadline: briefing.deadline || briefing.prazo || conv?.prazo || "",
+    notes: briefing.notes || briefing.observacoes || conv?.notes || "",
+  };
+}
+
+function hasWelcomeBriefing(briefing) {
+  return Boolean(
+    briefing &&
+      [
+        briefing.company,
+        briefing.responsible,
+        briefing.site,
+        briefing.instagram,
+        briefing.services,
+        briefing.goals,
+        briefing.budget,
+        briefing.deadline,
+        briefing.notes,
+      ].some((item) => String(item || "").trim())
+  );
 }
 
 function hasDiagnosis(diagnosis) {
@@ -2140,6 +2184,11 @@ export default function App() {
     [selectedConv, selectedFlowData]
   );
   const selectedHasDiagnosis = hasDiagnosis(selectedDiagnosis);
+  const selectedWelcome = useMemo(
+    () => getWelcomeFromConv(selectedConv, selectedFlowData),
+    [selectedConv, selectedFlowData]
+  );
+  const selectedHasWelcome = hasWelcomeBriefing(selectedWelcome);
   const selectedOpenCollections = useMemo(() => {
     const selectedWaId = selectedConv?.wa_id || selected;
     if (!selectedWaId) return [];
@@ -2546,6 +2595,9 @@ export default function App() {
                         <div className="wbPreview">{clip(c.last_message || c.last_text || "", 90)}</div>
 
                         {source ? <span className="wbBadge">{normalizeSourceLabel(source)}</span> : null}
+                        {c.fila ? <span className="wbBadge">{c.fila}</span> : null}
+                        {c.automation_stage === "welcome_completed" ? <span className="wbBadge ok">Briefing recebido</span> : null}
+                        {c.status ? <span className="wbBadge">{c.status}</span> : null}
                         <span className={statusMeta.className}>{statusMeta.label}</span>
                         {c.assigned_to ? <span className="wbBadge">{normalizeOwnerLabel(c.assigned_to)}</span> : null}
                         {archived ? <span className="wbBadge">arquivado</span> : null}
@@ -3224,6 +3276,25 @@ export default function App() {
                         Enviar Mugô Intelligence
                       </button>
                     </>
+                  )}
+                </div>
+
+                <div className="wbSideBlock">
+                  <div className="wbSideTitle">Briefing Welcome</div>
+                  {selectedHasWelcome ? (
+                    <div className="wbInfoGrid">
+                      <span>Empresa</span><strong>{selectedWelcome.company || "sem empresa"}</strong>
+                      <span>Responsável</span><strong>{selectedWelcome.responsible || "sem responsável"}</strong>
+                      <span>Site</span><strong>{selectedWelcome.site || "sem site"}</strong>
+                      <span>Instagram</span><strong>{selectedWelcome.instagram || "sem Instagram"}</strong>
+                      <span>Serviços</span><strong>{selectedWelcome.services || "sem serviços"}</strong>
+                      <span>Objetivos</span><strong>{selectedWelcome.goals || "sem objetivos"}</strong>
+                      <span>Orçamento</span><strong>{selectedWelcome.budget || "sem orçamento"}</strong>
+                      <span>Prazo</span><strong>{selectedWelcome.deadline || "sem prazo"}</strong>
+                      <span>Observações</span><strong>{selectedWelcome.notes || "sem observações"}</strong>
+                    </div>
+                  ) : (
+                    <div className="wbEmptyHint">Ainda não há briefing do Mugô Welcome vinculado.</div>
                   )}
                 </div>
 

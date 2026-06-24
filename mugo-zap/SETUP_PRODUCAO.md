@@ -108,6 +108,7 @@ DEFAULT_WORKSPACE_SLUG=mugo
 
 PANEL_API_KEY=chave-operacional-temporaria-ou-interna
 MUGO_INTELLIGENCE_WEBHOOK_SECRET=chave-forte-exclusiva-do-intelligence
+MUGO_WELCOME_WEBHOOK_SECRET=chave-forte-exclusiva-do-welcome
 VERIFY_TOKEN=token-webhook-whatsapp
 ALLOW_ORIGIN=https://URL-DO-FRONTEND
 
@@ -125,6 +126,7 @@ Importante:
 - Nunca exponha `SUPABASE_SERVICE_ROLE_KEY` no frontend.
 - `PANEL_API_KEY` deve ser forte e tratado como segredo. Se usado para bootstrap do primeiro Admin, remova ou troque depois.
 - `MUGO_INTELLIGENCE_WEBHOOK_SECRET` deve ser diferente de outras chaves e compartilhado somente com o Mugô Intelligence.
+- `MUGO_WELCOME_WEBHOOK_SECRET` deve ser diferente das demais chaves e compartilhado somente com o Mugô Welcome.
 - `ALLOW_ORIGIN` deve apontar para a URL real do frontend em producao.
 
 ### Frontend
@@ -405,6 +407,96 @@ Resultado esperado:
 - diagnóstico visivel na tela Diagnóstico e no painel lateral
 - evento `Diagnóstico Mugô Intelligence recebido` no histórico
 
+## 12. Integrar Mugô Welcome
+
+Endpoint de recebimento:
+
+```text
+POST https://URL-DO-BACKEND/api/integrations/mugo-welcome/lead
+```
+
+Header obrigatorio:
+
+```text
+X-Mugo-Welcome-Secret: valor-de-MUGO_WELCOME_WEBHOOK_SECRET
+```
+
+Payload esperado:
+
+```json
+{
+  "lead_id": "welcome_123",
+  "empresa": "Empresa do cliente",
+  "responsavel": "Nome do responsável",
+  "telefone": "+55 (11) 99999-9999",
+  "email": "cliente@empresa.com",
+  "cnpj": "00.000.000/0001-00",
+  "site": "https://empresa.com",
+  "instagram": "@empresa",
+  "servicos": "Social media, tráfego e automação",
+  "publico_alvo": "Empresas B2B",
+  "diferenciais": "Atendimento consultivo",
+  "objetivos": "Aumentar geração de leads qualificados",
+  "metricas": "Leads, CAC e taxa de conversão",
+  "tom_de_voz": "Consultivo e direto",
+  "concorrentes": "Concorrente A, Concorrente B",
+  "referencias": "https://referencia.com",
+  "frequencia": "3 posts por semana",
+  "desafios": "Falta de previsibilidade comercial",
+  "orcamento": "R$ 5.000/mês",
+  "prazo": "30 dias",
+  "observacoes": "Cliente já usa WhatsApp comercial.",
+  "origem_lead": "Mugô Welcome",
+  "utm_source": "welcome",
+  "utm_medium": "form",
+  "utm_campaign": "onboarding"
+}
+```
+
+Teste com `curl`:
+
+```bash
+export MUGO_WELCOME_WEBHOOK_SECRET="valor-configurado-no-backend"
+
+curl -X POST "https://URL-DO-BACKEND/api/integrations/mugo-welcome/lead" \
+  -H "Content-Type: application/json" \
+  -H "X-Mugo-Welcome-Secret: $MUGO_WELCOME_WEBHOOK_SECRET" \
+  -d '{
+    "lead_id": "welcome-teste-001",
+    "empresa": "Empresa Teste",
+    "responsavel": "Lead Teste",
+    "telefone": "+55 (11) 99999-9999",
+    "email": "lead.teste@empresa.com",
+    "site": "https://empresa-teste.com",
+    "instagram": "@empresateste",
+    "servicos": "Automação comercial com WhatsApp",
+    "objetivos": "Responder leads mais rápido",
+    "orcamento": "R$ 5.000/mês",
+    "prazo": "30 dias",
+    "observacoes": "Briefing teste recebido pelo Mugô Welcome.",
+    "origem_lead": "Mugô Welcome",
+    "utm_source": "welcome",
+    "utm_medium": "form",
+    "utm_campaign": "teste"
+  }'
+```
+
+Resultado esperado:
+
+- `ok = true`
+- contato criado ou atualizado
+- conversa vinculada pelo `wa_id` ou telefone, quando existir
+- status `Briefing recebido`
+- `automation_stage = welcome_completed`
+- bloco `Briefing Welcome` visivel no painel lateral
+- evento `Briefing Mugô Welcome recebido` no histórico
+
+Erros esperados:
+
+- `401`: secret ausente ou invalido.
+- `400`: telefone ausente.
+- `422`: payload invalido.
+
 Observacoes operacionais:
 
 - O webhook exige `X-Mugo-Webhook-Secret` valido; sem ele a resposta e `401`.
@@ -413,7 +505,7 @@ Observacoes operacionais:
 - Reenvios do webhook sao seguros: o endpoint atualiza a conversa existente pelo telefone/`wa_id` e preserva o ultimo diagnostico recebido.
 - Acoes sensiveis de cobranca e gestao de usuarios continuam bloqueadas para perfis sem permissao, mesmo que o cliente tente chamar as APIs diretamente.
 
-## 12. Checklist de producao
+## 13. Checklist de producao
 
 - [ ] Supabase configurado.
 - [ ] Migration `20260624_profiles_permissions.sql` aplicada.
@@ -429,8 +521,11 @@ Observacoes operacionais:
 - [ ] URL do backend configurada em `VITE_API_URL`.
 - [ ] WhatsApp webhook configurado.
 - [ ] Webhook do Mugô Intelligence configurado.
+- [ ] Webhook do Mugô Welcome configurado.
 - [ ] `MUGO_INTELLIGENCE_WEBHOOK_SECRET` configurado no backend.
+- [ ] `MUGO_WELCOME_WEBHOOK_SECRET` configurado no backend.
 - [ ] Header `X-Mugo-Webhook-Secret` configurado no Mugô Intelligence.
+- [ ] Header `X-Mugo-Welcome-Secret` configurado no Mugô Welcome.
 - [ ] `WHATSAPP_TOKEN` configurado.
 - [ ] `WHATSAPP_PHONE_NUMBER_ID` configurado.
 - [ ] Variaveis de ambiente revisadas.
@@ -444,8 +539,9 @@ Observacoes operacionais:
 - [ ] Gestao de usuarios bloqueada para Gestor e Atendimento.
 - [ ] Arquivamento/remocao bloqueado para Gestor e Atendimento.
 - [ ] Diagnóstico do Mugô Intelligence caindo automaticamente na conversa correta.
+- [ ] Briefing do Mugô Welcome caindo automaticamente no bloco correto.
 
-## 13. Comandos de validacao final
+## 14. Comandos de validacao final
 
 Execute da raiz do repo:
 

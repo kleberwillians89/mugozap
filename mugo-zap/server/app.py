@@ -36,6 +36,7 @@ VERIFY_TOKEN = (os.getenv("WHATSAPP_VERIFY_TOKEN") or os.getenv("VERIFY_TOKEN") 
 ALLOW_ORIGIN = (os.getenv("ALLOW_ORIGIN") or "").strip()
 PANEL_API_KEY = (os.getenv("PANEL_API_KEY") or "").strip()
 MUGO_INTELLIGENCE_WEBHOOK_SECRET = (os.getenv("MUGO_INTELLIGENCE_WEBHOOK_SECRET") or "").strip()
+MUGO_WELCOME_WEBHOOK_SECRET = (os.getenv("MUGO_WELCOME_WEBHOOK_SECRET") or "").strip()
 
 SUPABASE_URL = (os.getenv("SUPABASE_URL") or "").strip().rstrip("/")
 SUPABASE_SERVICE_ROLE_KEY = (os.getenv("SUPABASE_SERVICE_ROLE_KEY") or "").strip()
@@ -355,6 +356,7 @@ from services.followup import process_followups
 from services.workspace import build_default_workspace, ensure_default_workspace, resolve_workspace_id
 from services.central_attendance import (
     WELCOME_MESSAGE,
+    build_welcome_summary,
     QUEUE_OPTIONS,
     STATUS_OPTIONS,
     build_collection_reminder_message,
@@ -637,6 +639,87 @@ def _find_conversation_by_phone(phone: str, workspace_id: str = "") -> Dict[str,
             if any(candidate.endswith(suffix) or suffix.endswith(candidate) for suffix in suffixes):
                 return item
     return None
+
+
+def _load_flow_dict(value: Any) -> Dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            return {}
+    return {}
+
+
+def _should_send_intelligence_invite(user: Dict[str, Any], flow_data: Dict[str, Any]) -> tuple[bool, str]:
+    status = str((user or {}).get("status") or (user or {}).get("stage") or "").strip().lower()
+    automation_stage = str((user or {}).get("automation_stage") or (flow_data or {}).get("automation_stage") or "").strip()
+    if (user or {}).get("welcome_sent_at") or (flow_data or {}).get("welcome_sent_at"):
+        return False, "welcome_already_sent"
+    if _conversation_owner(user):
+        return False, "has_human_owner"
+    if status == "diagnóstico concluído" or automation_stage == "intelligence_completed":
+        return False, "diagnosis_completed"
+    return True, "ok"
+
+
+def _send_intelligence_invite_if_needed(
+    wa_id: str,
+    user: Dict[str, Any],
+    *,
+    workspace_id: str = "",
+    cid: str = "",
+) -> bool:
+    flow_data = _flow_data(wa_id, workspace_id=workspace_id)
+    should_send, reason = _should_send_intelligence_invite(user, flow_data)
+    if not should_send:
+        _log_outbound_skipped(cid or "webhook", wa_id, f"intelligence_invite:{reason}")
+        return False
+
+    sent_at = _now_iso()
+    ok = safe_send(
+        wa_id,
+        WELCOME_MESSAGE,
+        meta={"event": "mugo_intelligence_invite", "cid": cid, "src": "whatsapp_new_lead"},
+        workspace_id=workspace_id,
+        cid=cid,
+    )
+    if not ok:
+        _log_outbound_skipped(cid or "webhook", wa_id, "send_failed:intelligence_invite")
+        return False
+
+    merged_flow = {
+        **flow_data,
+        "welcome_sent_at": sent_at,
+        "intelligence_sent_at": sent_at,
+        "automation_stage": "intelligence_sent",
+        "last_bot_text": WELCOME_MESSAGE[:900],
+        "last_bot_at": sent_at,
+        "last_bot_step": "intelligence_invite",
+        "current_step": "intelligence_invite",
+    }
+    upsert_user(
+        wa_id,
+        workspace_id=workspace_id,
+        first_message_sent=True,
+        status="Diagnóstico enviado",
+        stage="Diagnóstico enviado",
+        lead_stage="diagnostico_enviado",
+        source=(user or {}).get("source") or "WhatsApp",
+        last_source=(user or {}).get("last_source") or "WhatsApp",
+        origem_lead="WhatsApp",
+        fila="Novos leads",
+        automation_stage="intelligence_sent",
+        welcome_sent_at=sent_at,
+        intelligence_sent_at=sent_at,
+        flow_data=merged_flow,
+        last_out_at=sent_at,
+        last_text=WELCOME_MESSAGE[:900],
+        last_at=sent_at,
+    )
+    return True
 
 
 def _actor_names(user: Dict[str, Any] | None) -> set[str]:
@@ -3738,6 +3821,8 @@ async def api_mugo_intelligence_lead(
         **existing_flow,
         "diagnosis_summary": diagnosis,
         "attendance_summary": summary,
+        "automation_stage": "intelligence_completed",
+        "intelligence_completed_at": _now_iso(),
         "mugo_intelligence": {
             "lead_id": diagnosis.get("lead_id") or payload.get("lead_id") or "",
             "received_at": _now_iso(),
@@ -3765,12 +3850,20 @@ async def api_mugo_intelligence_lead(
         notes=diagnosis.get("summary") or "Diagnóstico Mugô Intelligence recebido",
         source="Mugô Intelligence",
         last_source=diagnosis.get("origin") or payload.get("origem_lead") or "Mugô Intelligence",
+        origem_lead=diagnosis.get("origin") or payload.get("origem_lead") or "Mugô Intelligence",
+        fila="Novos leads",
         campaign=diagnosis.get("utm_campaign") or payload.get("utm_campaign") or "",
         tags=tags,
         lead_score=_score_int(diagnosis.get("score_overall")),
         lead_temperature=temperature,
         lead_theme=diagnosis.get("opportunity") or recommended_service or "diagnóstico",
         priority=3 if temperature == "Quente" else 2 if temperature == "Morno" else 1,
+        automation_stage="intelligence_completed",
+        diagnosis_summary=diagnosis,
+        score_geral=diagnosis.get("score_overall") or "",
+        temperatura=temperature,
+        principal_oportunidade=diagnosis.get("opportunity") or "",
+        servico_mugo_recomendado=recommended_service or "",
         flow_data=flow_data,
         entry_type="mugo_intelligence",
         inbound_type="mugo_intelligence",
@@ -3797,6 +3890,116 @@ async def api_mugo_intelligence_lead(
         "matched_existing_conversation": bool(matched_conv),
         "contact": upserted,
         "diagnosis": diagnosis,
+    }
+
+
+@app.post("/api/integrations/mugo-welcome/lead")
+async def api_mugo_welcome_lead(
+    request: Request,
+    x_mugo_welcome_secret: str = Header(None, alias="X-Mugo-Welcome-Secret"),
+    x_workspace_id: str = Header(None, alias="X-Workspace-Id"),
+):
+    if not MUGO_WELCOME_WEBHOOK_SECRET:
+        raise HTTPException(status_code=500, detail="Mugô Welcome webhook secret not configured")
+    if not x_mugo_welcome_secret or not hmac.compare_digest(
+        str(x_mugo_welcome_secret),
+        MUGO_WELCOME_WEBHOOK_SECRET,
+    ):
+        raise HTTPException(status_code=401, detail="Invalid webhook secret")
+
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(status_code=422, detail="Invalid payload")
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=422, detail="Invalid payload")
+
+    summary = build_welcome_summary(payload)
+    phone = _normalize_integration_phone(summary.get("phone") or payload.get("wa_id") or payload.get("telefone"))
+    if not phone:
+        raise HTTPException(status_code=400, detail="Missing telefone")
+
+    workspace_id = resolve_workspace_id(explicit_workspace_id=x_workspace_id) or build_default_workspace().get("id")
+    matched_conv = _find_conversation_by_phone(phone, workspace_id=workspace_id)
+    wa_id = normalize_wa_id((matched_conv or {}).get("wa_id") or phone)
+    existing_flow = _load_flow_dict((matched_conv or {}).get("flow_data"))
+    received_at = _now_iso()
+    flow_data = {
+        **existing_flow,
+        "welcome_summary": summary,
+        "briefing_summary": summary,
+        "automation_stage": "welcome_completed",
+        "welcome_completed_at": received_at,
+        "mugo_welcome": {
+            "lead_id": summary.get("lead_id") or payload.get("lead_id") or "",
+            "received_at": received_at,
+            "payload": payload,
+        },
+    }
+
+    contact_name = summary.get("responsible") or (matched_conv or {}).get("name") or summary.get("company") or "Lead Mugô Welcome"
+    upserted = upsert_user(
+        wa_id,
+        workspace_id=workspace_id,
+        name=contact_name,
+        telefone=phone,
+        company=summary.get("company") or (matched_conv or {}).get("company") or "",
+        email=summary.get("email") or (matched_conv or {}).get("email") or "",
+        instagram=summary.get("instagram") or (matched_conv or {}).get("instagram") or "",
+        site=summary.get("site") or (matched_conv or {}).get("site") or "",
+        service=summary.get("services") or (matched_conv or {}).get("service") or "",
+        service_interest=summary.get("services") or (matched_conv or {}).get("service_interest") or "",
+        responsavel=summary.get("responsible") or "",
+        cnpj=summary.get("cnpj") or "",
+        publico_alvo=summary.get("target_audience") or "",
+        diferenciais=summary.get("differentials") or "",
+        objetivos=summary.get("goals") or "",
+        metricas=summary.get("metrics") or "",
+        tom_de_voz=summary.get("voice_tone") or "",
+        concorrentes=summary.get("competitors") or "",
+        referencias=summary.get("references") or "",
+        frequencia=summary.get("frequency") or "",
+        desafios=summary.get("challenges") or "",
+        orcamento=summary.get("budget") or "",
+        prazo=summary.get("deadline") or "",
+        notes=summary.get("notes") or "Briefing Mugô Welcome recebido",
+        status="Briefing recebido",
+        stage="Briefing recebido",
+        lead_stage="briefing_recebido",
+        source="Mugô Welcome",
+        last_source=summary.get("origin") or payload.get("origem_lead") or "Mugô Welcome",
+        origem_lead=summary.get("origin") or payload.get("origem_lead") or "Mugô Welcome",
+        fila="Novos leads",
+        campaign=summary.get("utm_campaign") or payload.get("utm_campaign") or "",
+        automation_stage="welcome_completed",
+        welcome_summary=summary,
+        briefing_summary=summary,
+        flow_data=flow_data,
+        entry_type="mugo_welcome",
+        inbound_type="mugo_welcome",
+        last_at=received_at,
+        last_text="Briefing Mugô Welcome recebido",
+    )
+
+    log_message(
+        wa_id,
+        "out",
+        "Briefing Mugô Welcome recebido",
+        meta={
+            "src": "mugo_welcome",
+            "event": "briefing_received",
+            "lead_id": summary.get("lead_id") or payload.get("lead_id") or "",
+            "matched_existing_conversation": bool(matched_conv),
+        },
+        workspace_id=workspace_id,
+    )
+
+    return {
+        "ok": True,
+        "wa_id": wa_id,
+        "matched_existing_conversation": bool(matched_conv),
+        "contact": upserted,
+        "briefing": summary,
     }
 
 
@@ -4470,6 +4673,7 @@ async def _process_webhook_payload(data: dict, cid: str):
         tracking = _extract_source_campaign_from_message(msg, user_text)
         entry_type = _infer_entry_type(tracking.get("source"), tracking.get("campaign"), msg_type)
         attendance_mode = _infer_attendance_mode(tracking.get("source"), tracking.get("campaign"))
+        existing_conv = _find_conversation_by_phone(wa_id, workspace_id=workspace_id) or {}
 
         user = upsert_user(
             wa_id,
@@ -4477,14 +4681,20 @@ async def _process_webhook_payload(data: dict, cid: str):
             telefone=telefone,
             workspace_id=workspace_id,
             assigned_to=DEFAULT_ASSIGNEE,
-            stage="Novo",
-            lead_stage="novo",
-            source=tracking.get("source") or None,
-            last_source=tracking.get("source") or None,
+            stage=existing_conv.get("stage") or "Novo",
+            status=existing_conv.get("status") or None,
+            lead_stage=existing_conv.get("lead_stage") or "novo",
+            source=existing_conv.get("source") or tracking.get("source") or "WhatsApp",
+            last_source=tracking.get("source") or existing_conv.get("last_source") or "WhatsApp",
+            origem_lead=existing_conv.get("origem_lead") or "WhatsApp",
+            fila=existing_conv.get("fila") or "Novos leads",
             campaign=tracking.get("campaign") or None,
             entry_type=entry_type,
             inbound_type=entry_type,
             attendance_mode=attendance_mode,
+            welcome_sent_at=existing_conv.get("welcome_sent_at") or None,
+            intelligence_sent_at=existing_conv.get("intelligence_sent_at") or None,
+            automation_stage=existing_conv.get("automation_stage") or None,
         )
 
         resolved_name = _display_name(user, name, telefone, wa_id)
@@ -4519,6 +4729,29 @@ async def _process_webhook_payload(data: dict, cid: str):
             },
             event="state_change",
         )
+
+        if not choice_id:
+            invitation_user = {
+                **user,
+                "assigned_to": existing_conv.get("assigned_to") or existing_conv.get("human_owner") or existing_conv.get("owner") or "",
+                "human_owner": existing_conv.get("human_owner") or "",
+                "owner": existing_conv.get("owner") or "",
+                "status": existing_conv.get("status") or user.get("status"),
+                "stage": existing_conv.get("stage") or user.get("stage"),
+                "automation_stage": existing_conv.get("automation_stage") or user.get("automation_stage"),
+                "welcome_sent_at": existing_conv.get("welcome_sent_at") or user.get("welcome_sent_at"),
+            }
+            if _send_intelligence_invite_if_needed(wa_id, invitation_user, workspace_id=workspace_id, cid=cid):
+                print(f"[{cid}] WEBHOOK:intelligence_invite_sent wa_id={wa_id}")
+                return
+
+            latest_flow = _flow_data(wa_id, workspace_id=workspace_id)
+            latest_stage = str((user or {}).get("automation_stage") or latest_flow.get("automation_stage") or "").strip()
+            latest_status = str((user or {}).get("status") or "").strip().lower()
+            if latest_stage == "intelligence_sent" and latest_status != "diagnóstico concluído":
+                print(f"[{cid}] WEBHOOK:intelligence_invite_already_sent_skip_bot wa_id={wa_id}")
+                _log_outbound_skipped(cid, wa_id, "waiting_for_intelligence")
+                return
 
         ai_state = await get_ai_state(wa_id, workspace_id=workspace_id) or {}
         normalized_choice = sales_brain.normalize_inbound_choice(
